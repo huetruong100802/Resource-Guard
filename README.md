@@ -65,18 +65,22 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 git clone https://github.com/huetruong100802/Resource-Guard.git
 cd Resource-Guard
 
-$rm = ".\scripts\resource-manager.ps1"
-& $rm serve          # in URL http://localhost:8765/ và mở trình duyệt; Ctrl+C để dừng
+.\rg start           # chạy ngầm (nếu chưa chạy) và mở giao diện http://localhost:8765/
+.\rg status          # đang chạy hay dừng, URL, tự dọn, tự chạy cùng Windows
+.\rg stop            # dừng êm (hoặc bấm "Thoát Resource Guard" ở góc dưới thanh bên của giao diện)
 ```
 
-Chạy ngầm, tự khởi động cùng Windows:
+Dùng hằng ngày, một lần cho mỗi máy:
 
 ```powershell
-& $rm serve -Detach              # chạy ẩn, in URL rồi trả terminal
-& $rm serve stop                 # dừng bản chạy ngầm
-& $rm serve setpin               # đặt PIN (chỉ ở console tương tác) cho chế độ tự dọn "Bật"
-.\scripts\Install-Watcher.ps1    # tự chạy ngầm mỗi lần đăng nhập; thêm -Uninstall để gỡ
+.\rg shortcut        # lối tắt "Resource Guard" ở Start Menu: bấm là chạy ngầm + mở giao diện (thêm -Desktop để có ở màn hình nền)
+.\rg autostart on    # tự chạy ngầm mỗi lần đăng nhập Windows (off để tắt)
+.\rg path            # thêm thư mục này vào PATH người dùng để gõ "rg ..." ở bất kỳ đâu (mở terminal mới sau khi thêm)
+.\rg pin             # đặt PIN (chỉ ở console tương tác) cho chế độ tự dọn "Bật"
+.\rg run             # chạy ngay trong cửa sổ này (Ctrl+C để dừng), không chạy ngầm
 ```
+
+`rg stop` dừng êm: đóng cổng, nhả khoá, huỷ lượt quét ổ/agent đang chạy. Nếu đang có lượt **dọn/khôi phục/tự dọn** chưa xong, app từ chối thoát để không bỏ dở thao tác xoá (`rg stop -Force` mới buộc dừng). Lưu ý **tự dọn nền chỉ hoạt động khi app đang chạy**. Các lệnh cũ `resource-manager.ps1 serve ...` vẫn dùng được.
 
 Trạng thái được lưu tại `%AGENT_RESOURCE_HOME%` (mặc định `~/.agent-resource`).
 

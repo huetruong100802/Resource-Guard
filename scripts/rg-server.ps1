@@ -5,9 +5,9 @@
 # Giám sát realtime (SSE) + quản lý dọn dẹp: quét ổ đĩa, chính sách giữ/dọn, tự dọn nền, nhờ agent đánh giá.
 # Mọi thao tác xoá/kill đi qua Invoke-RgApply (allowlist + revalidate); client chỉ gửi key, không gửi đường dẫn.
 [CmdletBinding()]
-param([int]$Port = 8765, [switch]$NoOpen, [switch]$NoToast, [switch]$Detach, [switch]$Stop)
+param([int]$Port = 8765, [switch]$NoOpen, [switch]$NoToast, [switch]$Detach, [switch]$Stop, [switch]$Force)
 $ErrorActionPreference = 'Stop'
-$argNoToast = [bool]$NoToast; $argPort = $Port; $argNoOpen = [bool]$NoOpen; $argDetach = [bool]$Detach; $argStop = [bool]$Stop
+$argNoToast = [bool]$NoToast; $argPort = $Port; $argNoOpen = [bool]$NoOpen; $argDetach = [bool]$Detach; $argStop = [bool]$Stop; $argForce = [bool]$Force
 . (Join-Path $PSScriptRoot 'rg-watcher.ps1')   # nạp hàm (rg-watcher tự return khi bị dot-source)
 . (Join-Path $PSScriptRoot 'rg-policy.ps1')
 . (Join-Path $PSScriptRoot 'rg-agent.ps1')
@@ -32,10 +32,29 @@ function Get-RgLiveInfo {   # trả server.json chỉ khi process đó còn số
 # ---------- Stop / Detach (chạy ở process gọi, không vào server) ----------
 if ($argStop) {
     $i = Get-RgLiveInfo
-    if (-not $i) { 'Không có server đang chạy.'; return }
-    Stop-Process -Id ([int]$i.pid) -Force
+    if (-not $i) { Remove-Item -LiteralPath $script:InfoPath -Force -ErrorAction SilentlyContinue; 'Không có server đang chạy.'; return }
+    $procId = [int]$i.pid
+    $graceful = $false
+    if (-not $argForce) {
+        # Dừng êm qua API: đóng listener, nhả mutex, huỷ job chỉ-đọc. Từ chối nếu đang dọn/xoá dở.
+        try {
+            $r = Invoke-RestMethod -Method Post -Uri ($i.url + 'api/shutdown') -Headers @{ 'X-RG-Client' = 'ui' } -ContentType 'application/json' -Body '{}' -TimeoutSec 5
+            $graceful = [bool]$r.ok
+        } catch {
+            $body = $null
+            try { $body = ConvertFrom-Json ([string]$_.ErrorDetails.Message) } catch { }
+            if ($body -and $body.busy) { "Chưa dừng: $($body.error) Chờ xong rồi chạy lại, hoặc dùng -Force để buộc dừng."; return }
+        }
+        if ($graceful) {
+            try { Wait-Process -Id $procId -Timeout 10 -ErrorAction Stop } catch { }
+        }
+    }
+    if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+        $how = if ($argForce) { 'buộc dừng' } else { 'không phản hồi nên buộc dừng' }
+    } else { $how = 'dừng êm' }
     Remove-Item -LiteralPath $script:InfoPath -Force -ErrorAction SilentlyContinue
-    "Đã dừng server (pid $($i.pid))."
+    "Đã dừng Resource Guard ($how, pid $procId)."
     return
 }
 
@@ -55,7 +74,7 @@ if ($argDetach) {
     for ($k = 0; $k -lt 40; $k++) {
         Start-Sleep -Milliseconds 250
         $i = Get-RgLiveInfo
-        if ($i) { "Resource Guard chạy ngầm: $($i.url)  (pid $($i.pid)). Dừng: rg-server.ps1 -Stop"; if (-not $argNoOpen) { Start-Process $i.url }; return }
+        if ($i) { "Resource Guard chạy ngầm: $($i.url)  (pid $($i.pid)). Dừng: nút ""Thoát Resource Guard"" trên giao diện, hoặc rg stop"; if (-not $argNoOpen) { Start-Process $i.url }; return }
     }
     throw 'Server không lên sau 10 giây; xem logs\rg-*.jsonl.'
 }
@@ -108,6 +127,19 @@ function Start-RgJob([string]$Script, [string[]]$ScriptArgs = @()) {
 function Test-RgJobRunning([string]$File) {
     $j = Get-RgJobState $File
     return [bool]($j -and $j.status -eq 'running')
+}
+
+# Job chỉ-đọc (quét ổ, quét ứng viên, agent): huỷ cả cây tiến trình khi thoát. Job ghi (dọn/khôi phục/tự dọn) không bao giờ bị huỷ ở đây.
+function Stop-RgReadOnlyJobs {
+    foreach ($f in @('scan-breakdown.progress.json', 'scan-candidates.progress.json', 'agent.progress.json')) {
+        $j = Get-RgJobState $f
+        if (-not ($j -and $j.status -eq 'running' -and $j.pid)) { continue }
+        $p = Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue
+        if (-not $p -or @('pwsh', 'powershell') -notcontains $p.ProcessName) { continue }   # chống PID bị tái sử dụng
+        & taskkill.exe /PID ([int]$j.pid) /T /F 2>&1 | Out-Null
+        $j.status = 'error'; $j.message = 'đã huỷ vì Resource Guard thoát'
+        try { Write-RgJobState $f $j } catch { }
+    }
 }
 
 function Read-RgStateText([string]$Name) {
@@ -168,7 +200,7 @@ Write-Host ''
 Write-Host "  Resource Guard đang chạy (tự dọn: $((Get-RgPolicy).mode))" -ForegroundColor Green
 Write-Host "  UI realtime : $url" -ForegroundColor Cyan
 Write-Host "  Cài đặt     : ${url}#settings    (chu kỳ lấy mẫu hiện tại: $((Get-RgSettings).intervalSec)s)"
-Write-Host "  Dừng        : Ctrl+C trong terminal này"
+Write-Host "  Dừng        : nút ""Thoát Resource Guard"" trên giao diện, hoặc Ctrl+C trong terminal này (đóng cửa sổ này cũng dừng app)"
 Write-Host ''
 if (-not $argNoOpen) { try { Start-Process $url } catch { } }
 
@@ -176,12 +208,13 @@ if (-not $argNoOpen) { try { Start-Process $url } catch { } }
 
 $sse = New-Object System.Collections.ArrayList
 $script:AutoSpawnedAt = [datetime]::MinValue
+$script:StopRequested = $false
 $live = $null
 $nextSample = [datetime]::MinValue
 $nextBeat = (Get-Date).AddSeconds(10)
 $accept = $listener.GetContextAsync()
 try {
-    while ($listener.IsListening) {
+    while ($listener.IsListening -and -not $script:StopRequested) {
         $got = $false
         try { $got = $accept.Wait(200) } catch { $accept = $listener.GetContextAsync(); Start-Sleep -Milliseconds 200 }
         if ($got) {
@@ -194,6 +227,18 @@ try {
                 elseif ($path -eq '/' -or $path -eq '/index.html') {
                     $f = Join-Path $script:UiDir 'index.html'
                     Send-Bytes $ctx 200 'text/html; charset=utf-8' ([IO.File]::ReadAllBytes($f))
+                }
+                elseif ($path -eq '/api/shutdown' -and $req.HttpMethod -eq 'POST') {
+                    $busyNames = @()
+                    if (Test-RgJobRunning 'cleanup.progress.json') { $busyNames += 'dọn dẹp/khôi phục' }
+                    if (Test-RgJobRunning 'auto.progress.json') { $busyNames += 'tự dọn' }
+                    if ($busyNames.Count) {
+                        Send-Json $ctx ([ordered]@{ ok = $false; busy = $true; error = 'Đang có lượt ' + ($busyNames -join ' và ') + ' chưa xong; thoát lúc này có thể bỏ dở thao tác xoá.' }) 409
+                    } else {
+                        Stop-RgReadOnlyJobs
+                        Send-Json $ctx ([ordered]@{ ok = $true })
+                        $script:StopRequested = $true
+                    }
                 }
                 elseif ($path -eq '/api/state') { Send-Json $ctx $live }
                 elseif ($path -eq '/api/history') { Send-Json $ctx @(Read-RgMetricsTail 480) }
@@ -407,7 +452,7 @@ try {
     }
 }
 finally {
-    Write-RgLog 'server-stop' ([ordered]@{ pid = $PID })
+    Write-RgLog 'server-stop' ([ordered]@{ pid = $PID; reason = $(if ($script:StopRequested) { 'ui-or-cli' } else { 'ctrl-c-or-error' }) })
     foreach ($c in @($sse.ToArray())) { try { $c.Close() } catch { } }
     try { $listener.Stop(); $listener.Close() } catch { }
     Remove-Item -LiteralPath $script:InfoPath -Force -ErrorAction SilentlyContinue
