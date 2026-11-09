@@ -103,11 +103,11 @@ Thêm `-Json` vào lệnh để lấy đầu ra máy-đọc. Các script lẻ (`
 
 | Tab | Chức năng |
 |---|---|
-| **Tổng quan** | Thẻ RAM/CPU/commit/ổ đĩa theo ngưỡng, 4 biểu đồ realtime, trạng thái tự dọn, sự kiện gần đây. |
+| **Tổng quan** | Thẻ RAM/CPU/commit và **mỗi ổ đĩa một thẻ + một biểu đồ** theo ngưỡng, biểu đồ realtime, trạng thái tự dọn, sự kiện gần đây. |
 | **CPU & Tiến trình** | Kiểu Task Manager: đồ thị CPU, từng nhân logic, bảng tiến trình (gộp theo tên/từng PID, sắp xếp, lọc) và nút khiên để bảo vệ tiến trình khỏi tự dọn. |
-| **Ổ đĩa** | Biểu đồ tròn theo nhóm + liệt kê đầy đủ nhân tố (hoặc top 80). Quét ~1–2 phút ở process riêng, chỉ đọc. |
+| **Ổ đĩa** | Chọn ổ ở thanh tab (khi có từ 2 ổ), biểu đồ tròn theo nhóm + liệt kê đầy đủ nhân tố (hoặc top 80). Quét từng ổ ~1–2 phút ở process riêng, chỉ đọc; mỗi lần quét một ổ. |
 | **Dọn dẹp** | Ứng viên dọn → tick chọn → xác nhận → `plan → approve → apply`. UI chỉ gửi *key*, không bao giờ gửi đường dẫn. |
-| **Chính sách tự động** | Tắt / Chạy thử / Bật; mỗi nhóm *Tự động / Hỏi tay / Luôn giữ*; thứ tự ưu tiên; vùng bảo vệ (thư mục + tên tiến trình). |
+| **Chính sách tự động** | Tắt / Chạy thử / Bật; ghi đè ngưỡng kích hoạt và mức trống mục tiêu **theo từng ổ**; mỗi nhóm *Tự động / Hỏi tay / Luôn giữ*; thứ tự ưu tiên; vùng bảo vệ (thư mục + tên tiến trình). |
 | **Agent đánh giá** | Xem trước chính xác dữ liệu sẽ gửi, nhận tóm tắt, phát hiện, gợi ý theo ưu tiên và gợi ý chính sách. |
 | **Cài đặt** | Chu kỳ lấy mẫu (2–300 giây), ngưỡng, giao diện sáng/tối/theo hệ thống. |
 
@@ -141,6 +141,15 @@ Mặc định chế độ tự động là **Tắt**. Khi `serve` đang chạy v
 | **Bật** | Xoá thật theo chính sách. Cần PIN để bật hoặc nới lỏng; siết thêm bảo vệ thì không cần PIN. |
 
 Các tham số: ngưỡng kích hoạt (ổ đĩa → dọn file, RAM → kết thúc tiến trình agent), thời gian nghỉ giữa hai lượt, tối đa GB mỗi lượt, ngưỡng dừng, số tiến trình tối đa mỗi lượt. Chính sách nằm ở `state\policy.json`, kết quả lượt gần nhất ở `state\auto-last.json`.
+
+### Nhiều ổ đĩa
+
+Tool giám sát mọi ổ **cố định** (Fixed) đã sẵn sàng; ổ USB/mạng/ổ CD bị bỏ qua. Mỗi ổ có trạng thái riêng, trạng thái chung của máy là mức xấu nhất. Tự dọn đánh giá **từng ổ**: ổ nào chạm ngưỡng thì chỉ chọn mục nằm trên ổ đó, dừng khi ổ đó đủ `targetFreeGB`, và giới hạn `maxGBPerRun` tính riêng cho từng ổ.
+
+- Chính sách: `drives` trong `policy.json`, ví dụ `{ "D": { "diskTrigger": "Caution", "targetFreeGB": 60 } }`. Thiếu khoá nào thì dùng giá trị chung. Nới lỏng ghi đè theo ổ cũng cần PIN khi chế độ là *Bật*.
+- Ngưỡng cảnh báo: `disk.drives.<X>` trong `config` (ghi đè `normalAboveGB`/`cautionFromGB` cho riêng ổ); `disk.exclude` loại ổ khỏi giám sát.
+- Thư mục mã nguồn: ngoài `cleanup.workspaceRoots`, tool tự nhận các thư mục tên `Work`, `Repositories`, `Repos`, `Source`, `Src`, `Projects`, `Dev`, `Code`, `Workspace` ở gốc các ổ không phải ổ hệ thống (`cleanup.autoRootNames` đổi danh sách tên, `cleanup.autoRoots: false` tắt hẳn).
+- Kết quả quét ổ lưu ở `state\scan-breakdown-<X>.json`.
 
 ## Agent đánh giá
 

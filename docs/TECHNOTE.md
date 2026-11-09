@@ -80,7 +80,8 @@ Kiểm thử UI bằng Edge headless qua CDP (`--screenshot` bị treo vì SSE n
 | Trường | Giá trị / ý nghĩa |
 |---|---|
 | `mode` | `off` (mặc định) · `dry-run` · `on` |
-| `diskTrigger` | `off` · `Caution` · `Critical` |
+| `diskTrigger` | `off` · `Caution` · `Critical` (giá trị chung cho mọi ổ) |
+| `drives` | `{ "D": { diskTrigger, targetFreeGB } }`: ghi đè theo ổ (chữ A–Z), thiếu khoá thì dùng giá trị chung; `targetFreeGB` kẹp 1..10000 |
 | `ramTrigger` | `off` · `Restricted` · `Critical` |
 | `cooldownMin`, `maxGBPerRun`, `targetFreeGB`, `maxKillsPerRun` | Giới hạn mỗi lượt, kẹp bởi `ConvertTo-RgPolicy` |
 | `categories` | `temp-entry`, `dotnet-artifact`, `cache-aged`, `node_modules`, `process` → `auto` / `ask` / `keep` |
@@ -89,6 +90,7 @@ Kiểm thử UI bằng Edge headless qua CDP (`--screenshot` bị treo vì SSE n
 | `protectProcesses` | Wildcard theo tên tiến trình |
 
 Luồng một lượt tự động: `Get-RgStressInfo` → `Select-RgAutoItems` → `Invoke-RgAutoRun`.
+- Theo ổ: `Get-RgStressInfo` trả `drives[] {drive, freeGB, totalGB, state, trigger, targetFreeGB, stress}`; `Select-RgAutoItems` tính nhu cầu và trần `maxGBPerRun` cho từng ổ (không có danh sách ổ thì quay về chế độ một ổ cũ). Trạng thái chung = xấu nhất các ổ (`Get-RgBudget`).
 - *Dry-run*: chỉ chọn và báo blocker, không xoá.
 - *Real*: `New-RgPlan` → `Set-RgPlanApproval -By policy` → `Invoke-RgApply`.
 - Nút "Chạy thử" dùng `-AssumeStress` để thử khi máy chưa tới ngưỡng.
@@ -126,8 +128,8 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
 
 ## 8. API (rút gọn)
 
-`GET /api/processes` · `/api/jobs` · `/api/disk` · `/api/candidates` · `/api/policy` · `/api/auto/last` · `/api/cleanup/last` · `/api/agent/{payload,last}`
-`POST /api/disk/scan` · `/api/candidates/scan` · `/api/cleanup/apply` · `/api/policy` · `/api/auto/run` · `/api/agent/run`
+`GET /api/processes` · `/api/jobs` · `/api/drives` (ổ + trạng thái + ngưỡng + chính sách hiệu lực + `workspaceRoots`) · `/api/disk?drive=X` · `/api/candidates` · `/api/policy` · `/api/auto/last` · `/api/cleanup/last` · `/api/agent/{payload,last}`
+`POST /api/disk/scan {drive}` (mỗi lần một ổ; ổ không hợp lệ bị từ chối) · `/api/candidates/scan` · `/api/cleanup/apply` · `/api/policy` · `/api/auto/run` · `/api/agent/run`
 Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-locked` · `pin-not-set`.
 
 ## 9. Bẫy đã gặp (đọc trước khi sửa code)
@@ -142,7 +144,10 @@ Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-lo
 | `return , @()` làm hàm trả `Object[]` lồng | `ConvertTo-RgStringList` kết thúc bằng `return $out.ToArray()` |
 | Tên hàm trùng alias PowerShell | Đặt tiền tố `Rg` |
 | Lỗi route làm đứt kết nối im lặng | `catch` log `route-error` và trả JSON 500 |
-| `msedge --screenshot` treo vì SSE | Dùng CDP qua node |
+| `msedge --screenshot` treo vì SSE | Dùng CDP qua node, hoặc Playwright (`channel: 'msedge'`) + `page.route('**/events', …)` để mock luồng SSE |
+| `[math]::Min(500, [math]::Max(0.1, x))` chọn overload `int` → 0.1 thành 0 | Dùng hằng double (`500.0`) |
+| PS 5.1: `ConvertFrom-Json` không trải mảng | `| ForEach-Object { $_ }` (đã áp dụng ở `Read-RgLedger`, `Read-RgArchives`) |
+| Máy chỉ có một ổ nên không kiểm được nhiều ổ thật | Test nhiều ổ dùng danh sách ổ giả (khối "nhiều ổ đĩa" trong `tests/Acceptance.ps1`) |
 
 ## 10. Giới hạn & việc có thể làm tiếp
 

@@ -24,6 +24,7 @@
     var a = S.agent && S.agent.ok && S.agent.result; if (!a) return null;
     return (a.recommendations || []).filter(function (r) { return r.key === key; })[0] || null;
   }
+  var CF = { drive: '' };   // lọc danh sách ứng viên theo ổ ('' = tất cả)
   function selectedItems() { return ((S.cands && S.cands.items) || []).filter(function (i) { return S.selected[i.key]; }); }
   function drawClean() {
     var el = $('#cleanBody'); if (!el) return;
@@ -34,19 +35,27 @@
     else if (c && c.finishedUtc) head += '<span class="small mut">Quét ' + RG.timeAgo(c.finishedUtc) + ' (' + c.seconds + ' giây)</span>';
     head += '</div>';
     if (!c || !c.finishedUtc) { el.innerHTML = head + '<div class="card empty">' + RG.icon('inbox') + '<h3>Chưa có danh sách ứng viên</h3><div>Quét sẽ tìm: file tạm cũ, bin/obj, node_modules lâu không mở, cache dev, tiến trình mồ côi của agent.</div></div>'; bindClean(); return; }
-    var items = c.items.slice().sort(function (a, b) { return (a.action === 'report') - (b.action === 'report') || a.level - b.level || b.sizeBytes - a.sizeBytes; });
+    var letters = {}; c.items.forEach(function (i) { if (i.drive) letters[i.drive] = (letters[i.drive] || 0) + 1; });
+    var multi = Object.keys(letters).length > 1;
+    if (!multi) CF.drive = '';
+    if (multi) {
+      var fo = [['', 'Tất cả (' + c.items.length + ')']].concat(Object.keys(letters).sort().map(function (L) { return [L, L + ': (' + letters[L] + ')']; }));
+      head += '<div class="field" style="margin-top:0"><span class="small mut">Lọc theo ổ:</span>' + seg('cdrive', CF.drive, fo) + '</div>';
+    }
+    var items = c.items.filter(function (i) { return !CF.drive || i.drive === CF.drive; }).sort(function (a, b) { return (a.action === 'report') - (b.action === 'report') || a.level - b.level || b.sizeBytes - a.sizeBytes; });
     var rows = items.map(function (i) {
       var dis = i.action === 'report' || i.protected, tgt = i.kind === 'process' ? (i.name + ' (pid ' + i.pid + ')') : i.path, rec = recFor(i.key);
       var recPill = rec ? ' <span class="pill ' + (rec.verdict === 'clean' ? 'auto' : (rec.verdict === 'keep' ? 'keep' : 'ask')) + '" title="' + esc(rec.reason) + ' (độ tin cậy: ' + esc(rec.confidence) + ')">Agent: ' + ({ clean: 'nên dọn', keep: 'nên giữ', review: 'xem lại' }[rec.verdict] || esc(rec.verdict)) + ' · P' + rec.priority + '</span>' : '';
       return '<tr class="row"><td class="chk"><input type="checkbox" data-key="' + i.key + '"' + (S.selected[i.key] ? ' checked' : '') + (dis ? ' disabled' : '') + ' aria-label="Chọn ' + esc(tgt) + '"></td>' +
         '<td><span class="pill">' + esc((KIND[i.kind] || {}).l || i.kind) + '</span></td>' +
+        (multi ? '<td class="mut">' + (i.drive ? esc(i.drive) + ':' : '–') + '</td>' : '') +
         '<td><span class="ellipsis mono" title="' + esc(tgt) + '">' + esc(tgt) + '</span>' + recPill + '<div class="small mut">' + esc(i.reason) + ' — <i>' + esc(i.risk) + '</i></div></td>' +
         '<td class="r num">' + (i.sizeBytes ? RG.fmtBytes(i.sizeBytes) : '–') + '</td><td class="r num mut">' + (i.ageDays ? RG.fmtAge(i.ageDays) : '–') + '</td>' +
         '<td>' + (i.action === 'report' ? (i.needsAdmin ? '<span class="pill ask" title="Xoá được sau khi bạn xác nhận UAC">cần quyền admin</span>' : '<span class="pill">chỉ báo cáo</span>') : (i.protected ? '<span class="pill keep">được bảo vệ</span>' : '<span class="pill ' + (i.canArchive ? 'ask' : i.setting) + '">' + ({ auto: 'tự động', ask: 'hỏi tay', keep: 'giữ' }[i.canArchive ? 'ask' : i.setting]) + '</span>' + (i.canArchive ? ' <span class="pill" title="Có thể nén zip cạnh mục rồi mới xoá">zip được</span>' : ''))) + '</td>' +
         '<td class="r"><button class="icon-btn ' + (i.protected ? 'on' : '') + '" data-prot="' + i.key + '" aria-pressed="' + !!i.protected + '" aria-label="' + (i.protected ? 'Bỏ bảo vệ' : 'Bảo vệ') + ' ' + esc(tgt) + '" title="' + (i.protected ? 'Bỏ bảo vệ' : 'Bảo vệ khỏi dọn') + '">' + RG.icon('shield') + '</button></td></tr>';
     }).join('');
     var sel = selectedItems(), selBytes = sel.reduce(function (a, i) { return a + (i.sizeBytes || 0); }, 0);
-    el.innerHTML = head + (items.length ? '<div class="card"><div class="tbl-wrap" style="max-height:none"><table class="cand"><thead><tr><th></th><th>Loại</th><th>Mục</th><th class="r">Dung lượng</th><th class="r">Không dùng</th><th>Chính sách</th><th class="r">Bảo vệ</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    el.innerHTML = head + (items.length ? '<div class="card"><div class="tbl-wrap" style="max-height:none"><table class="cand"><thead><tr><th></th><th>Loại</th>' + (multi ? '<th>Ổ</th>' : '') + '<th>Mục</th><th class="r">Dung lượng</th><th class="r">Không dùng</th><th>Chính sách</th><th class="r">Bảo vệ</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<p class="hint">Mục “được bảo vệ” nằm trong vùng bảo vệ của bạn nên không chọn được. Mục “chỉ báo cáo” (VHDX, tiến trình lạ) tool không bao giờ xoá. Xoá là vĩnh viễn, không qua Thùng rác.</p></div>' :
       '<div class="card empty">' + RG.icon('inbox') + '<h3>Không có ứng viên nào</h3><div>Máy đang gọn theo các tiêu chí hiện tại.</div></div>') + adminBox(items, crun) +
       '<div class="sticky-bar" ' + (sel.length || crun ? '' : 'hidden') + '><b class="num">' + sel.length + ' mục đã chọn</b><span class="mut">ước tính giải phóng ' + RG.fmtBytes(selBytes) + '</span><span style="flex:1"></span>' +
@@ -101,6 +110,7 @@
     var sc = $('#scanC'); if (sc) sc.onclick = function () { RG.startJob('/api/candidates/scan', {}, 'Bắt đầu quét ứng viên…'); };
     var ss = $('#selSafe'); if (ss) ss.onclick = function () { ((S.cands && S.cands.items) || []).forEach(function (i) { if (i.action === 'delete' && !i.protected && i.level <= 1) S.selected[i.key] = true; }); drawClean(); };
     var sn = $('#selNone'); if (sn) sn.onclick = function () { S.selected = {}; drawClean(); };
+    RG.$$('#cleanBody [data-set="cdrive"]').forEach(function (b) { b.onclick = function () { CF.drive = b.dataset.val; drawClean(); }; });
     RG.$$('#cleanBody input[data-key]').forEach(function (cb) { cb.onchange = function () { if (cb.checked) S.selected[cb.dataset.key] = true; else delete S.selected[cb.dataset.key]; drawClean(); }; });
     RG.$$('#cleanBody [data-prot]').forEach(function (b) {
       b.onclick = function () {
@@ -140,6 +150,12 @@
   function tags(list, type) {
     return '<div class="tags">' + (list.length ? list.map(function (x) { return '<span class="tag"><span class="mono">' + esc(x) + '</span><button data-rm="' + type + '" data-v="' + esc(x) + '" aria-label="Gỡ ' + esc(x) + '">×</button></span>'; }).join('') : '<span class="small mut">Chưa có.</span>') + '</div>';
   }
+  /* Ghi đè theo ổ: val rỗng/null = bỏ ghi đè (quay về giá trị chung); không còn khoá nào thì xoá cả mục của ổ. */
+  function setDrive(p, L, key, val) {
+    var o = p.drives[L] || {};
+    if (val == null) delete o[key]; else o[key] = val;
+    if (Object.keys(o).length) p.drives[L] = o; else delete p.drives[L];
+  }
   function markDirty() {
     S.dirty = JSON.stringify(S.draft) !== JSON.stringify(S.policy);
     var b = $('#polBar'); if (b) b.hidden = !S.dirty;
@@ -151,7 +167,9 @@
     if (!l) { el.innerHTML = h + '<p class="small mut">Chưa có lượt nào. “Chạy thử” cho bạn thấy engine SẼ chọn gì với chính sách hiện tại (giả định có áp lực), không xoá gì.</p>'; bindAuto(); return; }
     var rows = (l.items || []).map(function (r) { return '<tr><td>' + esc((KIND[r.kind] || {}).l || r.kind) + '</td><td><span class="ellipsis mono" title="' + esc(r.target) + '">' + esc(r.target) + '</span></td><td class="r num">' + (r.sizeBytes ? RG.fmtBytes(r.sizeBytes) : '') + '</td><td><span class="pill ' + (r.outcome === 'done' ? 'auto' : (r.outcome === 'failed' ? 'bad' : 'ask')) + '">' + (OUT[r.outcome] || esc(r.outcome)) + '</span></td><td class="small mut">' + esc(r.detail || '') + '</td></tr>'; }).join('');
     var sk = (l.skipped || []).map(function (r) { return '<tr><td>' + esc((KIND[r.kind] || {}).l || r.kind) + '</td><td><span class="ellipsis mono" title="' + esc(r.target) + '">' + esc(r.target) + '</span></td><td class="small mut">' + esc(r.reason) + '</td></tr>'; }).join('');
-    el.innerHTML = h + '<div class="small mut">Lượt ' + RG.timeAgo(l.finishedUtc) + ' · chế độ <b>' + esc(l.mode) + '</b> · kích hoạt: ' + esc(l.trigger) + ' · Ổ đĩa ' + esc(l.stress.diskState) + ' (' + l.stress.diskFreeGB + ' GB trống), RAM ' + esc(l.stress.ramState) + ' · ' + l.candidateCount + ' ứng viên · giải phóng ' + RG.fmtBytes(l.freedBytes) + '</div>' +
+    var sd = (l.stress.drives || []).filter(function (d) { return d && d.drive; });
+    var diskTxt = sd.length ? 'Ổ ' + sd.map(function (d) { return esc(d.drive) + ': ' + esc(d.state) + ' (' + d.freeGB + ' GB trống' + (d.stress ? ', có áp lực' : '') + ')'; }).join('; ') : 'Ổ đĩa ' + esc(l.stress.diskState) + ' (' + l.stress.diskFreeGB + ' GB trống)';
+    el.innerHTML = h + '<div class="small mut">Lượt ' + RG.timeAgo(l.finishedUtc) + ' · chế độ <b>' + esc(l.mode) + '</b> · kích hoạt: ' + esc(l.trigger) + ' · ' + diskTxt + ', RAM ' + esc(l.stress.ramState) + ' · ' + l.candidateCount + ' ứng viên · giải phóng ' + RG.fmtBytes(l.freedBytes) + '</div>' +
       (rows ? '<div class="tbl-wrap" style="margin-top:8px"><table><tbody>' + rows + '</tbody></table></div>' : '<p class="small mut">Không có mục nào được chọn.</p>') +
       (sk ? '<details style="margin-top:8px"><summary class="small" style="cursor:pointer">Mục bị bỏ qua (' + (l.skipped || []).length + ')</summary><div class="tbl-wrap" style="margin-top:6px"><table><tbody>' + sk + '</tbody></table></div></details>' : '');
     bindAuto();
@@ -160,6 +178,7 @@
   function drawPolicy() {
     var el = $('#polBody'); if (!el) return;
     var p = S.draft; if (!p) { el.innerHTML = '<div class="empty">Đang tải…</div>'; return; }
+    if (!p.drives || Array.isArray(p.drives)) p.drives = {};
     var noPin = p.mode === 'on' && !S.pinConfigured;
     var cats = (S.kinds || []).map(function (k) {
       var kd = KIND[k] || { l: k, d: '' };
@@ -169,6 +188,16 @@
       return '<div class="prio"><span class="n">' + (i + 1) + '</span><span style="flex:1">' + esc((KIND[k] || {}).l || k) + ' ' + (p.categories[k] ? '<span class="pill ' + p.categories[k] + '">' + ({ auto: 'tự động', ask: 'hỏi tay', keep: 'giữ' }[p.categories[k]]) + '</span>' : '') + '</span>' +
         '<button class="icon-btn" data-mv="' + i + '" data-d="-1" aria-label="Chuyển lên"' + (i === 0 ? ' disabled' : '') + '>' + RG.icon('up') + '</button><button class="icon-btn" data-mv="' + i + '" data-d="1" aria-label="Chuyển xuống"' + (i === p.priority.length - 1 ? ' disabled' : '') + '>' + RG.icon('down') + '</button></div>';
     }).join('');
+    var dl = RG.driveList();
+    var drvRows = dl.map(function (d) {
+      var o = p.drives[d.drive] || {}, st = d.state || 'Normal';
+      return '<tr><td><b>' + esc(d.drive) + ':</b>' + (d.label ? ' <span class="small mut">' + esc(d.label) + '</span>' : '') + '<div class="small mut">' + d.freeGB + ' GB trống' + (st !== 'Normal' ? ' · <span class="pill ' + (st === 'Critical' ? 'ask' : '') + '">' + esc(st) + '</span>' : '') + '</div></td>' +
+        '<td>' + seg('dtrig:' + d.drive, o.diskTrigger || '', [['', 'Theo chung (' + p.diskTrigger + ')'], ['off', 'Không'], ['Caution', 'Caution'], ['Critical', 'Critical']]) + '</td>' +
+        '<td class="r"><input type="number" min="1" max="10000" data-dnum="' + esc(d.drive) + '" value="' + (o.targetFreeGB != null ? o.targetFreeGB : '') + '" placeholder="' + p.targetFreeGB + '" aria-label="Dừng khi ổ ' + esc(d.drive) + ' đạt trống (GB)" style="width:90px"></td></tr>';
+    }).join('');
+    var roots = (S.roots || []).length ? '<p class="hint">Thư mục mã nguồn tool nhận diện (quét repo, bảo vệ khi xoá): <span class="mono">' + (S.roots || []).map(esc).join(' · ') + '</span>. Thư mục tên Work, Repositories, Source, Projects… trên các ổ khác tự được thêm.</p>' : '';
+    var drvCard = dl.length ? '<div class="card mt"><h2>Theo từng ổ đĩa</h2><table><thead><tr><th>Ổ</th><th>Kích hoạt từ mức</th><th class="r">Dừng khi trống (GB)</th></tr></thead><tbody>' + drvRows + '</tbody></table>' +
+      '<p class="hint">Mỗi ổ được đánh giá riêng: ổ nào chạm ngưỡng thì chỉ dọn mục nằm trên ổ đó, và dừng khi ổ đó đủ dung lượng trống. “Theo chung” dùng giá trị ở khung bên trên. Giới hạn “Tối đa mỗi lượt” tính riêng cho từng ổ.</p>' + roots + '</div>' : '';
     el.innerHTML =
       '<div class="grid g2"><div class="card"><h2>Chế độ tự động</h2>' + seg('mode', p.mode, [['off', 'Tắt'], ['dry-run', 'Chạy thử'], ['on', 'Bật']]) +
       '<p class="hint" style="margin-top:8px">' + esc(MODEHELP[p.mode]) + '</p>' +
@@ -182,6 +211,7 @@
       '<div class="field"><label for="fKill">Tối đa tiến trình kết thúc / lượt</label><input id="fKill" data-num="maxKillsPerRun" type="number" min="0" max="50" value="' + p.maxKillsPerRun + '"></div></div>' +
       '<div class="card"><h2>Từng nhóm: giữ hay dọn</h2><table><tbody>' + cats + '</tbody></table>' +
       '<p class="hint">“Tự động”: engine dọn khi có áp lực. “Hỏi tay”: chỉ xuất hiện ở tab Dọn dẹp để bạn chọn. “Luôn giữ”: không bao giờ đụng tới. File cá nhân (Downloads, Documents…) không nằm trong danh sách vì tool không bao giờ tự xoá chúng.</p></div></div>' +
+      drvCard +
       '<div class="grid g2 mt"><div class="card"><h2>Thứ tự ưu tiên khi dọn</h2>' + prio + '<p class="hint">Nhóm ở trên được dọn trước; trong cùng nhóm, mục lớn hơn dọn trước.</p></div>' +
       '<div class="card"><h2>Vùng bảo vệ (tránh khi tự dọn)</h2><div class="field" style="margin-top:0"><label for="addPath" style="min-width:auto">Thư mục</label><input id="addPath" type="text" placeholder="C:\\Users\\bạn\\Work\\dự-án-quan-trọng" style="flex:1;min-width:200px"><button class="btn sm" id="addPathBtn">Thêm</button></div>' + tags(p.protectPaths, 'path') +
       '<div class="field"><label for="addProc" style="min-width:auto">Tiến trình</label><input id="addProc" type="text" placeholder="vd: sqlservr, devenv, node*" style="flex:1;min-width:200px"><button class="btn sm" id="addProcBtn">Thêm</button></div>' + tags(p.protectProcesses, 'proc') +
@@ -189,7 +219,16 @@
       '<div class="card mt"><h2>Lượt tự dọn gần nhất</h2><div id="autoLast"></div></div>' +
       '<div class="sticky-bar" id="polBar" ' + (S.dirty ? '' : 'hidden') + '><b>Có thay đổi chưa lưu</b><span style="flex:1"></span><button class="btn" id="polReset">Hoàn tác</button><button class="btn primary" id="polSave">Lưu chính sách</button></div>';
     RG.$$('#polBody [data-set]').forEach(function (b) {
-      b.onclick = function () { var n = b.dataset.set; if (n.indexOf('cat:') === 0) p.categories[n.slice(4)] = b.dataset.val; else p[n] = b.dataset.val; markDirty(); drawPolicy(); };
+      b.onclick = function () {
+        var n = b.dataset.set;
+        if (n.indexOf('cat:') === 0) p.categories[n.slice(4)] = b.dataset.val;
+        else if (n.indexOf('dtrig:') === 0) setDrive(p, n.slice(6), 'diskTrigger', b.dataset.val || null);
+        else p[n] = b.dataset.val;
+        markDirty(); drawPolicy();
+      };
+    });
+    RG.$$('#polBody [data-dnum]').forEach(function (inp) {
+      inp.onchange = function () { var v = parseFloat(inp.value); setDrive(p, inp.dataset.dnum, 'targetFreeGB', isNaN(v) ? null : Math.max(1, Math.min(10000, v))); markDirty(); drawPolicy(); };
     });
     RG.$$('#polBody [data-num]').forEach(function (inp) { inp.onchange = function () { var v = parseFloat(inp.value); if (!isNaN(v)) p[inp.dataset.num] = v; markDirty(); }; });
     RG.$$('#polBody [data-mv]').forEach(function (b) { b.onclick = function () { var i = +b.dataset.mv, j = i + +b.dataset.d, a = p.priority; var t = a[i]; a[i] = a[j]; a[j] = t; markDirty(); drawPolicy(); }; });
@@ -215,7 +254,7 @@
   RG.pages.policy = {
     title: 'Chính sách tự động',
     render: function (el) { el.innerHTML = '<div id="polBody"><div class="empty">Đang tải…</div></div>'; drawPolicy(); this.refresh(); },
-    refresh: function () { RG.loadPolicy().then(function () { drawPolicy(); }); RG.loadAuto().then(drawAutoLast).catch(function () { }); },
+    refresh: function () { Promise.all([RG.loadPolicy(), RG.loadDrives().catch(function () { })]).then(function () { drawPolicy(); }); RG.loadAuto().then(drawAutoLast).catch(function () { }); },
     jobs: function () { if (RG.cur === 'policy') drawAutoLast(); },
     live: function () { }
   };

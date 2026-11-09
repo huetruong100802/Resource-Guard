@@ -25,8 +25,16 @@
     document.title = (S.live ? '[' + S.live.state + '] ' : '') + 'Resource Guard · ' + RG.pages[name].title;
   };
 
+  function driveSig(a) { return (a || []).map(function (d) { return d.drive; }).join(','); }
   function onLive(r) {
-    S.live = r; S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
+    // Tập ổ thay đổi (cắm/rút ổ): nạp lại meta (ngưỡng, chính sách) và vẽ lại trang.
+    var changed = S.live && driveSig(S.live.drives) !== driveSig(r.drives);
+    S.live = r;
+    if (changed) {
+      if (S.driveSel && !(r.drives || []).some(function (d) { return d.drive === S.driveSel; })) S.driveSel = null;
+      RG.loadDrives().catch(function () { }).then(function () { var q = RG.pages[RG.cur]; if (q && q.render && (RG.cur === 'overview' || RG.cur === 'disk' || RG.cur === 'policy')) RG.go(RG.cur, true); });
+    }
+    S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
     var b = $('#badge'); b.textContent = r.state; b.className = 'badge ' + r.state;
     RG.nextAt = Date.now() + (r.intervalSec || 15) * 1000;
     if (S.settings) S.settings.intervalSec = r.intervalSec || S.settings.intervalSec;
@@ -85,7 +93,7 @@
       RG.api('/api/history').then(function (h) { S.hist = (h || []).slice(-MAX); }),
       RG.loadPolicy().catch(function () { }),
       RG.loadCands().catch(function () { }),
-      RG.loadDisk().catch(function () { })
+      RG.loadDrives().catch(function () { }).then(function () { return RG.loadDisk(); }).catch(function () { })
     ]).catch(function () { }).then(function () {
       if (S.hist.length) S.live = S.hist[S.hist.length - 1];
       RG.updateNavBadges();

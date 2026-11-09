@@ -75,25 +75,34 @@
     return itemTable(all.slice(0, 80).map(function (it) { return itemRow(it, d.usedBytes, col[it.cat], true); }).join(''));
   }
 
+  function tabs() {
+    var dl = RG.driveList(); if (dl.length < 2) return '';
+    return '<div class="seg" role="tablist" aria-label="Chọn ổ đĩa" style="margin-bottom:12px;flex-wrap:wrap">' + dl.map(function (x) {
+      var st = x.state || 'Normal';
+      return '<button role="tab" data-drive="' + esc(x.drive) + '" aria-pressed="' + (x.drive === S.driveSel) + '" title="' + esc(x.label || '') + '">' + esc(x.drive) + ': <span class="num">' + x.freeGB + ' GB</span>' + (st !== 'Normal' ? ' <span class="pill ' + (st === 'Critical' ? 'ask' : '') + '">' + esc(st) + '</span>' : '') + '</button>';
+    }).join('') + '</div>';
+  }
   function draw() {
     var el = $('#diskBody'); if (!el) return;
-    var d = S.disk, j = S.jobs.breakdown, running = j && j.status === 'running';
-    var head = '<div class="field" style="margin-top:0"><button class="btn primary" id="scanBtn"' + (running ? ' disabled' : '') + '>' + RG.icon('refresh') + (d ? 'Quét lại' : 'Quét ổ đĩa') + '</button>';
-    if (running) head += '<span class="spin"></span><div class="progress" style="flex:1;max-width:320px"><i style="width:' + (j.pct || 0) + '%"></i></div><span class="small mut num">' + (j.pct || 0) + '% · ' + RG.fmtBytes(j.bytes) + ' · ' + (j.files || 0).toLocaleString('vi-VN') + ' file</span>';
+    var sel = S.driveSel, d = S.disk && (!sel || S.disk.drive === sel) ? S.disk : null;
+    var j = S.jobs.breakdown, running = j && j.status === 'running', mine = running && (!j.drive || j.drive === sel);
+    var head = tabs() + '<div class="field" style="margin-top:0"><button class="btn primary" id="scanBtn"' + (running ? ' disabled' : '') + '>' + RG.icon('refresh') + (d ? 'Quét lại' : 'Quét ổ ' + (sel ? esc(sel) + ':' : 'đĩa')) + '</button>';
+    if (running && !mine) head += '<span class="spin"></span><span class="small mut">Đang quét ổ ' + esc(j.drive) + ': (' + (j.pct || 0) + '%). Mỗi lần chỉ quét một ổ.</span>';
+    else if (running) head += '<span class="spin"></span><div class="progress" style="flex:1;max-width:320px"><i style="width:' + (j.pct || 0) + '%"></i></div><span class="small mut num">' + (j.pct || 0) + '% · ' + RG.fmtBytes(j.bytes) + ' · ' + (j.files || 0).toLocaleString('vi-VN') + ' file</span>';
     else if (d) head += '<span class="small mut">Quét ' + RG.timeAgo(d.finishedUtc) + ' · ' + d.seconds + ' giây · đọc được ' + (d.scannedBytes / Math.max(1, d.usedBytes) * 100).toFixed(0) + '% dung lượng đã dùng · ' + d.files.toLocaleString('vi-VN') + ' file</span>';
-    if (j && j.status === 'error') head += '<span class="small warn">Lỗi: ' + esc(j.message) + '</span>';
+    if (j && j.status === 'error' && (!j.drive || j.drive === sel)) head += '<span class="small warn">Lỗi: ' + esc(j.message) + '</span>';
     head += '</div>';
     if (!d) {
-      el.innerHTML = head + '<div class="card empty">' + RG.icon('disk') + '<h3>Chưa có dữ liệu phân tích ổ đĩa</h3><div>Quét mất khoảng một phút, chạy ở tiến trình riêng nên không làm treo giao diện. Chỉ đọc, không xoá gì.</div></div>';
+      el.innerHTML = head + '<div class="card empty">' + RG.icon('disk') + '<h3>Chưa có dữ liệu phân tích ổ ' + (sel ? esc(sel) + ':' : 'đĩa') + '</h3><div>Quét mất khoảng một phút, chạy ở tiến trình riêng nên không làm treo giao diện. Chỉ đọc, không xoá gì.</div></div>';
     } else {
-      var list = segs(d), pctUsed = d.usedBytes / d.totalBytes * 100;
+      var list = segs(d), pctUsed = d.usedBytes / d.totalBytes * 100, di = RG.driveInfo(d.drive);
       var legend = list.map(function (x, i) {
         var p = x.bytes / d.totalBytes * 100;
         return '<div class="li" data-cat="' + esc(x.cat) + '" tabindex="0" role="button" aria-label="' + esc(LABEL[x.cat] || x.cat) + ' ' + RG.fmtBytes(x.bytes) + '"><span class="sw' + (x.cat === '__unscanned' ? ' hatch' : '') + '" style="' + (x.cat === '__unscanned' ? '' : 'background:' + x.col) + '"></span>' +
           '<span>' + esc(LABEL[x.cat] || x.cat) + '</span><b class="num">' + RG.fmtBytes(x.bytes) + '</b><span class="num mut r">' + p.toFixed(1) + '%</span></div>';
       }).join('');
       el.innerHTML = head +
-        (S.live && RG.diskState(S.live.diskFreeGB) !== 'Normal' ? '<div class="alert warn" style="margin-bottom:14px"><div><b>Ổ ' + esc(d.drive) + ': còn trống ' + S.live.diskFreeGB + ' GB (' + (100 - pctUsed).toFixed(1) + '%).</b> Xem nhân tố lớn nhất bên dưới, hoặc sang tab <a href="#clean" data-go="clean">Dọn dẹp</a>.</div></div>' : '') +
+        (di && di.state && di.state !== 'Normal' ? '<div class="alert warn" style="margin-bottom:14px"><div><b>Ổ ' + esc(d.drive) + ': còn trống ' + di.freeGB + ' GB (' + (100 - pctUsed).toFixed(1) + '%).</b> Xem nhân tố lớn nhất bên dưới, hoặc sang tab <a href="#clean" data-go="clean">Dọn dẹp</a>.</div></div>' : '') +
         '<div class="card"><h2>Ổ ' + esc(d.drive) + ': phân bố dung lượng</h2><div class="donut-wrap">' + donut(d, list) + '<div class="legend">' + legend + '</div></div>' +
         (d.unscannedBytes > d.totalBytes * 0.02 ? '<p class="hint">' + RG.fmtBytes(d.unscannedBytes) + ' không đọc được (file hệ thống đang khoá, quyền truy cập, hoặc dữ liệu OneDrive chưa tải về).</p>' : '') + '</div>' +
         '<div class="card mt"><h2>Tất cả nhân tố chiếm dung lượng<span class="sp"></span><span class="seg sm" role="group" aria-label="Kiểu xem"><button id="vGroup" aria-pressed="' + (D.view === 'group') + '">Theo nhóm</button><button id="vFlat" aria-pressed="' + (D.view === 'flat') + '">Top 80 lớn nhất</button></span></h2>' +
@@ -111,7 +120,10 @@
       var vg = $('#vGroup'), vf = $('#vFlat'); if (vg) { vg.onclick = function () { D.view = 'group'; draw(); }; vf.onclick = function () { D.view = 'flat'; draw(); }; }
       RG.$$('#diskBody [data-go]').forEach(function (a) { a.onclick = function (e) { e.preventDefault(); RG.go(a.dataset.go); }; });
     }
-    $('#scanBtn').onclick = function () { RG.startJob('/api/disk/scan', {}, 'Bắt đầu quét ổ đĩa…'); };
+    $('#scanBtn').onclick = function () { RG.startJob('/api/disk/scan', sel ? { drive: sel } : {}, 'Bắt đầu quét ổ ' + (sel ? sel + ':' : 'đĩa') + '…').then(function () { if (S.jobs.breakdown) S.jobs.breakdown.drive = sel; }).catch(function () { }); };
+    RG.$$('#diskBody [data-drive]').forEach(function (b) {
+      b.onclick = function () { if (b.dataset.drive === S.driveSel) return; S.driveSel = b.dataset.drive; S.disk = null; D.open = {}; draw(); RG.loadDisk(b.dataset.drive).then(draw).catch(function () { }); };
+    });
   }
   function openCat(cat) {
     if (D.view !== 'group') { D.view = 'group'; }
@@ -125,7 +137,7 @@
       el.innerHTML = '<div id="diskBody"></div>';
       draw(); this.refresh();
     },
-    refresh: function () { RG.loadDisk().then(draw).catch(function () { }); },
+    refresh: function () { RG.loadDisk(S.driveSel).then(draw).catch(function () { }); },
     jobs: function () { if (RG.cur === 'disk') draw(); },
     live: function () { }
   };
