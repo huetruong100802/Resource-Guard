@@ -266,6 +266,50 @@ try {
     Assert ((Get-RgStressInfo $pn $cfg (Snap 8 5 40)).diskStress) 'engine: ổ đĩa Critical chạm trigger'
     Assert (-not (Test-RgAutoDue (ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'off' })) ([pscustomobject]@{ diskStress = $true; ramStress = $true }))) 'engine: mode off không bao giờ đến hạn'
 
+    # ---- nhiều ổ đĩa: chính sách và áp lực tính riêng từng ổ ----
+    $mp = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; diskTrigger = 'Critical'; drives = [pscustomobject]@{ d = [pscustomobject]@{ diskTrigger = 'Caution'; targetFreeGB = 40 }; zz = [pscustomobject]@{ diskTrigger = 'Caution' }; E = [pscustomobject]@{ diskTrigger = 'bogus' } } })
+    Assert (@($mp.drives.Keys).Count -eq 1 -and $mp.drives['D'].diskTrigger -eq 'Caution' -and $mp.drives['D'].targetFreeGB -eq 40) 'drives: policy chuẩn hoá (chữ hoa, bỏ tên ổ/giá trị sai)'
+    Assert (((Get-RgDrivePolicy $mp 'D').diskTrigger -eq 'Caution') -and ((Get-RgDrivePolicy $mp 'C').diskTrigger -eq 'Critical') -and ((Get-RgDrivePolicy $mp 'C').targetFreeGB -eq $mp.targetFreeGB)) 'drives: ổ có ghi đè dùng riêng, ổ khác thừa hưởng giá trị chung'
+    $rt = ConvertTo-RgPolicy (ConvertFrom-Json (ConvertTo-Json -InputObject $mp -Depth 5))
+    Assert ($rt.drives['D'].diskTrigger -eq 'Caution') 'drives: policy qua JSON vẫn giữ ghi đè theo ổ'
+    $cfgD = $cfg | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    Add-Member -InputObject $cfgD.disk -NotePropertyName drives -NotePropertyValue ([pscustomobject]@{ D = [pscustomobject]@{ normalAboveGB = 100 } }) -Force
+    Assert (((Get-RgDiskState 50 $cfgD 'D') -eq 'Caution') -and ((Get-RgDiskState 50 $cfgD 'C') -eq 'Normal')) 'drives: ngưỡng trạng thái theo ổ ghi đè ngưỡng chung'
+    $mdl = @([pscustomobject]@{ drive = 'C'; freeGB = 50; totalGB = 200 }, [pscustomobject]@{ drive = 'D'; freeGB = 5; totalGB = 500 })
+    $ms = [pscustomobject]@{ availRamGB = 9; commitPct = 40; diskDrive = 'C'; diskFreeGB = 50; drives = $mdl }
+    $sD = Get-RgStressInfo $pn $cfg $ms
+    Assert ($sD.diskStress -and ($sD.diskState -eq 'Critical') -and (-not (@($sD.drives | Where-Object { $_.drive -eq 'C' })[0].stress)) -and (@($sD.drives | Where-Object { $_.drive -eq 'D' })[0].stress)) 'drives: áp lực tính riêng từng ổ (D Critical, C bình thường)'
+    $pOff = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; diskTrigger = 'Critical'; drives = [pscustomobject]@{ D = [pscustomobject]@{ diskTrigger = 'off' } } })
+    Assert (-not (Get-RgStressInfo $pOff $cfg $ms).diskStress) 'drives: ổ đặt trigger off không bao giờ kích hoạt dù đầy'
+    $bg = Get-RgBudget -Task build -Snapshot $ms -Table $t
+    Assert (($bg.state -eq 'Critical') -and (@($bg.reasons | Where-Object { $_ -match 'disk D:' }).Count -eq 1) -and (@($bg.reasons | Where-Object { $_ -match 'disk C:' }).Count -eq 0)) 'drives: budget lấy trạng thái xấu nhất và nêu đúng ổ nào đầy'
+    $selD = Select-RgAutoItems @((New-RgItem -Kind 'temp-entry' -Action delete -Level 1 -Path 'C:\Users\x\Temp\a' -SizeBytes 10MB), (New-RgItem -Kind 'dotnet-artifact' -Action delete -Level 1 -Path 'D:\Work\p\obj' -SizeBytes 20MB)) $mp $sD
+    Assert (($selD.selected.Count -eq 1) -and ($selD.selected[0].path -eq 'D:\Work\p\obj') -and (@($selD.skipped | Where-Object { $_.reason -match 'ổ C: chưa tới ngưỡng' }).Count -eq 1)) 'drives: chỉ dọn mục nằm trên ổ đang chịu áp lực'
+    $mpc = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; diskTrigger = 'Caution'; targetFreeGB = 1000; maxGBPerRun = 0.1; categories = [pscustomobject]@{ 'temp-entry' = 'auto'; 'dotnet-artifact' = 'auto' } })
+    $sBoth = Get-RgStressInfo $mpc $cfg ([pscustomobject]@{ availRamGB = 9; commitPct = 40; diskDrive = 'C'; diskFreeGB = 5; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 5; totalGB = 200 }, [pscustomobject]@{ drive = 'D'; freeGB = 5; totalGB = 500 }) })
+    $capItems = @((New-RgItem -Kind 'dotnet-artifact' -Action delete -Level 1 -Path 'D:\w\a\obj' -SizeBytes 50MB), (New-RgItem -Kind 'dotnet-artifact' -Action delete -Level 1 -Path 'D:\w\b\obj' -SizeBytes 40MB), (New-RgItem -Kind 'dotnet-artifact' -Action delete -Level 1 -Path 'D:\w\c\obj' -SizeBytes 30MB), (New-RgItem -Kind 'dotnet-artifact' -Action delete -Level 1 -Path 'C:\w\a\obj' -SizeBytes 50MB))
+    $pc = Select-RgAutoItems $capItems $mpc $sBoth
+    Assert ((@($pc.selected | Where-Object { $_.path -like 'D:*' }).Count -eq 2) -and (@($pc.selected | Where-Object { $_.path -like 'C:*' }).Count -eq 1) -and (@($pc.skipped | Where-Object { $_.reason -match 'giới hạn GB mỗi lượt \(ổ D:\)' }).Count -eq 1)) 'drives: giới hạn GB mỗi lượt tính riêng từng ổ'
+    Assert ((Get-RgPathDrive 'd:\x\y') -eq 'D' -and -not (Get-RgPathDrive '\\srv\share\x') -and -not (Get-RgPathDrive 'relative\p')) 'drives: Get-RgPathDrive'
+    $oneD = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; diskTrigger = 'Critical' })
+    $looseD = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; diskTrigger = 'Critical'; drives = [pscustomobject]@{ D = [pscustomobject]@{ diskTrigger = 'Caution' } } })
+    Assert ((Test-RgPolicyNeedsPin $oneD $looseD) -and -not (Test-RgPolicyNeedsPin $looseD $oneD)) 'drives: nới trigger của MỘT ổ cần PIN, siết lại thì không'
+    $drv = @(Get-RgDrives)
+    Assert (($drv.Count -ge 1) -and (@($drv | Where-Object { $_.isSystem }).Count -eq 1) -and (@($drv | Where-Object { $_.drive -notmatch '^[A-Z]$' }).Count -eq 0)) 'drives: liệt kê ổ cố định, đúng một ổ hệ thống'
+    Assert (@((Get-RgSnapshot -SkipCpu).drives).Count -eq $drv.Count) 'drives: snapshot kèm danh sách ổ'
+    $cfgNoAuto = [pscustomobject]@{ workspaceRoots = @('%TEMP%\rg-x1'); autoRoots = $false }
+    Assert ((@(Get-RgWorkspaceRoots $cfgNoAuto).Count -eq 1) -and ((@(Get-RgWorkspaceRoots $cfgNoAuto))[0] -eq (Expand-RgPath '%TEMP%\rg-x1'))) 'drives: autoRoots=false chỉ dùng workspaceRoots đã cấu hình'
+    $realGet = ${function:Get-RgDrives}
+    try {
+        function Get-RgDrives { @([pscustomobject]@{ drive = 'C'; isSystem = $true }, [pscustomobject]@{ drive = 'Z'; isSystem = $false }) }
+        $cfgAuto = [pscustomobject]@{ workspaceRoots = @('%TEMP%\rg-x2'); autoRootNames = @('Users', 'bad/name') }
+        $ra = @(Get-RgWorkspaceRoots $cfgAuto)
+        Assert ($ra.Count -eq 1) 'drives: ổ hệ thống không tự thêm root; ổ khác không có thư mục tên quen thì không thêm; tên chứa dấu / bị loại'
+        function Get-RgDrives { @([pscustomobject]@{ drive = 'C'; isSystem = $true }, [pscustomobject]@{ drive = 'C'; isSystem = $false }) }
+        $ra2 = @(Get-RgWorkspaceRoots ([pscustomobject]@{ workspaceRoots = @('%TEMP%\rg-x3'); autoRootNames = @('Users') }))
+        Assert ((@($ra2 | Where-Object { $_ -ieq 'C:\Users' }).Count -eq 1)) 'drives: ổ không phải hệ thống tự thêm thư mục tên quen thuộc nếu tồn tại'
+    } finally { Set-Item -Path Function:\Get-RgDrives -Value $realGet }
+
     # chạy thật + chạy thử trên fixture (AssumeStress)
     $oldTmp = Join-Path $tmp 'auto-old'; NewFile (Join-Path $oldTmp 'f.bin') 2048; Age $oldTmp 30
     $okProj = Join-Path $ws 'autoproj'; NewFile (Join-Path $okProj 'a.csproj') 10; NewFile (Join-Path $okProj 'obj\o.dll') 4096; Age (Join-Path $okProj 'obj') 30

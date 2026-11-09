@@ -73,9 +73,12 @@ function Get-RgSnapshot {
     $commitPct = 0
     if ($totalVirt -gt 0) { $commitPct = [math]::Round((1 - $freeVirt / $totalVirt) * 100, 1) }
 
+    $drives = @(Get-RgDrives)
     $drive = ([string]$cfg.disk.drive).TrimEnd(':', '\')
     $diskFree = $null
-    try { $diskFree = [math]::Round((New-Object IO.DriveInfo($drive)).AvailableFreeSpace / 1GB, 2) } catch { }
+    $primary = Get-RgPrimaryDrive $drives $cfg
+    if ($primary) { $drive = $primary.drive; $diskFree = $primary.freeGB }
+    else { try { $diskFree = [math]::Round((New-Object IO.DriveInfo($drive)).AvailableFreeSpace / 1GB, 2) } catch { } }
 
     $pageFiles = @()
     try {
@@ -97,6 +100,7 @@ function Get-RgSnapshot {
         cpuPct        = $cpu
         diskDrive     = $drive
         diskFreeGB    = $diskFree
+        drives        = $drives
         pageFiles     = $pageFiles
     }
 }
@@ -189,7 +193,7 @@ function Read-RgLedger {
     $p = Get-RgLedgerPath
     if (Test-Path -LiteralPath $p) {
         $raw = Get-Content -LiteralPath $p -Raw -Encoding UTF8
-        if ($raw -and $raw.Trim()) { return @(ConvertFrom-Json $raw) }
+        if ($raw -and $raw.Trim()) { return @(ConvertFrom-Json $raw | ForEach-Object { $_ }) }   # ForEach-Object: PS 5.1 không tự bung mảng JSON
     }
     return @()
 }
@@ -250,11 +254,87 @@ function Get-RgRamState([double]$AvailGB, $Cfg) {
     return 'Critical'
 }
 
-function Get-RgDiskState($FreeGB, $Cfg) {
+# Ngưỡng ổ đĩa theo từng ổ: cfg.disk.drives.<X>.{normalAboveGB,cautionFromGB} ghi đè ngưỡng chung cfg.disk.*.
+function Get-RgDiskThresholds($Cfg, [string]$Drive = '') {
+    $n = [double]$Cfg.disk.normalAboveGB; $c = [double]$Cfg.disk.cautionFromGB
+    if ($Drive -and $Cfg.disk.drives) {
+        $o = $Cfg.disk.drives.PSObject.Properties[$Drive.ToUpperInvariant()]
+        if ($o -and $o.Value) {
+            if ($null -ne $o.Value.normalAboveGB) { $n = [double]$o.Value.normalAboveGB }
+            if ($null -ne $o.Value.cautionFromGB) { $c = [double]$o.Value.cautionFromGB }
+        }
+    }
+    return [pscustomobject]@{ normalAboveGB = $n; cautionFromGB = $c }
+}
+
+function Get-RgDiskState($FreeGB, $Cfg, [string]$Drive = '') {
     if ($null -eq $FreeGB) { return 'Normal' }
-    if ([double]$FreeGB -gt [double]$Cfg.disk.normalAboveGB) { return 'Normal' }
-    if ([double]$FreeGB -ge [double]$Cfg.disk.cautionFromGB) { return 'Caution' }
+    $t = Get-RgDiskThresholds $Cfg $Drive
+    if ([double]$FreeGB -gt $t.normalAboveGB) { return 'Normal' }
+    if ([double]$FreeGB -ge $t.cautionFromGB) { return 'Caution' }
     return 'Critical'
+}
+
+# Chữ cái ổ của một đường dẫn ('D:\x' -> 'D'); $null nếu không phải đường dẫn có ổ (UNC...).
+function Get-RgPathDrive([string]$Path) {
+    if ($Path -match '^([A-Za-z]):[\\/]') { return $Matches[1].ToUpperInvariant() }
+    return $null
+}
+
+# Các ổ cố định đang sẵn sàng (bỏ ổ gỡ được, ổ mạng, ổ chưa sẵn sàng, và ổ trong cfg.disk.exclude).
+function Get-RgDrives {
+    $cfg = Get-RgConfig
+    $ex = @($cfg.disk.exclude | ForEach-Object { ([string]$_).TrimEnd(':', '\').ToUpperInvariant() })
+    $sys = ([string]$env:SystemDrive).TrimEnd(':', '\').ToUpperInvariant()
+    $out = @()
+    foreach ($d in [IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($d.DriveType -ne [IO.DriveType]::Fixed -or -not $d.IsReady) { continue }
+            $letter = $d.Name.Substring(0, 1).ToUpperInvariant()
+            if ($ex -contains $letter) { continue }
+            $label = ''; try { $label = [string]$d.VolumeLabel } catch { }
+            $free = [math]::Round($d.AvailableFreeSpace / 1GB, 2)
+            $out += [pscustomobject]@{
+                drive = $letter; label = $label; isSystem = ($letter -eq $sys)
+                totalBytes = [long]$d.TotalSize; freeBytes = [long]$d.AvailableFreeSpace
+                totalGB = [math]::Round($d.TotalSize / 1GB, 1); freeGB = $free
+                state = (Get-RgDiskState $free $cfg $letter)
+            }
+        } catch { }
+    }
+    return @($out | Sort-Object drive)
+}
+
+# Thư mục gốc workspace được phép quét/dọn: cleanup.workspaceRoots + (nếu cleanup.autoRoots != false) các thư mục tên quen thuộc
+# (Work, Repositories, Source, Projects...) ngay dưới gốc của MỌI ổ cố định khác ổ hệ thống. Dùng chung cho quét và cho blocker xoá
+# để hai bên luôn khớp. Kết quả cache 30s vì blocker gọi theo từng mục.
+function Get-RgWorkspaceRoots($Cleanup) {
+    if ($script:RgRootsCache -and ((Get-Date) - $script:RgRootsCacheAt).TotalSeconds -lt 30 -and $script:RgRootsCacheKey -eq ($Cleanup | ConvertTo-Json -Compress -Depth 4)) { return $script:RgRootsCache }
+    $roots = New-Object System.Collections.ArrayList
+    $add = { param($p) $dup = $false; foreach ($e in $roots) { if ($e -ieq $p) { $dup = $true; break } }; if (-not $dup) { [void]$roots.Add($p) } }
+    foreach ($w in @($Cleanup.workspaceRoots)) { if ($w) { & $add (Expand-RgPath ([string]$w)) } }
+    $auto = $true
+    if ($Cleanup.PSObject.Properties['autoRoots'] -and $null -ne $Cleanup.autoRoots) { $auto = [bool]$Cleanup.autoRoots }
+    if ($auto) {
+        $names = @('Work', 'Repositories', 'Repos', 'Source', 'Src', 'Projects', 'Dev', 'Code', 'Workspace')
+        if ($Cleanup.PSObject.Properties['autoRootNames'] -and $Cleanup.autoRootNames) { $names = @($Cleanup.autoRootNames | ForEach-Object { [string]$_ } | Where-Object { $_ -and $_ -notmatch '[\\/:*?"<>|]' }) }
+        foreach ($d in (Get-RgDrives)) {
+            if ($d.isSystem) { continue }
+            foreach ($n in $names) { $p = "$($d.drive):\$n"; if (Test-Path -LiteralPath $p -PathType Container) { & $add $p } }
+        }
+    }
+    $script:RgRootsCache = $roots.ToArray(); $script:RgRootsCacheAt = Get-Date
+    $script:RgRootsCacheKey = ($Cleanup | ConvertTo-Json -Compress -Depth 4)
+    return $script:RgRootsCache
+}
+
+# Ổ "chính" cho các chỗ còn dùng một số duy nhất (diskDrive/diskFreeGB): cfg.disk.drive nếu có, không thì ổ hệ thống, không thì ổ đầu.
+function Get-RgPrimaryDrive($Drives, $Cfg) {
+    $want = ([string]$Cfg.disk.drive).TrimEnd(':', '\').ToUpperInvariant()
+    $p = @($Drives | Where-Object { $_.drive -eq $want }) | Select-Object -First 1
+    if (-not $p) { $p = @($Drives | Where-Object { $_.isSystem }) | Select-Object -First 1 }
+    if (-not $p) { $p = @($Drives) | Select-Object -First 1 }
+    return $p
 }
 
 function Get-RgCommitState([double]$Pct, $Cfg) {
@@ -278,9 +358,13 @@ function Get-RgBudget {
     $reasons = New-Object System.Collections.ArrayList
 
     $ramState = Get-RgRamState $Snapshot.availRamGB $cfg
-    $diskState = Get-RgDiskState $Snapshot.diskFreeGB $cfg
+    # Trạng thái ổ đĩa = xấu nhất trong các ổ được giám sát (snapshot không có danh sách ổ thì dùng ổ chính như cũ).
+    $driveStates = @()
+    foreach ($d in @($Snapshot.drives)) { if ($d) { $driveStates += [pscustomobject]@{ drive = $d.drive; freeGB = $d.freeGB; state = (Get-RgDiskState $d.freeGB $cfg ([string]$d.drive)) } } }
+    if ($driveStates.Count -eq 0) { $driveStates = @([pscustomobject]@{ drive = $Snapshot.diskDrive; freeGB = $Snapshot.diskFreeGB; state = (Get-RgDiskState $Snapshot.diskFreeGB $cfg ([string]$Snapshot.diskDrive)) }) }
+    $diskState = Get-RgWorstState @($driveStates | ForEach-Object { $_.state })
     $commitState = Get-RgCommitState $Snapshot.commitPct $cfg
-    if ($null -eq $Snapshot.diskFreeGB) { [void]$reasons.Add('disk free space unknown') }
+    if ($null -eq $Snapshot.diskFreeGB -and $driveStates.Count -le 1) { [void]$reasons.Add('disk free space unknown') }
 
     $est = 0.0
     if ($cfg.estimateGB.PSObject.Properties[$Task]) { $est = [double]$cfg.estimateGB.$Task }
@@ -288,7 +372,7 @@ function Get-RgBudget {
     $state = Get-RgWorstState @($ramState, $diskState, $commitState, $projState)
 
     if ($ramState -ne 'Normal') { [void]$reasons.Add("available RAM $($Snapshot.availRamGB)GB -> $ramState") }
-    if ($diskState -ne 'Normal') { [void]$reasons.Add("disk $($Snapshot.diskDrive): free $($Snapshot.diskFreeGB)GB -> $diskState") }
+    foreach ($ds in $driveStates) { if ($ds.state -ne 'Normal') { [void]$reasons.Add("disk $($ds.drive): free $($ds.freeGB)GB -> $($ds.state)") } }
     if ($commitState -ne 'Normal') { [void]$reasons.Add("commit charge $($Snapshot.commitPct)% -> $commitState") }
     if ($est -gt 0 -and $projState -ne $ramState) { [void]$reasons.Add("projected RAM after '$Task' (~${est}GB) -> $projState") }
 
@@ -534,7 +618,7 @@ function Get-RgCandidates {
     $items = @()
 
     # 1) Artifact trong workspace: bin/obj, node_modules (đủ tuổi mới đề xuất)
-    $roots = @($cfg.cleanup.workspaceRoots | ForEach-Object { Expand-RgPath $_ })
+    $roots = @(Get-RgWorkspaceRoots $cfg.cleanup)
     foreach ($a in (Find-RgWorkspaceArtifacts $roots ([int]$cfg.cleanup.maxDepth))) {
         $st = Get-RgDirStats $a.Path
         $dirTime = (Get-Item -LiteralPath $a.Path -Force).LastWriteTimeUtc
@@ -732,7 +816,7 @@ function Get-RgDeleteBlocker($Item, $Cfg) {
     $isDir = Test-Path -LiteralPath $full -PathType Container
     $leaf = $segs[$segs.Count - 1]
     $parent = Split-Path $full -Parent
-    $roots = @($Cfg.cleanup.workspaceRoots | ForEach-Object { Expand-RgPath $_ })
+    $roots = @(Get-RgWorkspaceRoots $Cfg.cleanup)
 
     switch ([string]$Item.kind) {
         'dotnet-artifact' {

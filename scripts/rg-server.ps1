@@ -273,14 +273,40 @@ try {
                             cleanup = (Get-RgJobState 'cleanup.progress.json'); auto = (Get-RgJobState 'auto.progress.json'); agent = (Get-RgJobState 'agent.progress.json')
                         })
                 }
+                elseif ($path -eq '/api/drives') {
+                    $cfg = Get-RgConfig; $pol = Get-RgPolicy
+                    $dl = @(Get-RgDrives)
+                    $rows = @($dl | ForEach-Object {
+                            $dp = Get-RgDrivePolicy $pol $_.drive
+                            $sf = Join-Path (Initialize-RgHome) ("state\scan-breakdown-{0}.json" -f $_.drive)
+                            [ordered]@{ drive = $_.drive; label = $_.label; isSystem = $_.isSystem; totalBytes = $_.totalBytes; freeBytes = $_.freeBytes; freeGB = $_.freeGB; totalGB = $_.totalGB; state = $_.state
+                                diskTrigger = $dp.diskTrigger; targetFreeGB = $dp.targetFreeGB; overridden = $dp.overridden
+                                thresholds = (Get-RgDiskThresholds $cfg $_.drive)
+                                scannedUtc = $(if (Test-Path -LiteralPath $sf) { (Get-Item -LiteralPath $sf).LastWriteTimeUtc.ToString('o') } else { $null }) }
+                        })
+                    $prim = Get-RgPrimaryDrive $dl $cfg
+                    Send-Json $ctx ([ordered]@{ drives = $rows; primary = $(if ($prim) { $prim.drive } else { $null }); workspaceRoots = @(Get-RgWorkspaceRoots $cfg.cleanup) })
+                }
                 elseif ($path -eq '/api/disk') {
-                    $b = Read-RgStateText 'scan-breakdown.json'
-                    if (-not $b) { $b = 'null' }
-                    Send-RawJson $ctx ('{"breakdown":' + $b + ',"progress":' + (ConvertTo-Json -InputObject (Get-RgJobState 'scan-breakdown.progress.json') -Compress -Depth 3) + '}')
+                    $q = [string]$req.QueryString['drive']
+                    $dl = @(Get-RgDrives)
+                    if (-not $q) { $pd = Get-RgPrimaryDrive $dl (Get-RgConfig); $q = $(if ($pd) { $pd.drive } else { 'C' }) }
+                    $q = $q.ToUpperInvariant()
+                    if ($q -notmatch '^[A-Z]$') { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Tên ổ không hợp lệ.' }) 400 }
+                    else {
+                        $b = Read-RgStateText ("scan-breakdown-{0}.json" -f $q)
+                        if (-not $b) { $b = 'null' }
+                        Send-RawJson $ctx ('{"drive":"' + $q + '","breakdown":' + $b + ',"progress":' + (ConvertTo-Json -InputObject (Get-RgJobState 'scan-breakdown.progress.json') -Compress -Depth 3) + '}')
+                    }
                 }
                 elseif ($path -eq '/api/disk/scan' -and $req.HttpMethod -eq 'POST') {
-                    if (Test-RgJobRunning 'scan-breakdown.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
-                    else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'breakdown', '-Drive', ([string](Get-RgConfig).disk.drive).TrimEnd(':', '\')); Send-Json $ctx ([ordered]@{ ok = $true }) }
+                    $b = $null; try { $b = Read-RgBody $req } catch { }
+                    $want = ''; if ($b -and $b.drive) { $want = ([string]$b.drive).Trim().TrimEnd(':').ToUpperInvariant() }
+                    $dl = @(Get-RgDrives)
+                    if (-not $want) { $pd = Get-RgPrimaryDrive $dl (Get-RgConfig); if ($pd) { $want = $pd.drive } }
+                    if ($want -notmatch '^[A-Z]$' -or -not (@($dl | Where-Object { $_.drive -eq $want }))) { Send-Json $ctx ([ordered]@{ ok = $false; error = "Ổ '$want' không có hoặc không được giám sát." }) 400 }
+                    elseif (Test-RgJobRunning 'scan-breakdown.progress.json') { $cur = Get-RgJobState 'scan-breakdown.progress.json'; Send-Json $ctx ([ordered]@{ ok = $true; already = $true; drive = [string]$cur.drive }) }
+                    else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'breakdown', '-Drive', $want); Send-Json $ctx ([ordered]@{ ok = $true; drive = $want }) }
                 }
                 elseif ($path -eq '/api/candidates' -and $req.HttpMethod -eq 'GET') {
                     $pol = Get-RgPolicy
@@ -290,7 +316,7 @@ try {
                     if ($cd) {
                         $items = @($cd.items | ForEach-Object {
                                 $prot = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $pol } else { Test-RgPathProtected ([string]$_.path) $pol }
-                                [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; level = $_.level; path = $_.path; pid = $_.pid; name = $_.name; sizeBytes = $_.sizeBytes
+                                [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; level = $_.level; path = $_.path; drive = (Get-RgPathDrive ([string]$_.path)); pid = $_.pid; name = $_.name; sizeBytes = $_.sizeBytes
                                     ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; canArchive = (Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
                                     setting = $(if ($pol.categories.Contains([string]$_.kind)) { $pol.categories[[string]$_.kind] } else { 'keep' }) }
                             })
@@ -424,7 +450,7 @@ try {
                 $iv = (Get-RgSettings).intervalSec
                 $live = [pscustomobject]@{
                     ts = $rec.ts; state = $rec.state; rawState = $rec.rawState; availRamGB = $rec.availRamGB; totalRamGB = $rec.totalRamGB
-                    commitPct = $rec.commitPct; cpuPct = $rec.cpuPct; diskDrive = $rec.diskDrive; diskFreeGB = $rec.diskFreeGB
+                    commitPct = $rec.commitPct; cpuPct = $rec.cpuPct; diskDrive = $rec.diskDrive; diskFreeGB = $rec.diskFreeGB; drives = $rec.drives
                     heavy = $rec.heavy; ledgerOrphans = $rec.ledgerOrphans; top = $rec.top
                     reasons = @($script:RgLastReasons); intervalSec = $iv
                     cores = $rec.cores; topCpu = $rec.topCpu; procCount = $rec.procCount; uptimeSec = $rec.uptimeSec; cpuInfo = (Get-RgCpuInfo)

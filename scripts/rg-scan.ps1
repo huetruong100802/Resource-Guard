@@ -1,5 +1,5 @@
 ﻿# rg-scan.ps1 - quét nền, chạy ở process riêng (server không bị chặn). Chỉ ĐỌC, không xoá gì.
-#   -Mode breakdown  : phân tích ổ đĩa theo nhóm nhân tố (C# đa luồng) -> state\scan-breakdown.json
+#   -Mode breakdown  : phân tích MỘT ổ đĩa (-Drive D) theo nhóm nhân tố (C# đa luồng) -> state\scan-breakdown-<ổ>.json
 #   -Mode candidates : danh sách ứng viên dọn dẹp (Get-RgCandidates)   -> state\scan-candidates.json
 # Tiến độ: state\scan-<mode>.progress.json (đọc bởi server/UI).
 [CmdletBinding()]
@@ -8,11 +8,16 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rg-common.ps1')
 $stateDir = Join-Path (Initialize-RgHome) 'state'
 $progPath = Join-Path $stateDir "scan-$Mode.progress.json"
+$Drive = ([string]$Drive).TrimEnd(':', '\').ToUpperInvariant()
 $outPath = Join-Path $stateDir "scan-$Mode.json"
+if ($Mode -eq 'breakdown') {
+    if ($Drive -notmatch '^[A-Z]$') { throw "Tên ổ không hợp lệ: '$Drive'" }
+    $outPath = Join-Path $stateDir "scan-breakdown-$Drive.json"   # mỗi ổ một file kết quả; tiến độ dùng chung một file (mỗi lúc quét một ổ)
+}
 $started = Get-Date
 
 function Write-Prog([string]$Status, [double]$Pct, [long]$Files = 0, [long]$Bytes = 0, [string]$Cur = '', [string]$Msg = '') {
-    $o = [ordered]@{ mode = $Mode; pid = $PID; status = $Status; pct = [math]::Round($Pct, 1); files = $Files; bytes = $Bytes; current = $Cur; message = $Msg
+    $o = [ordered]@{ mode = $Mode; drive = $(if ($Mode -eq 'breakdown') { $Drive } else { $null }); pid = $PID; status = $Status; pct = [math]::Round($Pct, 1); files = $Files; bytes = $Bytes; current = $Cur; message = $Msg
         startedUtc = $started.ToUniversalTime().ToString('o'); updatedUtc = (Get-Date).ToUniversalTime().ToString('o') }
     Write-RgFileAtomic $progPath (ConvertTo-Json -InputObject $o -Compress)
 }
@@ -25,7 +30,7 @@ try {
         $out = foreach ($i in $items) {
             [pscustomobject]@{
                 key = (Get-RgSha256 ("{0}|{1}|{2}|{3}" -f $i.kind, $i.path, $i.pid, $i.start)).Substring(0, 12)
-                kind = $i.kind; action = $i.action; level = $i.level; path = $i.path; pid = $i.pid; start = $i.start; name = $i.name
+                kind = $i.kind; action = $i.action; level = $i.level; path = $i.path; drive = (Get-RgPathDrive ([string]$i.path)); pid = $i.pid; start = $i.start; name = $i.name
                 sizeBytes = $i.sizeBytes; ageDays = $i.ageDays; newestWriteUtc = $i.newestWriteUtc; reason = $i.reason; risk = $i.risk; needsAdmin = [bool]$i.needsAdmin
             }
         }
@@ -174,6 +179,7 @@ public class RgDiskScanner
 }
 '@
 
+    if (-not (@(Get-RgDrives) | Where-Object { $_.drive -eq $Drive })) { throw "Ổ $Drive`: không có, chưa sẵn sàng hoặc không phải ổ cố định." }
     $root = "${Drive}:\"
     $profile_ = $env:USERPROFILE
     $cfg = Get-RgConfig
@@ -196,7 +202,7 @@ public class RgDiskScanner
     Add-Rule (Join-Path $profile_ 'AppData\Local\Temp') 'temp' 1
     foreach ($d in '.nuget', '.npm', '.dotnet', '.gradle', '.m2', '.cache') { Add-Rule (Join-Path $profile_ $d) 'dev-cache' 1 }
     foreach ($p in $cfg.cleanup.cacheDirs.PSObject.Properties) { Add-Rule (Expand-RgPath ([string]$p.Value)) 'dev-cache' 0 }
-    foreach ($w in @($cfg.cleanup.workspaceRoots)) { Add-Rule (Expand-RgPath ([string]$w)) 'repos' 1 $true }
+    foreach ($w in @(Get-RgWorkspaceRoots $cfg.cleanup)) { Add-Rule ([string]$w) 'repos' 1 $true }
 
     $sc = New-Object RgDiskScanner
     $di = New-Object IO.DriveInfo($Drive)

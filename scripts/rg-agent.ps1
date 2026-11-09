@@ -25,7 +25,7 @@ function New-RgAgentPayload {
     $cfg = Get-RgConfig
     $policy = Get-RgPolicy
     $live = Read-RgJsonState 'live.json'
-    $bd = Read-RgJsonState 'scan-breakdown.json'
+    $bds = @(Get-ChildItem -LiteralPath (Join-Path (Initialize-RgHome) 'state') -Filter 'scan-breakdown-?.json' -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { Read-RgJsonState $_.Name } | Where-Object { $_ })
     $cd = Read-RgJsonState 'scan-candidates.json'
     $now = (Get-Date).ToUniversalTime()
     $ageOf = { param($iso) if (-not $iso) { return $null } try { [int][math]::Floor(($now - [datetime]::Parse([string]$iso, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind').ToUniversalTime()).TotalDays) } catch { $null } }
@@ -34,7 +34,9 @@ function New-RgAgentPayload {
     if ($live) {
         $machine = [ordered]@{
             state = $live.state; ramTotalGB = $live.totalRamGB; ramAvailGB = $live.availRamGB; commitPct = $live.commitPct; cpuPct = $live.cpuPct
-            diskDrive = $live.diskDrive; diskFreeGB = $live.diskFreeGB; uptimeHours = $(if ($live.uptimeSec) { [math]::Round([double]$live.uptimeSec / 3600, 1) } else { $null })
+            diskDrive = $live.diskDrive; diskFreeGB = $live.diskFreeGB
+            drives = @($live.drives | ForEach-Object { [ordered]@{ drive = $_.drive; totalGB = $_.totalGB; freeGB = $_.freeGB; state = $_.state; isSystem = [bool]$_.isSystem } })
+            uptimeHours = $(if ($live.uptimeSec) { [math]::Round([double]$live.uptimeSec / 3600, 1) } else { $null })
             reasons = @($live.reasons)
         }
         $procs = [ordered]@{
@@ -43,15 +45,15 @@ function New-RgAgentPayload {
             topRam = @($live.top | Select-Object -First 5 | ForEach-Object { [ordered]@{ name = $_.name; ramMB = $_.ramMB } })
         }
     }
-    $disk = $null
-    if ($bd) {
+    $disks = @()
+    foreach ($bd in $bds) {
         $cats = @($bd.categories | ForEach-Object {
                 [ordered]@{
                     category = $_.cat; gb = [math]::Round([double]$_.bytes / 1GB, 2); files = $_.files
                     top = @($_.items | Select-Object -First 8 | ForEach-Object { [ordered]@{ item = (ConvertTo-RgSafeText ([string]$_.key)); gb = [math]::Round([double]$_.bytes / 1GB, 2); idleDays = (& $ageOf $_.newestUtc) } })
                 }
             })
-        $disk = [ordered]@{
+        $disks += [ordered]@{
             drive = $bd.drive; totalGB = [math]::Round([double]$bd.totalBytes / 1GB, 1); freeGB = [math]::Round([double]$bd.freeBytes / 1GB, 1)
             unscannedGB = [math]::Round([double]$bd.unscannedBytes / 1GB, 1); scannedAgeHours = [math]::Round(($now - [datetime]::Parse([string]$bd.finishedUtc, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind').ToUniversalTime()).TotalHours, 1)
             categories = $cats
@@ -70,13 +72,13 @@ function New-RgAgentPayload {
     return [ordered]@{
         generatedUtc = $now.ToString('o')
         thresholds = [ordered]@{ ramAvailGB = $cfg.ram; diskFreeGB = $cfg.disk }
-        machine = $machine; processes = $procs; disk = $disk; cleanupCandidates = $cands
+        machine = $machine; processes = $procs; disks = $disks; cleanupCandidates = $cands
         policySummary = [ordered]@{
             mode = $policy.mode; categories = $policy.categories; protectedPathCount = @($policy.protectPaths).Count
             protectedProcessNames = @($policy.protectProcesses)
         }
         notes = @(
-            $(if (-not $disk) { 'Chưa có dữ liệu quét ổ đĩa.' }), $(if (-not $cd) { 'Chưa có danh sách ứng viên dọn dẹp.' })
+            $(if ($disks.Count -eq 0) { 'Chưa có dữ liệu quét ổ đĩa.' }), $(if (-not $cd) { 'Chưa có danh sách ứng viên dọn dẹp.' })
         ) | Where-Object { $_ }
     }
 }
@@ -92,7 +94,7 @@ Quy tắc bắt buộc:
 - "recommendations[].key" CHỈ được lấy từ "cleanupCandidates[].key". Mục có userProtected=true thì verdict phải là "keep".
 - Chỉ đề xuất verdict "clean" cho mục có action là delete hoặc kill. Mục action=report chỉ được "keep" hoặc "review".
 - Ưu tiên (priority 1 = làm trước, 5 = sau cùng) theo dung lượng thu hồi, mức rủi ro và số ngày không dùng.
-- "findings": các nhân tố chiếm ổ đĩa lớn/bất thường (disk.categories), tiến trình ngốn CPU/RAM bất thường, dữ liệu quét đã cũ hoặc thiếu. Mỗi finding nêu rõ con số.
+- "findings": các nhân tố chiếm ổ đĩa lớn/bất thường (disks[].categories, mỗi phần tử là một ổ; so sánh giữa các ổ khi có nhiều ổ), tiến trình ngốn CPU/RAM bất thường, dữ liệu quét đã cũ hoặc thiếu. Mỗi finding nêu rõ con số.
 - "policySuggestions": mỗi phần tử là MỘT THAY ĐỔI so với policySummary.categories hiện tại cho kind (temp-entry, dotnet-artifact, cache-aged, node_modules, process); "setting" là chế độ MỚI (auto = tự dọn khi có áp lực, ask = chỉ hỏi tay, keep = không bao giờ đụng). Chỉ đưa khi setting KHÁC chế độ hiện tại và có lý do từ dữ liệu; thường để trống. "reason" giải thích vì sao đổi, không nhắc lại chế độ cũ.
 - Viết tiếng Việt, ngắn gọn, không quá 25 từ mỗi lý do. Tối đa 8 findings và 15 recommendations.
 
