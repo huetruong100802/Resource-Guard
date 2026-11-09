@@ -1,0 +1,17 @@
+# Trạng thái và log chạy thật
+state/
+logs/
+*.log
+
+# Ảnh chụp/tài liệu có lộ tên tài khoản Windows và tên repo nội bộ (giữ cục bộ)
+docs/img/clean.png
+docs/img/clean-modal.png
+docs/img/policy.png
+docs/img/agent.png
+docs/TECHNOTE.src.html
+docs/resource_manager-technote.html
+
+# Khác
+.env
+*.zip
+Thumbs.db

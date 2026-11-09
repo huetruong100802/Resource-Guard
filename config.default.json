@@ -1,0 +1,66 @@
+{
+  "ram": { "normalAboveGB": 5, "cautionFromGB": 3, "restrictedFromGB": 2 },
+  "disk": { "drive": "C", "normalAboveGB": 20, "cautionFromGB": 10 },
+  "commit": { "restrictedPct": 90, "criticalPct": 97 },
+  "estimateGB": { "build": 2.0, "test": 3.0, "subagent": 0.5, "session": 0 },
+  "policy": {
+    "Normal":     { "heavy": "allow", "maxHeavy": 2, "subagent": "allow", "maxSubagents": 3, "cleanup": "propose" },
+    "Caution":    { "heavy": "allow", "maxHeavy": 2, "subagent": "warn",  "maxSubagents": 1, "cleanup": "propose" },
+    "Restricted": { "heavy": "allow", "maxHeavy": 1, "subagent": "deny",  "maxSubagents": 0, "cleanup": "approval" },
+    "Critical":   { "heavy": "deny",  "maxHeavy": 0, "subagent": "deny",  "maxSubagents": 0, "cleanup": "approval" }
+  },
+  "agentCmdRegex": "@anthropic-ai[\\\\/]claude-code|@openai[\\\\/]codex|claude-code|[\\\\/]\\.claude[\\\\/]|[\\\\/]\\.codex[\\\\/]",
+  "groups": {
+    "agent": ["claude*", "codex*"],
+    "infra": ["sqlservr", "docker*", "com.docker*", "vmmem*", "wsl*", "vmwp", "vmcompute"],
+    "test":  ["testhost*", "vstest*", "playwright*"],
+    "build": ["dotnet", "msbuild", "vbcscompiler", "csc", "tsc"],
+    "dev":   ["node", "ng", "npm", "npx", "pnpm", "vite", "sqlcmd", "ssms"]
+  },
+  "heavy": [
+    { "name": "dotnet", "cmdRegex": "\\b(build|test|publish|restore|msbuild|pack)\\b" },
+    { "name": "msbuild" },
+    { "name": "testhost*" },
+    { "name": "node", "cmdRegex": "(ng(\\.js)?\"?\\s+build|vite(\\.js)?\"?\\s+build|\\bngc\\b|\\btsc\\b|webpack)" }
+  ],
+  "heavyExcludeCmdRegex": "nodemode|VBCSCompiler|MSBuildTaskHost|build-server|--version",
+  "kill": { "allowedGroups": ["build", "test", "dev"] },
+  "cleanup": {
+    "workspaceRoots": ["%USERPROFILE%\\Work\\Repositories"],
+    "maxDepth": 6,
+    "minAgeDays": { "dotnet-artifact": 14, "node_modules": 30, "temp-entry": 14 },
+    "cacheMinInactiveDays": 14,
+    "tempRoot": "",
+    "tempExclude": ["claude*"],
+    "tempTop": 30,
+    "minCacheMB": 100,
+    "cacheDirs": {
+      "nuget-packages":   "%USERPROFILE%\\.nuget\\packages",
+      "nuget-http-cache": "%LOCALAPPDATA%\\NuGet\\v3-cache",
+      "npm-cache":        "%LOCALAPPDATA%\\npm-cache",
+      "pnpm-store":       "%LOCALAPPDATA%\\pnpm\\store",
+      "yarn-cache":       "%LOCALAPPDATA%\\Yarn\\Cache",
+      "pip-cache":        "%LOCALAPPDATA%\\pip\\Cache"
+    },
+    "staleRepo": { "minInactiveDays": 90, "minMB": 50 },
+    "largeItem": {
+      "roots": ["%USERPROFILE%\\Downloads", "%USERPROFILE%\\Videos"],
+      "minMB": 500,
+      "minInactiveDays": 60
+    },
+    "apps": {
+      "roots": ["%ProgramFiles%", "%ProgramFiles(x86)%", "%LOCALAPPDATA%\\Programs"],
+      "minMB": 300,
+      "minInactiveDays": 180,
+      "exclude": ["Windows*", "Microsoft.NET*", "Microsoft Shared*", "Microsoft Update*", "Microsoft Edge*", "Common Files", "Internet Explorer", "dotnet", "Reference Assemblies", "Uninstall Information", "ModifiableWindowsApps", "WindowsApps", "PackageManagement", "IIS*", "Application Verifier", "MSBuild", "Git", "PowerShell*"]
+    },
+    "vhdxGlobs": [
+      "%LOCALAPPDATA%\\Packages\\*\\LocalState\\*.vhdx",
+      "%LOCALAPPDATA%\\Docker\\wsl\\*.vhdx",
+      "%LOCALAPPDATA%\\Docker\\wsl\\*\\*.vhdx"
+    ]
+  },
+  "protected": {
+    "segments": [".git", ".claude", ".codex", ".ssh", ".aws", ".azure", "Documents", "Desktop", ".agent-resource"]
+  }
+}
