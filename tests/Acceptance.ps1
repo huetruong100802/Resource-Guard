@@ -13,7 +13,13 @@ function Assert($Cond, [string]$Name) {
 }
 function Age([string]$Path, [int]$Days) {   # đặt mtime lùi $Days ngày cho file/dir (đệ quy)
     $t = (Get-Date).AddDays(-$Days)
-    Get-ChildItem -LiteralPath $Path -Recurse -Force | ForEach-Object { $_.LastWriteTime = $t; $_.LastAccessTime = $t }
+    Get-ChildItem -LiteralPath $Path -Recurse -Force | ForEach-Object {
+        # file chỉ đọc (vd. object trong .git) không cho đặt mtime: bỏ cờ tạm thời rồi trả lại
+        $ro = ($_ -is [IO.FileInfo]) -and $_.IsReadOnly
+        if ($ro) { $_.IsReadOnly = $false }
+        $_.LastWriteTime = $t; $_.LastAccessTime = $t
+        if ($ro) { $_.IsReadOnly = $true }
+    }
     $self = Get-Item -LiteralPath $Path -Force; $self.LastWriteTime = $t; $self.LastAccessTime = $t
 }
 function NewFile([string]$Path, [int]$Bytes) {
@@ -27,6 +33,7 @@ function Snap($ram, $disk, $commit) { [pscustomobject]@{ availRamGB = $ram; disk
 # cấu hình test
 $cfg = Get-Content (Join-Path $root 'config.default.json') -Raw | ConvertFrom-Json
 $cfg.groups.dev = @('ping')
+$cfg.scan.autoRefreshHours = 0   # server chạy trong test KHÔNG được tự quét ổ thật
 $cfg.cleanup.workspaceRoots = @($ws)
 $cfg.cleanup.tempRoot = $tmp
 $cfg.cleanup.minCacheMB = 0
@@ -210,11 +217,371 @@ try {
     Assert (@(Get-ChildItem (Join-Path $home_ 'state') -Filter 'metrics-*.jsonl').Count -eq 1) 'watcher: ghi metrics jsonl'
     Assert ((Get-ChildItem -LiteralPath $tmp -Force | Measure-Object).Count -eq $freeBefore) 'watcher: không xoá/đổi gì trong thư mục tạm (monitor-only)'
 
+    # ---- lịch sử theo tiến trình (P2): procTop trong metrics + Get-RgProcHistory ----
+    $pt = @($rec.procTop)
+    Assert ($pt.Count -ge 1 -and $pt.Count -le 20 -and $pt[0].name -and $null -ne $pt[0].n -and $null -ne $pt[0].cpu -and $null -ne $pt[0].ramMB) 'procTop: bản ghi tick có nhóm theo tên {name,n,cpu,ramMB}, tối đa 12+8 nhóm'
+    Assert (@($pt | Group-Object name | Where-Object Count -gt 1).Count -eq 0) 'procTop: mỗi tên chỉ một nhóm (đã gộp)'
+    $mfLast = Get-Content (Get-ChildItem (Join-Path $home_ 'state') -Filter 'metrics-*.jsonl' | Sort-Object Name | Select-Object -Last 1).FullName -Tail 1 -Encoding UTF8 | ConvertFrom-Json
+    Assert (@($mfLast.procTop).Count -ge 1) 'procTop: có trong dòng metrics đã ghi ra file'
+    $gp = Get-RgProcTop @(
+        [pscustomobject]@{ name = 'aaa'; cpu = 1.0; ramMB = 100 }, [pscustomobject]@{ name = 'aaa'; cpu = 2.5; ramMB = 50 },
+        [pscustomobject]@{ name = 'bbb'; cpu = 0.0; ramMB = 10 }, [pscustomobject]@{ name = 'ccc'; cpu = 9.0; ramMB = 1 })
+    $ga = @($gp | Where-Object name -eq 'aaa')[0]
+    Assert ($ga.n -eq 2 -and $ga.cpu -eq 3.5 -and $ga.ramMB -eq 150 -and @($gp).Count -eq 3) 'procTop: cộng n/cpu/ramMB theo tên'
+    $many = @(1..30 | ForEach-Object { [pscustomobject]@{ name = "p$_"; cpu = 0.0; ramMB = $_ } })
+    Assert (@(Get-RgProcTop $many).Count -eq 12) 'procTop: chỉ giữ top 12 theo RAM (CPU = 0 không thêm nhóm)'
+    function Add-FakeMetric([datetime]$When, [string]$ProcName, [double]$Cpu, [int]$Ram, [int]$N) {
+        $r = [ordered]@{ ts = $When.ToString('yyyy-MM-dd HH:mm:ss'); totalRamGB = 15.89; procTop = @([ordered]@{ name = $ProcName; n = $N; cpu = $Cpu; ramMB = $Ram }, [ordered]@{ name = 'other-proc'; n = 1; cpu = 0.5; ramMB = 10 }) }
+        Add-Content -LiteralPath (Join-Path $home_ ('state\metrics-{0}.jsonl' -f $When.ToString('yyyyMMdd'))) -Value (ConvertTo-Json -InputObject $r -Compress) -Encoding UTF8
+    }
+    $tNow = Get-Date
+    Add-FakeMetric $tNow.AddMinutes(-90) 'histproc' 1.0 900 9    # ngoài cửa sổ 60 phút
+    Add-FakeMetric $tNow.AddMinutes(-30) 'histproc' 10.5 1200 7
+    Add-FakeMetric $tNow.AddMinutes(-20) 'noproc' 1.0 5 1        # không có histproc: điểm thiếu bị bỏ
+    Add-FakeMetric $tNow.AddMinutes(-10) 'histproc' 20.0 1683 8
+    $h60 = Get-RgProcHistory 'histproc' 60
+    Assert ($h60.name -eq 'histproc' -and @($h60.points).Count -eq 2 -and $h60.points[0].ramMB -eq 1200 -and $h60.points[1].ramMB -eq 1683 -and $h60.points[1].cpu -eq 20 -and $h60.points[1].n -eq 8) 'history: đúng điểm trong cửa sổ 60 phút, đúng thứ tự, bỏ điểm thiếu'
+    Assert ($h60.totalRamMB -eq 16271 -or $h60.totalRamMB -eq 16270) 'history: totalRamMB = totalRamGB * 1024'
+    Assert (@((Get-RgProcHistory 'histproc' 1440).points).Count -eq 3) 'history: cửa sổ 1440 phút lấy thêm điểm cũ'
+    Assert (@((Get-RgProcHistory 'histproc' 99999).points).Count -eq 3) 'history: min vượt 1440 bị chặn về 1440'
+    Assert (@((Get-RgProcHistory 'khong-co-tien-trinh-nay' 60).points).Count -eq 0) 'history: tên không có -> mảng rỗng, không lỗi'
+    Assert (@((Get-RgProcHistory 'HistProc' 60).points).Count -eq 2) 'history: tên không phân biệt hoa thường'
+    $hBad = 0; foreach ($bn in '../etc', 'a;b', '', ('x' * 65), 'a"b') { try { [void](Get-RgProcHistory $bn 60) } catch { $hBad++ } }
+    Assert ($hBad -eq 5) 'history: tên chứa ký tự lạ / rỗng / quá dài bị từ chối'
+    Assert (@((Get-RgProcHistory 'histproc' 60 -MaxPoints 1).points).Count -eq 1) 'history: giới hạn số điểm trả về (lấy thưa)'
+
+    # ---- Insight (P3): dự báo + sẵn sàng + mục tiêu về mức Ổn ----
+    . (Join-Path $root 'scripts\rg-insight.ps1')
+    $thr = Get-RgDiskThresholds $cfg 'C'
+    function Make-Samples([double]$StartFree, [double]$SlopePerDay, [double]$Days) {
+        $t0 = (Get-Date).AddDays(-$Days)
+        $n = [int]($Days * 24)
+        return @(0..$n | ForEach-Object { [pscustomobject]@{ t = $t0.AddHours($_); freeGB = [math]::Round($StartFree + $SlopePerDay * ($_ / 24.0), 3) } })
+    }
+    $sm = Make-Samples 20 -0.9 11
+    $f11 = Get-RgForecast $sm ([math]::Round(20 - 0.9 * 11, 3)) $thr
+    Assert ([math]::Abs($f11.slopeGBPerDay - (-0.9)) -lt 0.01) 'forecast: dốc khớp -0,9 GB/ngày'
+    Assert ([math]::Abs($f11.daysToFull - 11) -le 1 -and $f11.confidence -eq 'high' -and $f11.sampleDays -eq 11) 'forecast: giảm đều 0,9 GB/ngày -> daysToFull đúng ±1, 11 ngày dữ liệu = high'
+    $f1gb = Get-RgForecast (Make-Samples 30 -1.0 5) 25 $thr
+    Assert ([math]::Abs($f1gb.daysToFull - 25) -le 1 -and [math]::Abs($f1gb.daysToCaution - 5) -le 1 -and [math]::Abs($f1gb.daysToCritical - 15) -le 1 -and $f1gb.confidence -eq 'medium') 'forecast: 1 GB/ngày từ 25 GB -> đầy 25, Cần chú ý 5, Nguy cấp 15 (±1), 5 ngày = medium'
+    $fLow = Get-RgForecast (Make-Samples 30 -1.0 1) 29 $thr
+    Assert ($fLow.confidence -eq 'low' -and $null -eq $fLow.daysToFull -and $null -eq $fLow.daysToCaution -and $null -eq $fLow.daysToCritical) 'forecast: 1 ngày dữ liệu -> low, daysTo* = null'
+    $fUp = Get-RgForecast (Make-Samples 20 0.5 10) 25 $thr
+    Assert ($fUp.confidence -eq 'low' -and $null -eq $fUp.daysToFull) 'forecast: dốc dương -> low, daysTo* = null'
+    $fOne = Get-RgForecast @([pscustomobject]@{ t = (Get-Date); freeGB = 10 }) 10 $thr
+    Assert ($fOne.confidence -eq 'low' -and $null -eq $fOne.daysToFull -and (Get-RgForecast @() 10 $thr).confidence -eq 'low') 'forecast: 0-1 mẫu không lỗi, confidence low'
+    $fNow = Get-RgForecast (Make-Samples 14 -0.5 5) 11.5 $thr
+    Assert ($fNow.daysToCaution -eq 0 -and $fNow.daysToCritical -le 3) 'forecast: ổ đã dưới ngưỡng Ổn -> daysToCaution = 0'
+
+    # Read-RgDriveSamples: lấy thưa mỗi giờ một điểm, theo từng ổ
+    $oldDay = (Get-Date).AddDays(-5).Date.AddHours(8)
+    $oldFile = Join-Path $home_ ('state\metrics-{0}.jsonl' -f $oldDay.ToString('yyyyMMdd'))
+    $ln = foreach ($mi in 0, 15, 30, 45, 60, 75) {
+        $w = $oldDay.AddMinutes($mi)
+        ConvertTo-Json -InputObject ([ordered]@{ ts = $w.ToString('yyyy-MM-dd HH:mm:ss'); drives = @([ordered]@{ drive = 'C'; freeGB = (30 - $mi / 100.0) }, [ordered]@{ drive = 'D'; freeGB = 100 }) }) -Compress
+    }
+    Set-Content -LiteralPath $oldFile -Value $ln -Encoding UTF8
+    $rs = Read-RgDriveSamples 14
+    Assert ($rs.ContainsKey('C') -and $rs.ContainsKey('D') -and @($rs['C'] | Where-Object { $_.t.Date -eq $oldDay.Date }).Count -eq 2) 'samples: 6 dòng trong 2 giờ -> 2 điểm (mỗi giờ một điểm), có cả ổ D'
+    Assert ($rs['C'][0].freeGB -eq 30 -and $rs['C'][0].t -lt $rs['C'][$rs['C'].Count - 1].t) 'samples: theo thứ tự thời gian, lấy dòng đầu mỗi giờ'
+    Assert (@((Read-RgDriveSamples 2)['C'] | Where-Object { $_.t.Date -eq $oldDay.Date }).Count -eq 0) 'samples: ngoài số ngày yêu cầu bị bỏ'
+
+    # Insight tổng hợp + readiness
+    $tbl = @(Row 1 0 'explorer' '' 'other')
+    $snapLow = [pscustomobject]@{ availRamGB = 2.1; diskFreeGB = 8.6; commitPct = 40; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 8.6; state = 'Critical' }) }
+    $insLow = Get-RgInsight $snapLow $tbl @{ C = (Make-Samples 20 -0.9 11) } $cfg
+    $rdTest = @($insLow.readiness | Where-Object task -eq 'test')[0]
+    Assert (-not $rdTest.ok -and $rdTest.blocker -eq 'ram' -and $rdTest.needGB -eq 3 -and $rdTest.haveGB -eq 2.1) 'insight: RAM 2,1 GB -> test không đủ chỗ, blocker = ram'
+    Assert ($insLow.drives[0].drive -eq 'C' -and $insLow.drives[0].state -eq 'Critical' -and $insLow.drives[0].goal.toState -eq 'Normal' -and $insLow.drives[0].goal.needGB -eq 11.4) 'insight: ổ C 8,6 GB -> cần thêm 11,4 GB để về Ổn'
+    Assert ($insLow.ram.state -eq 'Restricted' -and $insLow.ram.goal.needGB -eq 2.9) 'insight: RAM 2,1 GB -> cần thêm 2,9 GB để về Ổn'
+    $snapOk = [pscustomobject]@{ availRamGB = 9; diskFreeGB = 50; commitPct = 40; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 50 }) }
+    $insOk = Get-RgInsight $snapOk $tbl @{} $cfg
+    Assert (@($insOk.readiness | Where-Object { -not $_.ok }).Count -eq 0 -and $null -eq $insOk.drives[0].goal.needGB -and $null -eq $insOk.ram.goal.needGB -and $insOk.drives[0].confidence -eq 'low') 'insight: máy ổn -> mọi tác vụ ok, goal.needGB = null, không có mẫu -> confidence low'
+    $snapDisk = [pscustomobject]@{ availRamGB = 9; diskFreeGB = 5; commitPct = 40; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 5 }) }
+    Assert ((@((Get-RgInsight $snapDisk $tbl @{} $cfg).readiness | Where-Object task -eq 'build')[0]).blocker -eq 'disk') 'insight: ổ Nguy cấp, RAM dư -> build bị chặn vì disk'
+    $tbl2 = $one + (Row 11 1 'dotnet' 'dotnet test b.sln' 'test')
+    Assert ((@((Get-RgInsight $snapOk $tbl2 @{} $cfg).readiness | Where-Object task -eq 'build')[0]).blocker -eq 'concurrency') 'insight: đã đủ 2 tác vụ nặng -> blocker = concurrency'
+
     Write-Host "`n[policy] chính sách, vùng bảo vệ, PIN, engine tự dọn"
     . (Join-Path $root 'scripts\rg-policy.ps1')
     $hostExe = (Get-Process -Id $PID).Path
     NewFile (Join-Path $home_ 'state\rwtest.json') 5
     Assert ((Read-RgFileShared (Join-Path $home_ 'state\rwtest.json')).Length -eq 5) 'Read-RgFileShared đọc được file (đối số -bor trong ngoặc)'
+
+    Write-Host "`n[advice] kế hoạch đề xuất tất định (P4)"
+    $nowU = (Get-Date).ToUniversalTime()
+    function AI([string]$Key, [string]$Kind, [string]$Path, [double]$GB, [string]$Action = 'delete', [bool]$Young = $false, [bool]$Admin = $false, [int]$Age = 30) {
+        [pscustomobject]@{ key = $Key; kind = $Kind; action = $Action; path = $Path; drive = (Get-RgPathDrive $Path); sizeBytes = [long]($GB * 1GB); ageDays = $Age; newestWriteUtc = ''; young = $Young; needsAdmin = $Admin; name = ''; pid = 0 }
+    }
+    $advPol = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'dry-run'; protectPaths = @('C:\fake\prot') })
+    $advItems = @(
+        (AI 'k1' 'cache-aged' 'C:\fake\cache\nuget' 7.8), (AI 'k2a' 'dotnet-artifact' 'C:\fake\ws\a\obj' 2.0), (AI 'k2b' 'dotnet-artifact' 'C:\fake\ws\b\obj' 2.1),
+        (AI 'k3' 'node_modules' 'C:\fake\ws\web\node_modules' 3.0), (AI 'k4' 'temp-entry' 'C:\fake\tmp\a' 0.01), (AI 'k5' 'temp-entry' 'C:\fake\tmp\b' 0.02),
+        (AI 'k6' 'large-item' 'C:\fake\dl\bigzip' 2.0), (AI 'k7' 'node_modules' 'C:\fake\ws\new\node_modules' 0.5 'delete' $true $false 2), (AI 'k8' 'temp-entry' 'C:\fake\tmp\sys' 0.3 'report' $false $true),
+        (AI 'k9' 'app' 'C:\fake\apps\old' 9.0 'report'), (AI 'k10' 'dotnet-artifact' 'C:\fake\prot\obj' 5.0), (AI 'k11' 'node_modules' 'C:\fake\dl\bigzip\node_modules' 0.1),
+        (AI 'k12' 'dotnet-artifact' 'D:\proj\obj' 1.0), (AI 'k13' 'process' '' 0.2 'kill'))
+    $advCand = [pscustomobject]@{ finishedUtc = $nowU.AddHours(-1).ToString('o'); items = $advItems }
+    $advDrives = @([pscustomobject]@{ drive = 'D'; freeGB = 500 }, [pscustomobject]@{ drive = 'C'; freeGB = 8.6 })
+    $adv = Get-RgAdvice $advCand @{} $null $advPol $advDrives $cfg $nowU
+    $cSteps = @($adv.steps | Where-Object drive -eq 'C')
+    Assert ($adv.goals.Count -eq 1 -and $adv.goals[0].drive -eq 'C' -and $adv.goals[0].needBytes -eq [long][math]::Ceiling(11.4 * 1GB) -and $adv.goals[0].toState -eq 'Normal') 'advice: mục tiêu = đưa ổ C (8,6 GB) về mức Ổn, cần 11,4 GB'
+    Assert (-not $adv.stale -and $adv.candidatesUtc) 'advice: lượt quét mới (1 giờ) -> stale = false'
+    $allKeys = @($adv.steps | ForEach-Object { $_.keys } | ForEach-Object { $_ })
+    Assert (@('k9', 'k10', 'k13', 'k7', 'k8') | Where-Object { $allKeys -contains $_ } | ForEach-Object { $_ } | Measure-Object | ForEach-Object { $_.Count -eq 0 }) 'advice: report / vùng bảo vệ / tiến trình / young / needsAdmin không vào bước'
+    Assert (($adv.review.count -eq 2) -and $adv.review.keys -contains 'k7' -and $adv.review.keys -contains 'k8' -and $adv.review.bytes -eq [long](0.8 * 1GB)) 'advice: mục young và needsAdmin vào review (không tính mục bảo vệ/report)'
+    Assert ($allKeys -notcontains 'k11') 'advice: mục nằm trong mục dọn khác bị bỏ để không đếm đôi'
+    Assert ($cSteps[0].kind -eq 'cache-aged' -and $cSteps[1].kind -eq 'dotnet-artifact' -and $cSteps[2].kind -eq 'node_modules' -and $cSteps[3].kind -eq 'large-item' -and $cSteps[4].kind -eq 'small') 'advice: sắp theo điểm bytes x regen x rủi ro (cache > bin/obj > node_modules > mục lớn), "Các mục nhỏ" cuối'
+    Assert ($cSteps[1].count -eq 2 -and $cSteps[1].keys -contains 'k2a' -and $cSteps[1].keys -contains 'k2b' -and $cSteps[1].bytes -eq [long](4.1 * 1GB)) 'advice: gộp theo (ổ, kind): hai mục bin/obj thành một bước'
+    Assert ($cSteps[4].count -eq 2 -and $cSteps[4].keys -contains 'k4' -and $cSteps[4].keys -contains 'k5' -and $cSteps[4].id -eq 'C:small') 'advice: bước < 50 MB gộp vào "Các mục nhỏ"'
+    $sumB = 0L; foreach ($s_ in $cSteps) { $sumB += [long]$s_.bytes }
+    Assert ($cSteps[0].cumBytes -eq $cSteps[0].bytes -and $cSteps[1].cumBytes -eq ($cSteps[0].bytes + $cSteps[1].bytes) -and $cSteps[4].cumBytes -eq $sumB) 'advice: cumBytes cộng dồn'
+    Assert (-not $cSteps[0].reachesGoal -and $cSteps[1].reachesGoal -and @($cSteps | Where-Object reachesGoal).Count -eq 1) 'advice: reachesGoal đúng ở bước đầu tiên làm tổng >= mục tiêu (7,8 + 4,1 >= 11,4)'
+    Assert ($cSteps[0].auto -eq 'ask' -and $cSteps[1].auto -eq 'auto' -and $cSteps[2].auto -eq 'ask' -and $cSteps[3].auto -eq 'ask') 'advice: auto lấy theo chính sách nhóm (cache hỏi, bin/obj tự động)'
+    Assert ($cSteps[0].riskLevel -eq 'low' -and $cSteps[0].regen -eq 'redownload' -and $cSteps[2].riskLevel -eq 'medium' -and $cSteps[3].riskLevel -eq 'high' -and $cSteps[0].why -and $cSteps[0].impact -and $cSteps[0].regenHint) 'advice: bước mang riskLevel/regen/why/impact/regenHint (dựng từ biên lai khi lượt quét cũ chưa có)'
+    Assert ($adv.steps[0].drive -eq 'C' -and @($adv.steps | Where-Object drive -eq 'D').Count -eq 1 -and @($adv.steps | Where-Object drive -eq 'D')[0].reachesGoal -eq $false) 'advice: ổ có mục tiêu đứng trước; ổ không có mục tiêu có bước nhưng reachesGoal = false'
+    $apC = @($adv.afterPlan | Where-Object drive -eq 'C')[0]; $apD = @($adv.afterPlan | Where-Object drive -eq 'D')[0]
+    Assert ($apC.state -eq 'Normal' -and $apC.shortBytes -eq 0 -and $apC.freeGB -gt 20 -and $apD.state -eq 'Normal' -and $adv.beyond.Count -eq 0) 'advice: afterPlan = Ổn, shortBytes = 0, không có beyond khi dọn đủ'
+
+    # dọn hết vẫn thiếu -> beyond từ lượt quét ổ (bỏ nhóm dọn được)
+    $bdC = [pscustomobject]@{ drive = 'C'; categories = @(
+            [pscustomobject]@{ cat = 'programs'; bytes = [long](50 * 1GB) }, [pscustomobject]@{ cat = 'temp'; bytes = [long](9 * 1GB) }, [pscustomobject]@{ cat = 'documents'; bytes = [long](20 * 1GB) },
+            [pscustomobject]@{ cat = 'app-data'; bytes = [long](10 * 1GB) }, [pscustomobject]@{ cat = 'downloads'; bytes = [long](3 * 1GB) }) }
+    $advShort = Get-RgAdvice $advCand @{ C = $bdC } $null $advPol @([pscustomobject]@{ drive = 'C'; freeGB = 1.0 }) $cfg $nowU
+    $apS = @($advShort.afterPlan)[0]
+    Assert ($apS.shortBytes -gt 0 -and $apS.state -ne 'Normal' -and @($advShort.steps | Where-Object reachesGoal).Count -eq 0) 'advice: dọn hết vẫn thiếu -> shortBytes > 0, không bước nào reachesGoal'
+    Assert ($advShort.beyond.Count -eq 3 -and $advShort.beyond[0].cat -eq 'programs' -and $advShort.beyond[1].cat -eq 'documents' -and $advShort.beyond[2].cat -eq 'app-data' -and $advShort.beyond[0].hint -match 'Ứng dụng') 'advice: beyond = 3 nhóm lớn nhất không dọn được (bỏ temp), kèm gợi ý'
+
+    # tối đa 5 bước mỗi ổ: phần dư gộp vào "Các mục nhỏ"
+    $many = @((AI 'm1' 'temp-entry' 'C:\m\t' 0.06), (AI 'm2' 'dotnet-artifact' 'C:\m\o' 0.5), (AI 'm3' 'node_modules' 'C:\m\n' 0.5), (AI 'm4' 'cache-aged' 'C:\m\c' 0.5), (AI 'm5' 'stale-repo' 'C:\m\r' 0.5), (AI 'm6' 'large-item' 'C:\m\l' 0.5))
+    $advMany = Get-RgAdvice ([pscustomobject]@{ finishedUtc = $nowU.ToString('o'); items = $many }) @{} $null $advPol @([pscustomobject]@{ drive = 'C'; freeGB = 100 }) $cfg $nowU
+    Assert (@($advMany.steps).Count -eq 5 -and @($advMany.steps)[4].kind -eq 'small' -and @($advMany.steps)[4].count -eq 2 -and @($advMany.steps | ForEach-Object { $_.count } | Measure-Object -Sum).Sum -eq 6) 'advice: tối đa 5 bước mỗi ổ, phần dư gộp vào "Các mục nhỏ" (không mất mục)'
+
+    # stale
+    $advStale = Get-RgAdvice ([pscustomobject]@{ finishedUtc = $nowU.AddHours(-7).ToString('o'); items = @() }) @{} $null $advPol @() $cfg $nowU
+    Assert ($advStale.stale -and @($advStale.steps).Count -eq 0) 'advice: lượt quét cũ hơn 6 giờ -> stale = true'
+    Assert ((Get-RgAdvice $null @{} $null $advPol @() $cfg $nowU).stale) 'advice: chưa có lượt quét ứng viên -> stale, không lỗi'
+
+    # agent: chỉ dùng khi mới hơn lượt quét; keep rời bước nhưng không đổi thứ tự
+    $agNew = [pscustomobject]@{ ok = $true; finishedUtc = $nowU.ToString('o'); result = [pscustomobject]@{ recommendations = @(
+                [pscustomobject]@{ key = 'k1'; verdict = 'keep'; confidence = 'high'; reason = 'đang dùng' }, [pscustomobject]@{ key = 'k2a'; verdict = 'clean'; confidence = 'medium'; reason = 'build cũ' }) } }
+    $advAg = Get-RgAdvice $advCand @{} $agNew $advPol $advDrives $cfg $nowU
+    $agC = @($advAg.steps | Where-Object drive -eq 'C')
+    Assert ($agC[0].kind -eq 'dotnet-artifact' -and $agC[1].kind -eq 'node_modules' -and -not ($agC | Where-Object kind -eq 'cache-aged') -and $agC[0].agent.verdict -eq 'clean' -and $agC[0].agent.reason -eq 'build cũ') 'advice: key agent "keep" rời bước; bước còn lại giữ thứ tự và gắn nhãn agent'
+    Assert ($agC[0].cumBytes -eq $agC[0].bytes -and $agC[0].keys.Count -eq 2) 'advice: cumBytes tính lại sau khi agent bỏ mục'
+    $agOld = [pscustomobject]@{ ok = $true; finishedUtc = $nowU.AddHours(-3).ToString('o'); result = $agNew.result }
+    $advAgOld = Get-RgAdvice $advCand @{} $agOld $advPol $advDrives $cfg $nowU
+    Assert ((@($advAgOld.steps | Where-Object { $_.kind -eq 'cache-aged' }).Count -eq 1) -and $null -eq @($advAgOld.steps)[0].agent) 'advice: kết quả agent cũ hơn lượt quét ứng viên bị bỏ qua'
+    [void](Add-RgAgentKeep 'C:\fake\ws\web\node_modules' 'agent giữ' 'high')
+    $advK = Get-RgAdvice $advCand @{} $null $advPol $advDrives $cfg $nowU
+    Assert (@($advK.steps | ForEach-Object { $_.keys } | ForEach-Object { $_ }) -notcontains 'k3') 'advice: mục agent-keep (còn hạn) không vào bước'
+    $akm = Get-RgAgentKeepMatch 'C:\fake\ws\web\node_modules'; if ($akm) { [void](Remove-RgAgentKeep ([string]$akm.target)) }
+
+    Write-Host "`n[priority] hạ ưu tiên tiến trình, đảo ngược được (P6)"
+    . (Join-Path $root 'scripts\rg-proc.ps1')
+    function StartStamp([int]$ProcId) { ConvertTo-RgStamp (Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId").CreationDate }
+    function PClass([int]$ProcId) { (Get-Process -Id $ProcId).PriorityClass.ToString() }
+    $prA = Start-Process ping -ArgumentList '-n', '300', '127.0.0.1' -WindowStyle Hidden -PassThru; $procs += $prA
+    $prB = Start-Process ping -ArgumentList '-n', '300', '127.0.0.1' -WindowStyle Hidden -PassThru; $procs += $prB
+    Start-Sleep -Milliseconds 800
+    $sA = StartStamp $prA.Id; $sB = StartStamp $prB.Id
+    $priPath = Get-RgProcPriorityPath
+    Assert ((PClass $prA.Id) -eq 'Normal') 'priority: tiến trình thử bắt đầu ở mức Normal'
+    $t0 = Test-RgProcLowerable $prA.Id $sA
+    Assert ($t0.ok -and $t0.name -eq 'ping' -and $t0.current -eq 'Normal') 'priority: Test-RgProcLowerable chấp nhận tiến trình thường (ping)'
+    $r1 = Set-RgProcPriority $prA.Id $sA 'below'
+    Assert ($r1.ok -and $r1.from -eq 'Normal' -and $r1.to -eq 'BelowNormal' -and (PClass $prA.Id) -eq 'BelowNormal') 'priority: hạ ưu tiên -> BelowNormal'
+    $lst = @(Read-RgProcPriority)
+    Assert ($lst.Count -eq 1 -and $lst[0].pid -eq $prA.Id -and $lst[0].start -eq $sA -and $lst[0].name -eq 'ping') 'priority: ghi proc-priority.json (pid + start)'
+    $logTxt = Get-ChildItem (Join-Path $home_ 'logs') -Filter 'rg-*.jsonl' | ForEach-Object { Get-Content $_.FullName -Encoding UTF8 } | Where-Object { $_ -match '"event":"proc-priority"' } | Select-Object -Last 1
+    Assert ($logTxt -match '"from":"Normal"' -and $logTxt -match '"to":"BelowNormal"' -and $logTxt -match "`"pid`":$($prA.Id)") 'priority: ghi log proc-priority {pid, name, from, to}'
+    $r1b = Set-RgProcPriority $prA.Id $sA 'below'
+    Assert (-not $r1b.ok -and $r1b.error -match 'Đã được hạ') 'priority: hạ lần hai bị từ chối ("đã được hạ")'
+    $ctxL = New-RgProcContext
+    Assert ($ctxL.lowered.ContainsKey("$($prA.Id)|$sA")) 'priority: bối cảnh nhận ra tiến trình đang bị hạ (cho nhãn + nút hoàn tác)'
+    $r2 = Set-RgProcPriority $prA.Id $sA 'normal'
+    Assert ($r2.ok -and $r2.to -eq 'Normal' -and (PClass $prA.Id) -eq 'Normal' -and @(Read-RgProcPriority).Count -eq 0) 'priority: hoàn tác trả đúng PriorityClass Normal và xoá mục khỏi file'
+    $r2b = Set-RgProcPriority $prA.Id $sA 'normal'
+    Assert (-not $r2b.ok -and $r2b.error -match 'chưa hạ') 'priority: "normal" cho tiến trình chưa bị hạ -> từ chối (không nâng mức của người khác)'
+
+    # sai start time -> từ chối, không đổi gì
+    $rBad = Set-RgProcPriority $prB.Id '20200101T000000Z' 'below'
+    Assert (-not $rBad.ok -and $rBad.error -match 'PID được dùng lại|thay đổi' -and (PClass $prB.Id) -eq 'Normal') 'priority: sai start time -> từ chối, mức ưu tiên giữ nguyên'
+    $rBad2 = Set-RgProcPriority $prB.Id 'not-a-stamp' 'below'
+    Assert (-not $rBad2.ok -and (PClass $prB.Id) -eq 'Normal') 'priority: start không đúng định dạng -> từ chối'
+    $rBad3 = Set-RgProcPriority $prB.Id $sB 'high'
+    Assert (-not $rBad3.ok -and (PClass $prB.Id) -eq 'Normal') 'priority: level lạ (high) -> từ chối, không có đường nâng ưu tiên'
+
+    # PID đã chết -> từ chối, không ném lỗi
+    $prD = Start-Process ping -ArgumentList '-n', '300', '127.0.0.1' -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 500
+    $sD = StartStamp $prD.Id; $deadId = $prD.Id
+    Stop-Process -Id $deadId -Force; [void]$prD.WaitForExit(5000)
+    $threw = $false; $rD = $null
+    try { $rD = Set-RgProcPriority $deadId $sD 'below' } catch { $threw = $true }
+    Assert (-not $threw -and -not $rD.ok -and $rD.error -match 'không còn chạy|đã kết thúc') 'priority: PID đã chết -> từ chối, không ném lỗi'
+    $rD2 = $null; try { $rD2 = Set-RgProcPriority $deadId $sD 'normal' } catch { $threw = $true }
+    Assert (-not $threw -and -not $rD2.ok) 'priority: hoàn tác PID đã chết -> từ chối, không ném lỗi'
+    $rZ = $null; try { $rZ = Set-RgProcPriority 0 $sD 'below' } catch { $threw = $true }
+    Assert (-not $threw -and -not $rZ.ok) 'priority: PID 0 -> từ chối'
+
+    # mục có PID không còn sống bị dọn khi đọc
+    $prE = Start-Process ping -ArgumentList '-n', '300', '127.0.0.1' -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 500
+    $sE = StartStamp $prE.Id
+    Assert ((Set-RgProcPriority $prE.Id $sE 'below').ok -and @(Read-RgProcPriority).Count -eq 1) 'priority: hạ tiến trình E'
+    Stop-Process -Id $prE.Id -Force; [void]$prE.WaitForExit(5000)
+    Assert (@(Read-RgProcPriority).Count -eq 0 -and ((Get-Content $priPath -Raw) -match '^\s*\[\s*\]\s*$')) 'priority: PID không còn sống bị dọn khỏi file khi đọc'
+
+    # PID của chính server/test -> từ chối
+    $rSelf = Set-RgProcPriority $PID (StartStamp $PID) 'below'
+    Assert (-not $rSelf.ok -and $rSelf.error -match 'chính Resource Guard' -and (PClass $PID) -eq 'Normal') 'priority: PID của chính tiến trình đang chạy mã (server) -> từ chối'
+    Assert ((Get-RgProcLowerVerdict 4242 'powershell' 'other' 'pwsh -File C:\x\scripts\rg-scan.ps1 -Mode breakdown' 1 $ctxL) -match 'chính Resource Guard') 'priority: job nền rg-*.ps1 nhận ra qua dòng lệnh -> từ chối'
+
+    # nhóm agent / infra / tên bảo vệ / ledger -> từ chối (dùng tiến trình thật + đổi cấu hình tạm)
+    $cfgPath = Join-Path $home_ 'config.json'; $cfgOrig = [IO.File]::ReadAllText($cfgPath)
+    try {
+        foreach ($g in 'infra', 'agent') {
+            $cg = ConvertFrom-Json $cfgOrig; $cg.groups.dev = @(); $cg.groups.$g = @('ping')
+            [IO.File]::WriteAllText($cfgPath, (ConvertTo-Json $cg -Depth 8), (New-Object Text.UTF8Encoding $false))
+            $rg = Set-RgProcPriority $prB.Id $sB 'below'
+            Assert (-not $rg.ok -and (PClass $prB.Id) -eq 'Normal' -and (Get-Process -Id $prB.Id -ErrorAction SilentlyContinue)) "priority: nhóm '$g' -> từ chối, tiến trình còn nguyên"
+        }
+    } finally { [IO.File]::WriteAllText($cfgPath, $cfgOrig, (New-Object Text.UTF8Encoding $false)) }
+    $polPathP = Get-RgPolicyPath; $polHad = Test-Path $polPathP; $polTxt = $null; if ($polHad) { $polTxt = [IO.File]::ReadAllText($polPathP) }
+    try {
+        [void](Save-RgPolicy (ConvertTo-RgPolicy ([pscustomobject]@{ protectProcesses = @('ping') })))
+        $rP = Set-RgProcPriority $prB.Id $sB 'below'
+        Assert (-not $rP.ok -and $rP.error -match 'vùng bảo vệ' -and (PClass $prB.Id) -eq 'Normal') 'priority: tên tiến trình trong vùng bảo vệ -> từ chối'
+    } finally { if ($polHad) { [IO.File]::WriteAllText($polPathP, $polTxt, (New-Object Text.UTF8Encoding $false)) } else { Remove-Item $polPathP -Force -ErrorAction SilentlyContinue } }
+    $prC = Start-Process ping -ArgumentList '-n', '300', '127.0.0.1' -WindowStyle Hidden -PassThru; $procs += $prC
+    Start-Sleep -Milliseconds 500
+    [void](Register-RgProcess -ProcId $prC.Id -Agent 'claude' -Label 'priority test' -OwnerPid $PID)
+    $rL = Set-RgProcPriority $prC.Id (StartStamp $prC.Id) 'below'
+    Assert (-not $rL.ok -and $rL.error -match 'trợ lý AI' -and (PClass $prC.Id) -eq 'Normal') 'priority: tiến trình trong ledger agent -> từ chối'
+    Write-RgLedger @(Read-RgLedger | Where-Object { [int]$_.pid -ne $prC.Id })   # trả ledger như cũ cho các test sau
+
+    # quyết định thuần: phiên 0 / phiên khác / tên hệ thống
+    $vOk = Get-RgProcLowerVerdict 5000 'ping' 'dev' '' $ctxL.session $ctxL
+    Assert ($vOk -eq '') 'priority: verdict thuần chấp nhận tiến trình thường cùng phiên'
+    Assert ((Get-RgProcLowerVerdict 5000 'ping' 'dev' '' 0 $ctxL) -match 'phiên 0') 'priority: phiên 0 -> từ chối'
+    Assert ((Get-RgProcLowerVerdict 5000 'ping' 'dev' '' ($ctxL.session + 7) $ctxL) -match 'phiên đăng nhập khác') 'priority: phiên khác -> từ chối'
+    Assert ((Get-RgProcLowerVerdict 5000 'ping' 'dev' '' $null $ctxL) -match 'phiên') 'priority: không đọc được phiên -> từ chối'
+    Assert ((Get-RgProcLowerVerdict 5000 'svchost' 'other' '' $ctxL.session $ctxL) -match 'hệ thống' -and (Get-RgProcLowerVerdict 5000 'explorer' 'other' '' $ctxL.session $ctxL) -match 'hệ thống') 'priority: svchost/explorer (hệ thống/giao diện) -> từ chối'
+    Assert ((Get-RgProcLowerVerdict 5000 'claude' 'agent' '' $ctxL.session $ctxL) -match 'trợ lý' -and (Get-RgProcLowerVerdict 5000 'sqlservr' 'infra' '' $ctxL.session $ctxL) -match 'Hạ tầng') 'priority: nhóm agent / infra -> từ chối'
+    Assert ((Get-RgProcLowerVerdict 4 'system' 'other' '' 0 $ctxL) -match 'hệ thống') 'priority: PID <= 4 -> từ chối'
+    foreach ($pp in $procs) { if ($pp.Id -in $prA.Id, $prB.Id) { Assert (-not $pp.HasExited) 'priority: tiến trình thử vẫn sống sau mọi lần từ chối (không có đường kill)' } }
+    $srvSrc = Get-Content (Join-Path $root 'scripts\rg-proc.ps1') -Raw
+    Assert ($srvSrc -notmatch 'Stop-Process|\.Kill\(|taskkill|CloseMainWindow') 'priority: rg-proc.ps1 không chứa bất kỳ đường kết thúc tiến trình nào'
+
+    Write-Host "`n[preview] xem trước chính sách + bằng chứng chạy thử (P5)"
+    $pvCand = [pscustomobject]@{ finishedUtc = $nowU.ToString('o'); items = @(
+            (AI 'p1' 'temp-entry' 'C:\fake\tmp\big' 5.0), (AI 'p2' 'dotnet-artifact' 'C:\fake\ws\x\obj' 2.0), (AI 'p3' 'cache-aged' 'C:\fake\cache\n' 3.0), (AI 'p4' 'temp-entry' 'C:\fake\tmp\young' 1.0 'delete' $true $false 2)) }
+    $pvLowC = [pscustomobject]@{ availRamGB = 9; diskFreeGB = 8.6; commitPct = 40; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 8.6; totalGB = 200 }) }
+    $pvOkC = [pscustomobject]@{ availRamGB = 9; diskFreeGB = 50; commitPct = 40; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 50; totalGB = 200 }) }
+    $pvDraft = [pscustomobject]@{ mode = 'dry-run'; targetFreeGB = 25; categories = [pscustomobject]@{ 'temp-entry' = 'auto'; 'dotnet-artifact' = 'auto'; 'cache-aged' = 'ask'; 'node_modules' = 'keep'; 'process' = 'ask' } }
+    $pvCur = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; categories = [pscustomobject]@{ 'temp-entry' = 'auto'; 'dotnet-artifact' = 'auto'; 'cache-aged' = 'ask'; 'node_modules' = 'keep'; 'process' = 'ask' } })
+    $polFileBefore = $null; if (Test-Path (Get-RgPolicyPath)) { $polFileBefore = [IO.File]::ReadAllText((Get-RgPolicyPath)) }
+    $pv = Get-RgAutoPreview $pvDraft $pvCand $pvLowC $pvCur @{} @() $cfg
+    $polFileAfter = $null; if (Test-Path (Get-RgPolicyPath)) { $polFileAfter = [IO.File]::ReadAllText((Get-RgPolicyPath)) }
+    Assert (($polFileBefore -ceq $polFileAfter) -and (Get-RgPolicy).mode -ne 'dry-run') 'preview: bản nháp KHÔNG bị lưu (policy.json giữ nguyên, mode đang lưu không đổi)'
+    # so với engine thật với cùng đầu vào
+    $pvPol = ConvertTo-RgPolicy $pvDraft
+    $pvStress = Get-RgStressInfo $pvPol $cfg $pvLowC
+    foreach ($d_ in @($pvStress.drives)) { if ([string]$d_.trigger -ne 'off') { $d_.stress = $true; $pvStress.diskStress = $true } }
+    if ([string]$pvPol.ramTrigger -ne 'off') { $pvStress.ramStress = $true }
+    $direct = Select-RgAutoItems @($pvCand.items) $pvPol $pvStress
+    Assert ((@($pv.forced.selected | ForEach-Object { $_.key }) -join ',') -eq (@($direct.selected | ForEach-Object { $_.key }) -join ',') -and @($pv.forced.selected).Count -eq 2) 'preview: forced.selected khớp Select-RgAutoItems với cùng đầu vào (temp + bin/obj)'
+    Assert ($pv.forced.selected[0].kind -eq 'temp-entry' -and $pv.forced.selected[0].drive -eq 'C' -and $pv.forced.selected[0].sizeBytes -eq [long](5 * 1GB) -and $pv.forced.selected[0].target -eq 'C:\fake\tmp\big') 'preview: mục chọn có key/kind/target/sizeBytes/drive'
+    $sk = @($pv.forced.skipped | ForEach-Object { $_.kind + ':' + $_.reason })
+    Assert (@($pv.forced.skipped | Where-Object { $_.kind -eq 'cache-aged' -and $_.reason -match 'ask' }).Count -eq 1 -and @($pv.forced.skipped | Where-Object { $_.reason -match 'young|dưới ngưỡng tuổi' }).Count -eq 1) 'preview: forced.skipped nêu lý do (nhóm ở chế độ hỏi, mục young)'
+    $pd = @($pv.forced.perDrive)[0]
+    Assert ($pd.drive -eq 'C' -and $pd.freeGB -eq 8.6 -and $pd.afterGB -eq 15.6 -and $pd.stateBefore -eq 'Critical' -and $pd.stateAfter -eq 'Caution' -and $pd.targetFreeGB -eq 25 -and $pv.forced.kills -eq 0) 'preview: perDrive trước -> sau (8,6 -> 15,6 GB, Nguy cấp -> Cần chú ý) + kills = 0'
+    Assert ($pv.now.wouldRun -and $pv.now.because -match 'Ổ C' -and $pv.now.because -match 'Chạy thử') 'preview: now.wouldRun = true khi ổ tới ngưỡng, nói rõ chế độ Chạy thử'
+    $pvNo = Get-RgAutoPreview $pvDraft $pvCand $pvOkC $pvCur @{} @() $cfg
+    Assert (-not $pvNo.now.wouldRun -and $pvNo.now.because -match 'chưa tới ngưỡng kích hoạt') 'preview: now.wouldRun = false khi ổ còn rộng'
+    Assert (@($pvNo.forced.selected).Count -eq 0 -and @($pvNo.forced.skipped | Where-Object { $_.reason -match 'đủ dung lượng mục tiêu' }).Count -ge 1 -and $pvNo.forced.perDrive[0].afterGB -eq 50) 'preview: máy đang ổn (50 GB >= mục tiêu 25) -> forced không chọn thêm, lý do "đã đủ dung lượng mục tiêu"'
+    $pvOff = Get-RgAutoPreview ([pscustomobject]@{ mode = 'off' }) $pvCand $pvLowC $pvCur @{} @() $cfg
+    Assert (-not $pvOff.now.wouldRun -and $pvOff.now.because -match 'Tắt') 'preview: chế độ Tắt -> không chạy, nói rõ lý do'
+    Assert (-not $pv.needsPin) 'preview: needsPin = false khi bản nháp chặt hơn/bằng (Chạy thử)'
+    $pvLoose = [pscustomobject]@{ mode = 'on'; categories = [pscustomobject]@{ 'temp-entry' = 'auto'; 'dotnet-artifact' = 'auto'; 'cache-aged' = 'auto'; 'node_modules' = 'keep'; 'process' = 'ask' } }
+    Assert ((Get-RgAutoPreview $pvLoose $pvCand $pvLowC $pvCur @{} @() $cfg).needsPin) 'preview: needsPin = true khi nới lỏng lúc chế độ Bật (cache: Hỏi -> Tự động)'
+    $pvSame = [pscustomobject]@{ mode = 'on'; categories = $pvDraft.categories }
+    Assert (-not (Get-RgAutoPreview $pvSame $pvCand $pvLowC $pvCur @{} @() $cfg).needsPin) 'preview: needsPin = false khi bản nháp không nới lỏng chính sách đang lưu'
+    $pvEmpty = Get-RgAutoPreview $pvDraft ([pscustomobject]@{ finishedUtc = ''; items = @() }) $pvLowC $pvCur @{} @() $cfg
+    Assert (@($pvEmpty.forced.selected).Count -eq 0 -and $pvEmpty.ok) 'preview: danh sách ứng viên rỗng -> không chọn gì, không lỗi'
+
+    # triggers14d: đếm lần đi từ nhẹ hơn lên >= ngưỡng kích hoạt của bản nháp
+    $tt0 = (Get-Date).AddDays(-3)
+    $series = 30, 30, 8, 8, 30, 30, 8, 30, 15, 8, 30
+    $smC = @(0..($series.Count - 1) | ForEach-Object { [pscustomobject]@{ t = $tt0.AddHours($_); freeGB = [double]$series[$_] } })
+    $smD = @(0..3 | ForEach-Object { [pscustomobject]@{ t = $tt0.AddHours($_); freeGB = [double]@(30, 5, 30, 5)[$_] } })
+    $pvT = Get-RgAutoPreview ([pscustomobject]@{ mode = 'dry-run'; diskTrigger = 'Critical'; drives = [pscustomobject]@{ D = [pscustomobject]@{ diskTrigger = 'off' } } }) $pvCand $pvLowC $pvCur @{ C = $smC; D = $smD } @() $cfg
+    $tc = @($pvT.triggers14d | Where-Object drive -eq 'C')[0]
+    Assert ($tc.count -eq 3 -and $tc.lastUtc -and @($pvT.triggers14d | Where-Object drive -eq 'D').Count -eq 0) 'preview: triggers14d đếm đúng 3 lần chạm Nguy cấp ở ổ C; ổ D đặt "off" không có dòng'
+    $pvT2 = Get-RgAutoPreview ([pscustomobject]@{ mode = 'dry-run'; diskTrigger = 'Caution' }) $pvCand $pvLowC $pvCur @{ C = $smC } @() $cfg
+    Assert ((@($pvT2.triggers14d)[0]).count -eq 3) 'preview: ngưỡng Cần chú ý -> đếm lần vượt xuống <= 20 GB (rơi sâu hơn không tính lại)'
+    $pvT3 = Get-RgAutoPreview ([pscustomobject]@{ mode = 'dry-run'; diskTrigger = 'Critical' }) $pvCand $pvLowC $pvCur @{ C = @() } @() $cfg
+    Assert ((@($pvT3.triggers14d)[0]).count -eq 0 -and $null -eq (@($pvT3.triggers14d)[0]).lastUtc) 'preview: không có mẫu -> count 0, lastUtc null'
+
+    # evidence từ log auto-run
+    function EvEv([string]$Mode, $ByKind, [int]$HoursAgo) { [pscustomobject]@{ ts = (Get-Date).ToUniversalTime().AddHours(-$HoursAgo).ToString('o'); event = 'auto-run'; data = [pscustomobject]@{ mode = $Mode; byKind = $ByKind } } }
+    $evs = @(
+        (EvEv 'dry-run' ([pscustomobject]@{ 'temp-entry' = [pscustomobject]@{ items = 3; bytes = 1000 }; 'dotnet-artifact' = [pscustomobject]@{ items = 0; bytes = 0 } }) 48),
+        (EvEv 'dry-run' ([pscustomobject]@{ 'temp-entry' = [pscustomobject]@{ items = 5; bytes = 2000 } }) 24),
+        (EvEv 'on' ([pscustomobject]@{ 'temp-entry' = [pscustomobject]@{ items = 99; bytes = 99999 } }) 12),
+        ([pscustomobject]@{ ts = (Get-Date).ToUniversalTime().AddHours(-6).ToString('o'); event = 'auto-run'; data = [pscustomobject]@{ mode = 'dry-run' } }),
+        (EvEv 'dry-run' ([pscustomobject]@{ 'node_modules' = [pscustomobject]@{ items = 2; bytes = 500 } }) 3))
+    $evd = Get-RgAutoEvidence $evs
+    $evT = @($evd | Where-Object kind -eq 'temp-entry')[0]
+    Assert ($evT.dryRuns -eq 2 -and $evT.items -eq 8 -and $evT.bytes -eq 3000 -and $evT.sinceUtc -eq $evs[0].ts) 'evidence: cộng các lượt chạy thử theo nhóm (2 lượt, 8 mục, 3000 byte), sinceUtc = lượt đầu'
+    Assert (@($evd | Where-Object kind -eq 'dotnet-artifact').Count -eq 0 -and @($evd | Where-Object kind -eq 'node_modules')[0].dryRuns -eq 1) 'evidence: nhóm 0 mục không tính; lượt chạy thật và log cũ không có byKind bị bỏ qua'
+    $pvE = Get-RgAutoPreview $pvDraft $pvCand $pvLowC $pvCur @{} $evs $cfg
+    Assert (@($pvE.evidence).Count -eq 2) 'preview: evidence đi theo sự kiện đã cho'
+
+    Write-Host "`n[setup] thông báo tiếng Việt + API thiết lập (P7)"
+    Assert ((Get-RgStateVi 'Normal') -eq 'Ổn' -and (Get-RgStateVi 'Caution') -eq 'Cần chú ý' -and (Get-RgStateVi 'Restricted') -eq 'Hạn chế' -and (Get-RgStateVi 'Critical') -eq 'Nguy cấp') 'toast: tên trạng thái tiếng Việt Ổn / Cần chú ý / Hạn chế / Nguy cấp'
+    $tsDisk = [pscustomobject]@{ availRamGB = 9; diskFreeGB = 8.6; commitPct = 40; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 8.6 }) }
+    $tbDisk = Get-RgBudget -Task session -Snapshot $tsDisk -Table @()
+    $tt1 = Get-RgToastText 'Critical' $true $tbDisk $tsDisk $cfg
+    Assert ($tt1.title -eq 'Resource Guard: Nguy cấp' -and $tt1.body -eq 'Ổ C còn 8,6 GB. Mở Resource Guard để xem kế hoạch dọn.') 'toast: ổ đầy -> "Ổ C còn 8,6 GB. Mở Resource Guard để xem kế hoạch dọn."'
+    $tsRam = [pscustomobject]@{ availRamGB = 2.1; diskFreeGB = 50; commitPct = 40; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 50 }) }
+    $tt2 = Get-RgToastText 'Restricted' $true (Get-RgBudget -Task session -Snapshot $tsRam -Table @()) $tsRam $cfg
+    Assert ($tt2.title -eq 'Resource Guard: Hạn chế' -and $tt2.body -match '^RAM trống còn 2,1 GB' ) 'toast: RAM thấp -> câu về RAM kèm số liệu'
+    $tsCommit = [pscustomobject]@{ availRamGB = 9; diskFreeGB = 50; commitPct = 92; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 50 }) }
+    $tt3 = Get-RgToastText 'Restricted' $true (Get-RgBudget -Task session -Snapshot $tsCommit -Table @()) $tsCommit $cfg
+    Assert ($tt3.body -match 'Bộ nhớ cam kết đã dùng 92%') 'toast: commit cao -> "Bộ nhớ cam kết" (thay Commit)'
+    $tsBoth = [pscustomobject]@{ availRamGB = 2.1; diskFreeGB = 8.6; commitPct = 92; diskDrive = 'C'; drives = @([pscustomobject]@{ drive = 'C'; freeGB = 8.6 }, [pscustomobject]@{ drive = 'D'; freeGB = 15 }) }
+    $tt4 = Get-RgToastText 'Critical' $true (Get-RgBudget -Task session -Snapshot $tsBoth -Table @()) $tsBoth $cfg
+    Assert ($tt4.body -match '^Ổ C còn 8,6 GB') 'toast: nhiều nguồn -> chọn nguồn nặng nhất (ổ Nguy cấp thắng RAM Hạn chế)'
+    $tt5 = Get-RgToastText 'Normal' $false (Get-RgBudget -Task session -Snapshot $tsDisk -Table @()) $tsDisk $cfg
+    Assert ($tt5.title -eq 'Resource Guard: máy đã ổn' -and $tt5.body -notmatch 'Normal') 'toast: hồi phục -> "máy đã ổn", không còn chữ Normal'
+    Assert (($tt1.body + $tt2.body + $tt3.body + $tt4.body) -notmatch 'available RAM|free \d|->|commit charge') 'toast: không dán chuỗi reasons tiếng Anh thô'
+
+    $script:fx = @()
+    $fxEffects = @{ autostart = { param($on) $script:fx += "autostart=$on" }; shortcut = { param($on) $script:fx += "shortcut=$on" } }
+    $fxProbe = { @{ autostart = $false; shortcut = $false } }
+    $setupFile = Get-RgSetupFilePath
+    Assert (-not (Test-Path $setupFile)) 'setup: chưa có state\setup.json'
+    $si0 = Get-RgSetupInfo $fxProbe
+    Assert ($si0.firstRun -eq $true -and $si0.autostart -eq $false -and $si0.shortcut -eq $false -and $si0.Contains('pinConfigured') -and $si0.Contains('mode')) 'setup: GET -> { autostart, shortcut, pinConfigured, mode, firstRun = true }'
+    $sp1 = Invoke-RgSetupPost ([pscustomobject]@{ firstRunDone = $true }) $fxEffects $fxProbe
+    Assert ($sp1.ok -and $sp1.info.firstRun -eq $false -and (Test-Path $setupFile) -and (Get-RgSetupInfo $fxProbe).firstRun -eq $false -and $script:fx.Count -eq 0) 'setup: firstRun chuyển false sau firstRunDone, không đụng autostart/shortcut'
+    $sp2 = Invoke-RgSetupPost ([pscustomobject]@{ autostart = $true }) $fxEffects $fxProbe
+    Assert ($sp2.ok -and ($script:fx -join ',') -eq 'autostart=True') 'setup: autostart:true -> gọi đúng hiệu ứng bật tự chạy (một lần)'
+    $script:fx = @()
+    $sp3 = Invoke-RgSetupPost ([pscustomobject]@{ autostart = $false; shortcut = $true }) $fxEffects $fxProbe
+    Assert ($sp3.ok -and ($script:fx -join ',') -eq 'autostart=False,shortcut=True') 'setup: gộp autostart + shortcut trong một yêu cầu'
+    $script:fx = @()
+    $sp4 = Invoke-RgSetupPost ([pscustomobject]@{ autostart = 'yes' }) $fxEffects $fxProbe
+    Assert (-not $sp4.ok -and $sp4.error -match 'true hoặc false' -and $script:fx.Count -eq 0) 'setup: giá trị không phải bool bị từ chối, không làm gì'
+    $sp5 = Invoke-RgSetupPost ([pscustomobject]@{ pin = '1234'; evil = 1; setPin = $true }) $fxEffects $fxProbe
+    Assert ($sp5.ok -and $script:fx.Count -eq 0 -and -not (Test-RgPinConfigured)) 'setup: khoá lạ (kể cả pin) bị bỏ qua, PIN KHÔNG đặt được qua API'
+    Assert (-not (Invoke-RgSetupPost $null $fxEffects $fxProbe).ok) 'setup: thân yêu cầu rỗng -> từ chối'
+    $fxThrow = @{ autostart = { param($on) throw 'bị từ chối' }; shortcut = { param($on) } }
+    $sp6 = Invoke-RgSetupPost ([pscustomobject]@{ autostart = $true }) $fxThrow $fxProbe
+    Assert (-not $sp6.ok -and $sp6.error -match 'bị từ chối') 'setup: hiệu ứng lỗi -> ok=false kèm lý do, không ném lỗi'
+    Assert ((Get-Content (Get-ChildItem (Join-Path $home_ 'logs') -Filter 'rg-*.jsonl' | Select-Object -Last 1).FullName -Encoding UTF8 | Where-Object { $_ -match '"event":"setup-change"' }).Count -ge 3) 'setup: ghi log setup-change'
+    Remove-Item $setupFile -Force -ErrorAction SilentlyContinue
     $p0 = Get-RgPolicy
     Assert ($p0.mode -eq 'off' -and $p0.categories['cache-aged'] -eq 'ask' -and $p0.categories['temp-entry'] -eq 'auto') 'policy: mặc định mode off, nhóm rủi ro cao không auto'
     $yPol = Get-RgPolicy; $yPol.categories['cache-aged'] = 'auto'
@@ -359,6 +726,11 @@ try {
     $pl = Read-RgPlan $real.planId
     Assert ($pl.approval.approvedBy -eq 'policy' -and $pl.status -eq 'applied') 'auto on: đi qua plan -> approve(policy) -> apply'
     Assert ((Get-Content (Get-RgAutoLastPath) -Raw | ConvertFrom-Json).mode -eq 'on') 'auto: ghi auto-last.json'
+    $arEv = @(Read-RgAutoRunEvents 1)
+    $arDry = @($arEv | Where-Object { $_.data.mode -eq 'dry-run' })[-1]
+    $arOn = @($arEv | Where-Object { $_.data.mode -eq 'on' })[-1]
+    Assert ($arDry.data.byKind.'temp-entry'.items -ge 1 -and $arDry.data.byKind.'temp-entry'.bytes -ge 2048 -and $arDry.data.byKind.'dotnet-artifact'.items -ge 1 -and $null -ne $arDry.data.trigger -and $null -ne $arDry.data.freedBytes) 'auto-run: log có byKind {items, bytes} theo nhóm, các trường cũ giữ nguyên'
+    Assert ($arOn.data.byKind.'temp-entry'.items -ge 1) 'auto-run: lượt chạy thật cũng ghi byKind'
     Assert ($null -eq (Get-RgJobState 'nope.json')) 'job: file không tồn tại -> null'
     Write-RgJobState 'zombie.progress.json' ([ordered]@{ pid = 999999; status = 'running'; message = '' })
     Assert ((Get-RgJobState 'zombie.progress.json').status -eq 'error') 'job: tiến trình đã chết mà vẫn "running" -> báo error'
@@ -367,10 +739,41 @@ try {
     $cl1 = Join-Path $tmp 'ui-old'; NewFile (Join-Path $cl1 'f.bin') 1024; Age $cl1 30
     $keepProj2 = Join-Path $ws 'keepme\sub'; NewFile (Join-Path $keepProj2 's.csproj') 10; NewFile (Join-Path $keepProj2 'obj\o.dll') 100; Age (Join-Path $keepProj2 'obj') 30
     & $hostExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\rg-scan.ps1') -Mode candidates | Out-Null
-    $cd = Get-Content (Join-Path $home_ 'state\scan-candidates.json') -Raw | ConvertFrom-Json
+    $cd = Get-Content (Join-Path $home_ 'state\scan-candidates.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $kTmp = @($cd.items | Where-Object { $_.path -eq $cl1 })[0].key
     $kProt = @($cd.items | Where-Object { $_.path -eq (Join-Path $keepProj2 'obj') })[0].key
     Assert ($kTmp -match '^[0-9a-f]{12}$' -and $kProt) 'scan candidates: có key ổn định cho từng mục'
+
+    # ---- Biên lai ứng viên (P1): mỗi mục có đủ 5 trường; reason/risk cũ không đổi ----
+    $rcFields = 'why', 'impact', 'regen', 'regenHint', 'riskLevel'
+    $rcMissing = @($cd.items | Where-Object { $it = $_; @($rcFields | Where-Object { -not [string]$it.$_ }).Count -gt 0 })
+    Assert ($cd.items.Count -gt 0 -and $rcMissing.Count -eq 0) 'receipt: scan-candidates.json có đủ 5 trường không rỗng cho mọi mục'
+    Assert (@($cd.items | Where-Object { $_.regen -notin 'auto', 'rebuild', 'redownload', 'restore-zip', 'none' -or $_.riskLevel -notin 'low', 'medium', 'high' }).Count -eq 0) 'receipt: regen/riskLevel chỉ nhận giá trị trong hợp đồng'
+    $rcTmp = @($cd.items | Where-Object { $_.path -eq $cl1 })[0]
+    Assert ($rcTmp.regen -eq 'auto' -and $rcTmp.riskLevel -eq 'low' -and $rcTmp.why -match 'ngày' -and $rcTmp.reason -match '^temp entry untouched for \d+ days$' -and $rcTmp.risk -like 'low*') 'receipt: temp-entry => auto/low, why có số ngày, reason/risk tiếng Anh giữ nguyên'
+    $recCands = @(Get-RgCandidates)
+    $rcKinds = @{}
+    foreach ($ci in $recCands) { if ($ci.action -ne 'report' -or $ci.kind -in 'app', 'vhdx', 'process') { if (-not $rcKinds.ContainsKey($ci.kind)) { $rcKinds[$ci.kind] = $ci } } }
+    Assert ($rcKinds.ContainsKey('dotnet-artifact') -and $rcKinds['dotnet-artifact'].regen -eq 'rebuild' -and $rcKinds['dotnet-artifact'].riskLevel -eq 'low') 'receipt: dotnet-artifact => rebuild/low'
+    $rcTbl = @{ 'temp-entry' = @('auto', 'low'); 'dotnet-artifact' = @('rebuild', 'low'); 'node_modules' = @('redownload', 'medium'); 'cache-aged' = @('redownload', 'low')
+        'stale-repo' = @('restore-zip', 'medium'); 'large-item' = @('restore-zip', 'high'); 'process' = @('none', 'medium'); 'app' = @('none', 'high') }
+    $rcBad = @()
+    foreach ($ci in $recCands) {
+        if ($ci.young -or $ci.action -eq 'report' -and $ci.kind -notin 'app', 'process') { continue }
+        $exp = $rcTbl[[string]$ci.kind]
+        if (-not $exp -or $ci.regen -ne $exp[0] -or $ci.riskLevel -ne $exp[1]) { $rcBad += "$($ci.kind):$($ci.regen)/$($ci.riskLevel)" }
+    }
+    Assert ($rcBad.Count -eq 0) "receipt: bảng ánh xạ kind -> regen/riskLevel đúng hợp đồng ($($rcBad -join ', '))"
+    # mục young: rủi ro cao hơn bản thường (low -> medium, medium -> high)
+    $baseTmp = [pscustomobject]@{ kind = 'temp-entry'; action = 'delete'; young = $false; ageDays = 30; newestWriteUtc = ''; sizeBytes = 1MB; path = 'C:\x\a'; name = ''; needsAdmin = $false }
+    $youngTmp = [pscustomobject]@{ kind = 'temp-entry'; action = 'delete'; young = $true; ageDays = 1; newestWriteUtc = ''; sizeBytes = 1MB; path = 'C:\x\a'; name = ''; needsAdmin = $false }
+    $baseNm = [pscustomobject]@{ kind = 'node_modules'; action = 'delete'; young = $false; ageDays = 0; newestWriteUtc = ''; sizeBytes = 1MB; path = 'C:\x\n'; name = ''; needsAdmin = $false }
+    $youngNm = [pscustomobject]@{ kind = 'node_modules'; action = 'delete'; young = $true; ageDays = 2; newestWriteUtc = ''; sizeBytes = 1MB; path = 'C:\x\n'; name = ''; needsAdmin = $false }
+    Assert ((Get-RgItemReceipt $baseTmp $cfg).riskLevel -eq 'low' -and (Get-RgItemReceipt $youngTmp $cfg).riskLevel -eq 'medium') 'receipt: temp-entry young tăng một bậc (low -> medium)'
+    Assert ((Get-RgItemReceipt $baseNm $cfg).riskLevel -eq 'medium' -and (Get-RgItemReceipt $youngNm $cfg).riskLevel -eq 'high') 'receipt: node_modules young tăng một bậc (medium -> high)'
+    Assert ((Get-RgItemReceipt $baseTmp $cfg).why -match '30 ngày') 'receipt: why nêu đúng số ngày không dùng'
+    $unk = Get-RgItemReceipt ([pscustomobject]@{ kind = 'zzz'; action = 'report'; young = $false; ageDays = 0; newestWriteUtc = ''; sizeBytes = 0; path = ''; name = ''; needsAdmin = $false }) $cfg
+    Assert ($unk.why -and $unk.impact -and $unk.regen -and $unk.regenHint -and $unk.riskLevel) 'receipt: kind lạ vẫn có đủ 5 trường (không lỗi)'
     & $hostExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\rg-cleanup.ps1') -Keys "$kTmp,$kProt,deadbeef0000,../../etc" | Out-Null
     $cr = Get-Content (Join-Path $home_ 'state\cleanup-last.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert (-not (Test-Path -LiteralPath $cl1) -and (Test-Path -LiteralPath (Join-Path $keepProj2 'obj'))) 'rg-cleanup: xoá mục được chọn, giữ mục trong vùng bảo vệ'
@@ -506,6 +909,200 @@ try {
     Assert ($aOld.kind -eq 'app' -and $aOld.action -eq 'report') 'app: ứng dụng lâu không ghi file => chỉ báo cáo'
     Assert (-not (@($c4 | Where-Object { $_.path -like (Join-Path $apps 'Windows Kit*') -or $_.path -eq (Join-Path $apps 'ActiveApp') }).Count)) 'app: bỏ qua mục Windows và app đang hoạt động'
     Assert ((Get-RgDeleteBlocker (New-RgItem -Kind 'app' -Action delete -Level 3 -Path (Join-Path $apps 'OldApp')) $cfg) -match 'not deletable') 'app: không bao giờ xoá được (blocker)'
+
+    # ---- Agent (P19): payload mang kế hoạch tất định + nhóm cần xem lại ----
+    Write-Host "`n[agent] payload có advice.steps + review.keys (P19)"
+    . (Join-Path $root 'scripts\rg-agent.ps1')   # chỉ nạp hàm (rg-agent tự return khi bị dot-source)
+    $apl = New-RgAgentPayload
+    Assert ($apl.Contains('advice') -and $apl.advice.Contains('steps') -and $apl.Contains('review') -and $apl.review.Contains('keys')) 'agent: payload có advice.steps và review.keys'
+    $aKeys = @($apl.cleanupCandidates | ForEach-Object { $_.key })
+    Assert (@($apl.review.keys | Where-Object { $aKeys -notcontains $_ }).Count -eq 0) 'agent: mọi key trong review.keys đều nằm trong cleanupCandidates (để key agent trả về còn hợp lệ)'
+    Assert (@($apl.advice.steps | Where-Object { -not $_.id -or -not $_.kind -or $null -eq $_.bytes -or -not $_.riskLevel }).Count -eq 0) 'agent: mỗi bước advice trong payload có id/kind/bytes/riskLevel'
+    Assert ((Get-RgAgentPrompt '{}') -match 'review\.keys' -and (Get-RgAgentPrompt '{}') -match 'nên làm gì trước') 'agent: prompt yêu cầu đánh giá review.keys trước và summary trả lời "nên làm gì trước"'
+
+    # ---- Scanner v2 (P9): cây thư mục giả, -RootOverride/-OutDir. Số mong đợi tính từ chính các file đã tạo; đã đối chiếu với bản cũ trên ổ C thật
+    #      (cùng số file/byte từng nhóm ở các nhóm không đổi giữa hai lượt: system-windows 39.854.473.064 B/181.345 file, programs 20.356.088.081 B/50.182 file). ----
+    Write-Host "`n[scanner] quét v2: tổng khớp, junction, vùng quét, cây thư mục (P9)"
+    $sr = Join-Path $sandbox 'scanroot'; $so = Join-Path $sandbox 'scanout'
+    $script:scanFiles = 0; $script:scanBytes = 0L
+    function SF([string]$Rel, [int]$Bytes) { NewFile (Join-Path $sr $Rel) $Bytes; $script:scanFiles++; $script:scanBytes += $Bytes }
+    SF 'Windows\a.dll' 1000; SF 'Windows\sub\b.dll' 2000; SF 'Program Files\App\p.exe' 3000; SF 'ProgramData\x\y.dat' 500
+    SF 'Users\me\Documents\doc.txt' 700; SF 'Users\me\Downloads\d.zip' 1100; SF 'Users\me\AppData\Local\Temp\t1.tmp' 400; SF 'Users\me\AppData\Local\Temp\sub\t2.tmp' 600
+    SF 'Users\me\.nuget\pkg\n.nupkg' 900; SF 'Users\me\file-in-profile.txt' 50; SF 'Users\me\deep\a\b\c\d\e\f\g\x.bin' 1000
+    SF 'Users\other\o.dat' 800; SF 'Users\other\Docs\o2.dat' 200; SF 'pagefile.sys' 4000; SF 'loose\l.bin' 300
+    $junc = Join-Path $sr 'junc-to-windows'
+    cmd /c mklink /J "$junc" (Join-Path $sr 'Windows') | Out-Null
+    function RunScan([string[]]$ScanArgs, [string]$ScanDrive = 'C') {
+        $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        & $hostExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\rg-scan.ps1') -Mode breakdown -Drive $ScanDrive -RootOverride $sr -OutDir $so @ScanArgs *> $null
+        $c = $LASTEXITCODE; $ErrorActionPreference = $old; return $c
+    }
+    function ReadScanJson([string]$Name) { ConvertFrom-Json (Get-Content -LiteralPath (Join-Path $so $Name) -Raw -Encoding UTF8) }
+    function IsoOf($V) { if ($V -is [datetime]) { return $V.ToUniversalTime().ToString('o') }; return [string]$V }   # PS 7 đọc chuỗi ISO thành DateTime
+    function CatOf($B, [string]$Cat) { @($B.categories | Where-Object { $_.cat -eq $Cat })[0] }
+    function TreeViolations($N) { $s = 0L; $v = 0; foreach ($k in @($N.children)) { $s += [long]$k.bytes; $v += (TreeViolations $k) }; if ($s -gt [long]$N.bytes) { $v++ }; return $v }
+    function TreeFind($N, [string]$Like) { if ([string]$N.path -like $Like) { return $N }; foreach ($k in @($N.children)) { $f = TreeFind $k $Like; if ($f) { return $f } }; return $null }
+
+    Assert ((RunScan @('-Scope', 'full')) -eq 0) 'scanner: quét full trên cây giả thoát 0'
+    $bf = ReadScanJson 'scan-breakdown-C.json'
+    Assert ($bf.files -eq $script:scanFiles -and $bf.scannedBytes -eq $script:scanBytes) ("scanner: tổng file/byte bằng đúng số đã tạo ({0} file, {1} B), junction không bị đi vào" -f $script:scanFiles, $script:scanBytes)
+    Assert ($bf.scope -eq 'full' -and $bf.errors -eq 0 -and $bf.skippedDirs -eq 0 -and $bf.threads -ge 1 -and $bf.threads -le 8) 'scanner: scope=full, không lỗi, không bỏ qua thư mục nào, số luồng trong 1..8'
+    Assert ((CatOf $bf 'system-windows').bytes -eq 3000 -and (CatOf $bf 'programs').bytes -eq 3000 -and (CatOf $bf 'program-data').bytes -eq 500) 'scanner: nhóm hệ thống đúng byte (junction không nhân đôi Windows)'
+    Assert ((CatOf $bf 'documents').bytes -eq 700 -and (CatOf $bf 'downloads').bytes -eq 1100 -and (CatOf $bf 'temp').bytes -eq 1000 -and (CatOf $bf 'dev-cache').bytes -eq 900) 'scanner: nhóm tài liệu/downloads/temp/dev-cache đúng byte'
+    Assert ((CatOf $bf 'user-other').bytes -eq 2050 -and (CatOf $bf 'system-files').bytes -eq 4000 -and (CatOf $bf 'other').bytes -eq 300) 'scanner: user-other (hồ sơ khác + phần còn lại của mình), system-files, other đúng byte'
+    Assert ((CatOf $bf 'system-windows').zone -eq 'fixed' -and (CatOf $bf 'system-windows').actionable -eq 'fixed' -and (CatOf $bf 'temp').zone -eq 'hot' -and (CatOf $bf 'temp').actionable -eq 'cleanable' -and (CatOf $bf 'documents').zone -eq 'warm' -and (CatOf $bf 'documents').actionable -eq 'review') 'scanner: mỗi nhóm có zone/actionable (fixed|warm|hot, fixed|review|cleanable)'
+    Assert (-not @($bf.categories | Where-Object { $null -eq $_.scannedUtc -or $null -eq $_.carried }).Count -and -not (@($bf.categories | Where-Object { $_.carried }).Count)) 'scanner: full -> mọi nhóm có scannedUtc, không nhóm nào carried'
+    $fx = ReadScanJson 'scan-fixed-C.json'
+    $fxBytes = 0L; foreach ($e in @($fx.entries)) { $fxBytes += [long]$e.bytes }
+    Assert ($fxBytes -eq 7500) 'scanner: scan-fixed ghi đúng phần vùng cố định (Windows 3000 + Program Files 3000 + ProgramData 500 + hồ sơ khác 1000)'
+    $tf = ReadScanJson 'scan-tree-C.json'
+    Assert ($tf.drive -eq 'C' -and $tf.scope -eq 'full' -and $tf.root.bytes -eq $script:scanBytes -and (TreeViolations $tf.root) -eq 0) 'scanner: file cây có gốc = tổng đã quét và tổng con <= cha ở mọi nút'
+    $dNode = TreeFind $tf.root '*\Users\me\deep\a\b\c\d'
+    Assert ($dNode -and $dNode.bytes -eq 1000 -and -not (TreeFind $tf.root '*\deep\a\b\c\d\e')) 'scanner: cây dừng ở 5 cấp dưới tiền tố rule (cấp sâu hơn gộp vào nút cấp 5)'
+    $wNode = TreeFind $tf.root '*\Windows'
+    Assert ($wNode -and $wNode.zone -eq 'fixed' -and $wNode.bytes -eq 3000) 'scanner: nút Windows trong cây có zone = fixed'
+    $prog = Get-Content -LiteralPath (Join-Path $so 'scan-breakdown.progress.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert ($prog.status -eq 'done' -and $prog.scope -eq 'full' -and @($prog.cats).Count -ge 5 -and $null -ne @($prog.cats)[0].bytes) 'scanner: tiến độ có cats [{cat, bytes}] để UI vẽ dần'
+
+    # focus: bỏ qua vùng fixed, mượn số từ lượt full; không thấy file mới ở vùng fixed nhưng thấy file mới ở vùng hot
+    SF 'Windows\late.dll' 5000   # file mới trong vùng fixed (focus không được thấy)
+    SF 'Users\me\AppData\Local\Temp\t3.tmp' 100
+    Assert ((RunScan @('-Scope', 'focus')) -eq 0) 'scanner: quét focus thoát 0'
+    $bo = ReadScanJson 'scan-breakdown-C.json'
+    Assert ($bo.scope -eq 'focus' -and $bo.skippedDirs -eq 4 -and $bo.carriedBytes -eq 7500 -and $bo.freshBytes -eq ($bo.scannedBytes - 7500)) 'scanner: focus bỏ qua 4 thư mục fixed (Windows, Program Files, ProgramData, hồ sơ khác) và mượn 7500 B'
+    Assert ($bo.files -lt ($script:scanFiles)) 'scanner: focus liệt kê ít file hơn (không vào thư mục fixed)'
+    $cw = CatOf $bo 'system-windows'
+    Assert ($cw.bytes -eq 3000 -and $cw.carried -eq $true -and (IsoOf $cw.scannedUtc) -eq (IsoOf $bf.finishedUtc)) 'scanner: focus -> system-windows lấy từ lượt full (3000 B, carried, scannedUtc của lượt full), không thấy late.dll'
+    Assert ((CatOf $bo 'temp').bytes -eq 1100 -and (CatOf $bo 'temp').carried -eq $false) 'scanner: focus thấy file mới ở vùng hot (temp 1100 B)'
+    $uo = CatOf $bo 'user-other'
+    Assert ($uo.bytes -eq 2050 -and $uo.carriedBytes -eq 1000 -and $uo.carried -eq $true) 'scanner: user-other trộn quét mới + mượn (hồ sơ người khác 1000 B)'
+    $to = ReadScanJson 'scan-tree-C.json'
+    $expRoot = $script:scanBytes - 5000   # late.dll không được thấy ở focus
+    Assert ($to.scope -eq 'focus' -and $to.root.bytes -eq $expRoot -and (TreeViolations $to.root) -eq 0) 'scanner: cây focus giữ nút fixed từ lượt full (gốc = fresh + mượn), tổng con <= cha'
+    $ow = TreeFind $to.root '*\Windows'
+    Assert ($ow -and $ow.bytes -eq 3000 -and $ow.zone -eq 'fixed') 'scanner: cây focus có nút Windows (fixed) ghép từ cây cũ'
+    $ou = TreeFind $to.root '*\Users\other'
+    Assert ($ou -and $ou.bytes -eq 1000) 'scanner: cây focus ghép cả hồ sơ người khác dưới Users'
+    # full lại thấy file mới ở vùng fixed
+    Assert ((RunScan @('-Scope', 'full')) -eq 0 -and (CatOf (ReadScanJson 'scan-breakdown-C.json') 'system-windows').bytes -eq 8000) 'scanner: quét full lại thấy late.dll (system-windows 8000 B)'
+    # focus khi chưa có phần fixed: không mượn gì, nhóm fixed vắng mặt
+    Remove-Item -LiteralPath (Join-Path $so 'scan-fixed-C.json'), (Join-Path $so 'scan-tree-C.json') -Force
+    Assert ((RunScan @('-Scope', 'focus')) -eq 0) 'scanner: focus khi chưa có lượt full thoát 0'
+    $bn = ReadScanJson 'scan-breakdown-C.json'
+    Assert ($bn.carriedBytes -eq 0 -and -not (CatOf $bn 'system-windows') -and -not (CatOf $bn 'programs')) 'scanner: focus lần đầu -> không có số fixed (UI hiện khối "chưa quét chi tiết")'
+    Assert ((RunScan @() 'ZZ') -ne 0)'scanner: tên ổ sai -> thoát khác 0'
+
+    # ---- Quét nền tự làm mới (P10): quyết định thuần Test-RgScanDue ----
+    Write-Host "`n[scandue] quét nền tự làm mới: quyết định thuần (P10)"
+    $n0 = Get-Date
+    function DueCase([double]$Refresh, [bool]$Running, [double[]]$Cpu, $Last, $Drives, $Cand) { Test-RgScanDue -Now $n0 -JobRunning $Running -CpuSamples $Cpu -LastAutoStart $Last -RefreshHours $Refresh -Drives $Drives -CandidatesUtc $Cand }
+    function DrvInfo([string]$L, $FocusAgeH, $FullAgeD) { [pscustomobject]@{ drive = $L; focusUtc = $(if ($null -eq $FocusAgeH) { $null } else { $n0.AddHours(-[double]$FocusAgeH) }); fullUtc = $(if ($null -eq $FullAgeD) { $null } else { $n0.AddDays(-[double]$FullAgeD) }) } }
+    $cOk = @(10, 20, 30); $candFresh = $n0.AddHours(-1)
+    $r = DueCase 0 $false $cOk $null @(DrvInfo 'C' 50 1) $null
+    Assert (-not $r.due -and $r.because -match 'tắt') 'scandue: autoRefreshHours = 0 -> tắt hẳn dù kết quả rất cũ'
+    Assert (-not (DueCase 6 $true $cOk $null @(DrvInfo 'C' 50 1) $null).due) 'scandue: đang có job nền chạy -> không quét'
+    Assert (-not (DueCase 6 $false @(10, 20) $null @(DrvInfo 'C' 50 1) $null).due) 'scandue: chưa đủ 3 mẫu CPU -> chờ'
+    Assert (-not (DueCase 6 $false @(10, 60, 60, 60) $null @(DrvInfo 'C' 50 1) $null).due) 'scandue: CPU trung bình 3 mẫu cuối 60% -> máy bận, không quét'
+    Assert ((DueCase 6 $false @(90, 90, 20, 30, 40) $null @(DrvInfo 'C' 50 1) $candFresh).due) 'scandue: chỉ tính 3 mẫu cuối (30% trung bình) -> được quét'
+    Assert (-not (DueCase 6 $false $cOk $n0.AddMinutes(-5) @(DrvInfo 'C' 50 1) $null).due) 'scandue: vừa tự quét cách đây 5 phút -> chờ đủ 10 phút'
+    Assert ((DueCase 6 $false $cOk $n0.AddMinutes(-11) @(DrvInfo 'C' 50 1) $candFresh).due) 'scandue: cách lần trước 11 phút -> được quét'
+    $r = DueCase 6 $false $cOk $null @(DrvInfo 'C' 7 1) $candFresh
+    Assert ($r.due -and $r.kind -eq 'breakdown' -and $r.drive -eq 'C' -and $r.scope -eq 'focus') 'scandue: ổ C cũ 7 giờ, lượt full 1 ngày -> quét focus ổ C'
+    Assert (-not (DueCase 6 $false $cOk $null @(DrvInfo 'C' 5 1) $candFresh).due) 'scandue: ổ C cũ 5 giờ (< 6) -> chưa cần'
+    Assert ((DueCase 6 $false $cOk $null @(DrvInfo 'C' 7 8) $candFresh).scope -eq 'full') 'scandue: lượt full cũ 8 ngày -> quét full'
+    Assert ((DueCase 6 $false $cOk $null @(DrvInfo 'C' 7 $null) $candFresh).scope -eq 'full') 'scandue: chưa từng quét full -> quét full'
+    $r = DueCase 6 $false $cOk $null @(DrvInfo 'C' $null $null) $candFresh
+    Assert ($r.due -and $r.because -match 'chưa có') 'scandue: ổ chưa có kết quả nào -> quét, nêu lý do chưa có'
+    $r = DueCase 6 $false $cOk $null @((DrvInfo 'C' 7 1), (DrvInfo 'D' 20 1)) $candFresh
+    Assert ($r.drive -eq 'D') 'scandue: nhiều ổ cùng cũ -> chọn ổ cũ nhất (mỗi lần một ổ)'
+    $r = DueCase 6 $false $cOk $null @(DrvInfo 'C' 1 1) $n0.AddHours(-10)
+    Assert ($r.due -and $r.kind -eq 'candidates') 'scandue: ổ còn mới, quét ứng viên cũ 10 giờ -> quét ứng viên'
+    $r = DueCase 6 $false $cOk $null @(DrvInfo 'C' 20 1) $n0.AddHours(-10)
+    Assert ($r.kind -eq 'breakdown') 'scandue: ổ (20 giờ) cũ hơn ứng viên (10 giờ) -> quét ổ trước'
+    $r = DueCase 6 $false $cOk $null @(DrvInfo 'C' 20 1) $n0.AddHours(-30)
+    Assert ($r.kind -eq 'candidates') 'scandue: ứng viên (30 giờ) cũ hơn ổ (20 giờ) -> quét ứng viên trước'
+    $r = DueCase 6 $false $cOk $null @(DrvInfo 'C' 1 1) $candFresh
+    Assert (-not $r.due -and $r.because -match 'còn mới') 'scandue: mọi thứ còn mới -> không quét'
+    Assert ((Get-RgScanRefreshHours ([pscustomobject]@{})) -eq 6 -and (Get-RgScanRefreshHours ([pscustomobject]@{ scan = [pscustomobject]@{ autoRefreshHours = 0 } })) -eq 0 -and (Get-RgScanRefreshHours ([pscustomobject]@{ scan = [pscustomobject]@{ autoRefreshHours = -3 } })) -eq 0 -and (Get-RgScanRefreshHours ([pscustomobject]@{ scan = [pscustomobject]@{ autoRefreshHours = 2.5 } })) -eq 2.5) 'scandue: Get-RgScanRefreshHours: thiếu khoá = 6, âm = 0, đọc đúng giá trị'
+    Assert ((Get-RgScanRefreshHours $cfg) -eq 0) 'scandue: config của test ép autoRefreshHours = 0 (server test không tự quét ổ thật)'
+
+    # ---- API end-to-end: khởi động server THẬT trong sandbox (home tạm, cổng ngẫu nhiên), kiểm cổng X-RG-Client và các route mới ----
+    Write-Host "`n[api] server thật trong sandbox"
+    [void](Save-RgPolicy (ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'off' })))   # server không được tự dọn trong lúc test
+    $lsn = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0); $lsn.Start(); $apiPort = ([Net.IPEndPoint]$lsn.LocalEndpoint).Port; $lsn.Stop()
+    $apiBase = "http://127.0.0.1:$apiPort"
+    $srvProc = Start-Process $hostExe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'scripts\rg-server.ps1'), '-Port', $apiPort, '-NoOpen', '-NoToast' `
+        -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $sandbox 'srv.out') -RedirectStandardError (Join-Path $sandbox 'srv.err')
+    $hdr = @{ 'X-RG-Client' = 'ui' }
+    function Api([string]$Method, [string]$Path, $Body = $null, [bool]$WithClientHeader = $true) {   # trả { code; json }
+        $o = @{ UseBasicParsing = $true; Uri = "$apiBase$Path"; Method = $Method; TimeoutSec = 30 }
+        if ($WithClientHeader) { $o.Headers = $hdr }
+        if ($null -ne $Body) { $o.Body = (ConvertTo-Json $Body -Depth 6); $o.ContentType = 'application/json' }
+        try { $r = Invoke-WebRequest @o; return [pscustomobject]@{ code = [int]$r.StatusCode; json = $(try { ConvertFrom-Json $r.Content } catch { $null }) } }
+        catch { $c = 0; if ($_.Exception.Response) { $c = [int]$_.Exception.Response.StatusCode }; return [pscustomobject]@{ code = $c; json = $(try { ConvertFrom-Json $_.ErrorDetails.Message } catch { $null }) } }
+    }
+    try {
+        $up = $false
+        for ($i = 0; $i -lt 60 -and -not $up; $i++) { Start-Sleep -Milliseconds 500; if ($srvProc.HasExited) { break }; $up = ((Api 'GET' '/api/setup').code -eq 200) }
+        Assert $up 'api: server khởi động và trả /api/setup'
+        $liveOk = $false
+        for ($i = 0; $i -lt 60 -and -not $liveOk; $i++) { $liveOk = ((Api 'GET' '/api/insight').code -eq 200); if (-not $liveOk) { Start-Sleep -Milliseconds 500 } }
+        Assert $liveOk 'api: có số liệu live sau vài giây (/api/insight 200)'
+
+        Assert ((Api 'POST' '/api/setup' @{ firstRunDone = $true } $false).code -eq 403) 'api: POST /api/setup thiếu X-RG-Client -> 403'
+        Assert ((Api 'POST' '/api/auto/preview' @{ policy = @{ mode = 'dry-run' } } $false).code -eq 403) 'api: POST /api/auto/preview thiếu X-RG-Client -> 403'
+        Assert ((Api 'POST' '/api/process/priority' @{ pid = $PID; start = 'x'; level = 'below' } $false).code -eq 403) 'api: POST /api/process/priority thiếu X-RG-Client -> 403'
+        $g0 = Api 'GET' '/api/setup'
+        Assert ($g0.json.firstRun -eq $true -and $null -ne $g0.json.autostart -and $null -ne $g0.json.shortcut -and $null -ne $g0.json.pinConfigured -and $g0.json.mode -eq 'off') 'api: GET /api/setup -> { autostart, shortcut, pinConfigured, mode, firstRun }'
+        $p1 = Api 'POST' '/api/setup' @{ firstRunDone = $true }
+        Assert ($p1.code -eq 200 -and $p1.json.ok -and (Api 'GET' '/api/setup').json.firstRun -eq $false) 'api: POST firstRunDone -> firstRun = false'
+        Assert ((Api 'POST' '/api/setup' @{ autostart = 'maybe' }).code -eq 400) 'api: POST /api/setup giá trị sai kiểu -> 400'
+
+        $ins = Api 'GET' '/api/insight'
+        Assert (@($ins.json.readiness).Count -eq 3 -and @($ins.json.drives).Count -ge 1 -and $null -ne $ins.json.ram.goal) 'api: /api/insight có readiness (3 tác vụ), drives, ram.goal'
+        $adv = Api 'GET' '/api/advice'
+        Assert ($adv.code -eq 200 -and $adv.json.PSObject.Properties['generatedUtc'] -and $adv.json.PSObject.Properties['candidatesUtc'] -and $adv.json.PSObject.Properties['stale'] -and $adv.json.PSObject.Properties['goals'] -and $adv.json.PSObject.Properties['steps'] -and $adv.json.PSObject.Properties['review'] -and $adv.json.PSObject.Properties['afterPlan'] -and $adv.json.PSObject.Properties['beyond'] -and $adv.json.candidatesUtc) 'api: /api/advice đủ trường hợp đồng, dùng lượt quét ứng viên đã có'
+        Assert (@($adv.json.steps | Where-Object { -not $_.id -or $null -eq $_.keys -or $null -eq $_.cumBytes -or -not $_.riskLevel -or -not $_.regen }).Count -eq 0) 'api: mọi bước advice có id/keys/cumBytes/riskLevel/regen'
+        $ph = Api 'GET' '/api/process/history?name=ping&min=5'
+        Assert ($ph.code -eq 200 -and $ph.json.name -eq 'ping' -and $null -ne $ph.json.totalRamMB) 'api: /api/process/history hợp lệ'
+        Assert ((Api 'GET' '/api/process/history?name=a%3Bb').code -eq 400 -and (Api 'GET' '/api/process/history').code -eq 400) 'api: /api/process/history tên lạ / thiếu tên -> 400'
+        Assert (@((Api 'GET' '/api/events?max=2').json).Count -le 2) 'api: /api/events?max=2 trả tối đa 2 sự kiện'
+        $trNo = Api 'GET' '/api/disk/tree?drive=C'
+        Assert ($trNo.code -eq 404 -and -not $trNo.json.ok -and $trNo.json.error) 'api: /api/disk/tree chưa có file cây -> 404 kèm lý do'
+        Assert ((Api 'GET' '/api/disk/tree?drive=%3B').code -eq 400) 'api: /api/disk/tree tên ổ lạ -> 400'
+        Copy-Item -LiteralPath (Join-Path $so 'scan-tree-C.json') -Destination (Join-Path $home_ 'state\scan-tree-C.json') -Force
+        $trOk = Api 'GET' '/api/disk/tree?drive=C'
+        Assert ($trOk.code -eq 200 -and $trOk.json.drive -eq 'C' -and $trOk.json.root.bytes -gt 0 -and $null -ne $trOk.json.root.children) 'api: /api/disk/tree trả { drive, root } từ file cây'
+        Assert ((Api 'POST' '/api/disk/scan' @{ drive = 'C'; scope = 'bogus' }).code -eq 400) 'api: POST /api/disk/scan scope lạ -> 400'
+        Assert ((Api 'POST' '/api/disk/scan' @{ drive = 'C'; scope = 'full' } $false).code -eq 403) 'api: POST /api/disk/scan thiếu X-RG-Client -> 403'
+        $pv = Api 'POST' '/api/auto/preview' @{ policy = @{ mode = 'dry-run'; targetFreeGB = 25 } }
+        Assert ($pv.code -eq 200 -and $pv.json.ok -and $null -ne $pv.json.now -and $null -ne $pv.json.forced -and $pv.json.needsPin -eq $false) 'api: POST /api/auto/preview -> now/forced/triggers14d/evidence/needsPin'
+        Assert ((Get-RgPolicy).mode -eq 'off') 'api: preview không lưu bản nháp (chính sách vẫn Tắt)'
+        Assert ((Api 'POST' '/api/auto/preview' @{ nothing = 1 }).code -eq 400) 'api: preview thiếu bản nháp -> 400'
+
+        $pj = (Api 'GET' '/api/processes').json
+        $row = @($pj.procs)[0]
+        Assert ($null -ne $row -and $row.PSObject.Properties['start'] -and $row.PSObject.Properties['lowered'] -and $row.PSObject.Properties['canLower'] -and $row.PSObject.Properties['whyNot']) 'api: /api/processes có thêm start, lowered, canLower, whyNot'
+        $srvRow = @($pj.procs | Where-Object { $_.pid -eq $srvProc.Id })[0]
+        Assert ($srvRow -and -not $srvRow.canLower -and $srvRow.whyNot -match 'chính Resource Guard') 'api: tiến trình của chính server -> canLower = false, có whyNot'
+        $apiPing = @($pj.procs | Where-Object { $_.pid -eq $prB.Id })[0]
+        if ($apiPing) {
+            Assert ($apiPing.canLower -eq $true -and $apiPing.start) 'api: tiến trình ping thử -> canLower = true'
+            $bad = Api 'POST' '/api/process/priority' @{ pid = $prB.Id; start = '20200101T000000Z'; level = 'below' }
+            Assert ($bad.code -eq 400 -and -not $bad.json.ok -and $bad.json.error -and (PClass $prB.Id) -eq 'Normal') 'api: POST /api/process/priority sai start -> 400 kèm lý do, không đổi gì'
+            $okp = Api 'POST' '/api/process/priority' @{ pid = $prB.Id; start = $apiPing.start; level = 'below' }
+            Assert ($okp.code -eq 200 -and $okp.json.to -eq 'BelowNormal' -and (PClass $prB.Id) -eq 'BelowNormal') 'api: POST /api/process/priority hạ ưu tiên thật qua HTTP'
+            $pj2 = (Api 'GET' '/api/processes').json
+            Assert (@($pj2.procs | Where-Object { $_.pid -eq $prB.Id })[0].lowered -eq $true) 'api: sau khi hạ, /api/processes báo lowered = true'
+            $undo = Api 'POST' '/api/process/priority' @{ pid = $prB.Id; start = $apiPing.start; level = 'normal' }
+            Assert ($undo.code -eq 200 -and (PClass $prB.Id) -eq 'Normal') 'api: hoàn tác qua HTTP trả về Normal'
+        } else { Write-Host '  SKIP  api: chưa thấy ping thử trong bảng tiến trình của server' }
+        Assert ((Api 'POST' '/api/process/priority' @{ pid = $srvProc.Id; start = $srvRow.start; level = 'below' }).code -eq 400) 'api: POST hạ ưu tiên chính server -> 400'
+        Assert ((Api 'POST' '/api/process/priority' @{ pid = 'abc'; level = 'below' }).code -eq 400) 'api: PID không phải số -> 400'
+    }
+    finally {
+        if ($srvProc -and -not $srvProc.HasExited) { Stop-Process -Id $srvProc.Id -Force -ErrorAction SilentlyContinue; [void]$srvProc.WaitForExit(8000) }
+    }
 }
 finally {
     if ($lockStream) { $lockStream.Dispose() }

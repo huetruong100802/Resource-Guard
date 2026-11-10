@@ -98,6 +98,86 @@ function Send-RgToast([string]$Title, [string]$Body) {
     } catch { return $false }
 }
 
+# ---------- Chữ cho người dùng: tên trạng thái + nội dung toast dựng từ SỐ LIỆU có cấu trúc (không dán `reasons` tiếng Anh) ----------
+
+function Get-RgStateVi([string]$State) {
+    switch ($State) { 'Normal' { return 'Ổn' } 'Caution' { return 'Cần chú ý' } 'Restricted' { return 'Hạn chế' } 'Critical' { return 'Nguy cấp' } default { return $State } }
+}
+
+function Format-RgGBVi($Gb) { return ([math]::Round([double]$Gb, 1)).ToString('0.0', [Globalization.CultureInfo]::GetCultureInfo('vi-VN')) }
+
+# { title; body } cho toast khi trạng thái ĐỔI. $Eff = trạng thái hiệu lực; $Budget = Get-RgBudget; $Snap = snapshot (có drives).
+# Chọn nguồn áp lực nặng nhất (ổ > RAM > commit khi bằng nhau) và nói bằng một câu kèm việc nên làm tiếp.
+function Get-RgToastText([string]$Eff, [bool]$Worse, $Budget, $Snap, $Cfg) {
+    if (-not $Worse) {
+        return [pscustomobject]@{ title = 'Resource Guard: máy đã ổn'; body = 'Các chỉ số đã trở lại bình thường. Không cần làm gì thêm.' }
+    }
+    $rank = @{ 'Normal' = 0; 'Caution' = 1; 'Restricted' = 2; 'Critical' = 3 }
+    $cands = @()
+    foreach ($d in @($Snap.drives | Where-Object { $_ })) {
+        $s = Get-RgDiskState $d.freeGB $Cfg ([string]$d.drive)
+        if ($rank[$s] -gt 0) { $cands += [pscustomobject]@{ sev = $rank[$s]; pri = 0; text = "Ổ $($d.drive) còn $(Format-RgGBVi $d.freeGB) GB. Mở Resource Guard để xem kế hoạch dọn." } }
+    }
+    if (@($Snap.drives | Where-Object { $_ }).Count -eq 0 -and $null -ne $Snap.diskFreeGB) {
+        $s = Get-RgDiskState $Snap.diskFreeGB $Cfg ([string]$Snap.diskDrive)
+        if ($rank[$s] -gt 0) { $cands += [pscustomobject]@{ sev = $rank[$s]; pri = 0; text = "Ổ $($Snap.diskDrive) còn $(Format-RgGBVi $Snap.diskFreeGB) GB. Mở Resource Guard để xem kế hoạch dọn." } }
+    }
+    $rs = Get-RgRamState ([double]$Snap.availRamGB) $Cfg
+    if ($rank[$rs] -gt 0) { $cands += [pscustomobject]@{ sev = $rank[$rs]; pri = 1; text = "RAM trống còn $(Format-RgGBVi $Snap.availRamGB) GB. Mở Resource Guard để xem tiến trình đang chiếm nhiều." } }
+    $cs = Get-RgCommitState ([double]$Snap.commitPct) $Cfg
+    if ($rank[$cs] -gt 0) { $cands += [pscustomobject]@{ sev = $rank[$cs]; pri = 2; text = "Bộ nhớ cam kết đã dùng $([math]::Round([double]$Snap.commitPct))%. Mở Resource Guard để xem chi tiết." } }
+    $top = @($cands | Sort-Object @{ Expression = { $_.sev }; Descending = $true }, @{ Expression = { $_.pri } }) | Select-Object -First 1
+    $body = if ($top) { $top.text } else { "Máy đang ở mức $(Get-RgStateVi $Eff). Mở Resource Guard để xem chi tiết." }
+    return [pscustomobject]@{ title = "Resource Guard: $(Get-RgStateVi $Eff)"; body = $body }
+}
+
+# ---------- Thiết lập lần đầu (GET/POST /api/setup) ----------
+
+$script:RgRepoRoot = Split-Path $PSScriptRoot -Parent
+function Get-RgSetupFilePath { return (Join-Path (Initialize-RgHome) 'state\setup.json') }
+
+# $Probe: scriptblock cho test thay cho việc dò Scheduled Task / lối tắt thật: { @{ autostart = $bool; shortcut = $bool } }.
+function Get-RgSetupInfo($Probe = $null) {
+    $a = $false; $s = $false
+    if ($Probe) { $p = & $Probe; $a = [bool]$p.autostart; $s = [bool]$p.shortcut }
+    else { . (Join-Path $PSScriptRoot 'rg-setup.ps1'); $a = Test-RgTaskInstalled; $s = Test-RgShortcutExists }
+    return [ordered]@{
+        autostart = $a; shortcut = $s; pinConfigured = [bool](Test-RgPinConfigured); mode = [string](Get-RgPolicy).mode
+        firstRun = -not (Test-Path -LiteralPath (Get-RgSetupFilePath))
+    }
+}
+
+# Body: { autostart?: bool, shortcut?: bool, firstRunDone?: true }. Chỉ nhận đúng kiểu bool; khoá lạ bị bỏ qua. PIN KHÔNG đặt qua đây (chỉ console).
+# $Effects: { autostart = {param($on)}; shortcut = {param($on)} } cho test; mặc định gọi rg-setup.ps1 (cùng logic `rg autostart|shortcut`).
+# Trả { ok; error; info }. Không ném lỗi.
+function Invoke-RgSetupPost($Body, $Effects = $null, $Probe = $null) {
+    $res = [ordered]@{ ok = $false; error = ''; info = $null }
+    try {
+        if ($null -eq $Body) { $res.error = 'Thiếu nội dung yêu cầu.'; return $res }
+        $has = { param($n) [bool]$Body.PSObject.Properties[$n] }
+        foreach ($n in 'autostart', 'shortcut') {
+            if ((& $has $n) -and $Body.$n -isnot [bool]) { $res.error = "'$n' phải là true hoặc false."; return $res }
+        }
+        if ((& $has 'firstRunDone') -and $Body.firstRunDone -isnot [bool]) { $res.error = "'firstRunDone' phải là true."; return $res }
+        if ($null -eq $Effects) {
+            . (Join-Path $PSScriptRoot 'rg-setup.ps1')
+            $root = $script:RgRepoRoot
+            $Effects = @{ autostart = { param($on) [void](Set-RgAutostart $on $root -NoStart) }; shortcut = { param($on) [void](Set-RgShortcut $on $root) } }
+        }
+        $done = [ordered]@{}
+        if (& $has 'autostart') { & $Effects.autostart ([bool]$Body.autostart); $done['autostart'] = [bool]$Body.autostart }
+        if (& $has 'shortcut') { & $Effects.shortcut ([bool]$Body.shortcut); $done['shortcut'] = [bool]$Body.shortcut }
+        if ((& $has 'firstRunDone') -and [bool]$Body.firstRunDone) {
+            Write-RgFileAtomic (Get-RgSetupFilePath) (ConvertTo-Json -InputObject ([ordered]@{ firstRunDone = $true; doneUtc = (Get-Date).ToUniversalTime().ToString('o') }) -Compress)
+            $done['firstRunDone'] = $true
+        }
+        if ($done.Count -gt 0) { Write-RgLog 'setup-change' $done }
+        $res.ok = $true
+        $res.info = Get-RgSetupInfo $Probe
+    } catch { $res.error = 'Không áp dụng được thiết lập: ' + [string]$_.Exception.Message }
+    return $res
+}
+
 function Remove-RgOldMetrics {
     $dir = Join-Path (Initialize-RgHome) 'state'
     $limit = (Get-Date).AddDays(-$script:KeepMetricsDays)
@@ -119,6 +199,71 @@ function Read-RgMetricsTail([int]$Max = 240) {
     foreach ($l in @($lines | Select-Object -First $Max)) { try { $rows += ConvertFrom-Json $l } catch { } }
     [array]::Reverse($rows)
     return $rows
+}
+
+# Gộp bảng tiến trình theo TÊN: top 12 theo RAM hợp với top 8 theo CPU -> [{ name, n, cpu, ramMB }].
+# Ghi vào mỗi bản ghi metrics (trường procTop) để dựng lịch sử theo tiến trình mà không phải lấy mẫu thêm.
+function Get-RgProcTop($Procs, [int]$TopRam = 12, [int]$TopCpu = 8) {
+    $g = @{}
+    foreach ($p in @($Procs)) {
+        $n = [string]$p.name
+        if (-not $n) { continue }
+        if (-not $g.ContainsKey($n)) { $g[$n] = @{ name = $n; n = 0; cpu = 0.0; ramMB = 0.0 } }
+        $e = $g[$n]; $e.n++; $e.cpu += [double]$p.cpu; $e.ramMB += [double]$p.ramMB
+    }
+    $all = @($g.Values | ForEach-Object { [pscustomobject]@{ name = $_.name; n = [int]$_.n; cpu = [math]::Round($_.cpu, 1); ramMB = [int][math]::Round($_.ramMB) } })
+    $byRam = @($all | Sort-Object ramMB -Descending | Select-Object -First $TopRam)
+    $byCpu = @($all | Where-Object { $_.cpu -gt 0 } | Sort-Object cpu -Descending | Select-Object -First $TopCpu)
+    $seen = @{}; $out = @()
+    foreach ($e in ($byRam + $byCpu)) { if (-not $seen.ContainsKey($e.name)) { $seen[$e.name] = $true; $out += $e } }
+    return @($out)
+}
+
+# Lịch sử CPU/RAM của MỘT nhóm tiến trình (theo tên) trong $Minutes phút gần nhất, từ procTop trong state\metrics-*.jsonl.
+# Điểm thiếu (tiến trình không nằm trong top lúc đó) bị bỏ, KHÔNG nội suy. Tối đa $MaxPoints điểm (lấy thưa đều).
+# Đọc từng dòng, so sánh ts dạng chuỗi trước khi parse JSON nên 24 giờ vẫn nhanh.
+function Get-RgProcHistory([string]$Name, [int]$Minutes = 60, $Now = $null, [int]$MaxPoints = 720) {
+    $Name = ([string]$Name).ToLowerInvariant()
+    if ($Name -notmatch '^[a-z0-9._ -]{1,64}$') { throw 'Tên tiến trình không hợp lệ.' }
+    if ($Minutes -lt 1) { $Minutes = 60 }
+    if ($Minutes -gt 1440) { $Minutes = 1440 }
+    if ($null -eq $Now) { $Now = Get-Date }
+    $cutoff = ([datetime]$Now).AddMinutes(-$Minutes).ToString('yyyy-MM-dd HH:mm:ss')
+    $dir = Join-Path (Initialize-RgHome) 'state'
+    $needle = '"name":"' + $Name + '"'
+    $points = New-Object System.Collections.ArrayList
+    $lastLine = $null
+    for ($d = ([datetime]$Now).AddMinutes(-$Minutes).Date; $d -le ([datetime]$Now).Date; $d = $d.AddDays(1)) {
+        $f = Join-Path $dir ('metrics-{0}.jsonl' -f $d.ToString('yyyyMMdd'))
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        $fs = $null; $sr = $null
+        try {
+            $fs = New-Object IO.FileStream($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            $sr = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)
+            while ($null -ne ($line = $sr.ReadLine())) {
+                $i = $line.IndexOf('"ts":"')
+                if ($i -lt 0 -or $line.Length -lt $i + 6 + 19) { continue }
+                $ts = $line.Substring($i + 6, 19)
+                if ([string]::CompareOrdinal($ts, $cutoff) -lt 0) { continue }
+                $lastLine = $line
+                if ($line.IndexOf($needle, [StringComparison]::Ordinal) -lt 0) { continue }
+                try {
+                    $rec = ConvertFrom-Json $line
+                    foreach ($e in @($rec.procTop)) {
+                        if ([string]$e.name -eq $Name) { [void]$points.Add([pscustomobject]@{ ts = [string]$rec.ts; cpu = [double]$e.cpu; ramMB = [double]$e.ramMB; n = [int]$e.n }); break }
+                    }
+                } catch { }
+            }
+        } finally { if ($sr) { $sr.Dispose() } elseif ($fs) { $fs.Dispose() } }
+    }
+    $total = 0
+    if ($lastLine) { try { $total = [int][math]::Round([double](ConvertFrom-Json $lastLine).totalRamGB * 1024) } catch { } }
+    $pts = @($points)
+    if ($pts.Count -gt $MaxPoints) {
+        $stride = [math]::Ceiling($pts.Count / $MaxPoints)
+        $pts = @(for ($k = 0; $k -lt $pts.Count; $k += $stride) { $pts[$k] })
+    }
+    return [ordered]@{ name = $Name; totalRamMB = $total; points = $pts }
 }
 
 function New-RgSparkline($Values, [string]$Color, [double]$Min, [double]$Max) {
@@ -249,6 +394,7 @@ function Get-RgProcRows($Table, [int]$Logical) {
             [void]$rows.Add([pscustomobject]@{
                     pid = $id; name = $p.ProcessName.ToLowerInvariant(); cpu = [math]::Min(100, $cpu); ramMB = [math]::Round($p.WorkingSet64 / 1MB, 0)
                     group = $(if ($t) { $t.Group } else { 'other' }); agent = $ledger.ContainsKey($id)
+                    session = $(try { [int]$p.SessionId } catch { $null })
                 })
         } finally { $p.Dispose() }
     }
@@ -291,6 +437,7 @@ function Invoke-RgWatchTick {
         drives = @($snap.drives | ForEach-Object { [pscustomobject]@{ drive = $_.drive; label = $_.label; freeGB = $_.freeGB; totalGB = $_.totalGB; state = $_.state; isSystem = $_.isSystem } })
         heavy = $budget.heavyRunning; ledgerOrphans = $orph.Count; top = $top
         cores = $cores; topCpu = $topCpu; procCount = $procs.Count; uptimeSec = (Get-RgUptimeSec)
+        procTop = @(Get-RgProcTop $procs)
     }
     $mf = Join-Path $home_ ('state\metrics-{0}.jsonl' -f (Get-Date -Format 'yyyyMMdd'))
     Add-Content -LiteralPath $mf -Value (ConvertTo-Json -InputObject $rec -Depth 4 -Compress) -Encoding UTF8
@@ -304,9 +451,8 @@ function Invoke-RgWatchTick {
             $cool = ((Get-Date).ToUniversalTime() - [datetime]::Parse([string]$st.lastToastUtc, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind')).TotalMinutes -ge $script:ToastCooldownMin
         }
         if (-not $NoToast -and $cool -and ($worse -or $eff.state -eq 'Normal')) {
-            $title = if ($worse) { "Resource Guard: $($eff.state)" } else { 'Resource Guard: đã ổn định (Normal)' }
-            $body = if ($budget.reasons.Count -gt 0) { ($budget.reasons -join '; ') } else { 'Các chỉ số đã trở lại bình thường.' }
-            $toasted = Send-RgToast $title $body
+            $tt = Get-RgToastText ([string]$eff.state) ([bool]$worse) $budget $snap (Get-RgConfig)
+            $toasted = Send-RgToast $tt.title $tt.body
             if ($toasted) { $st.lastToastState = $eff.state; $st.lastToastUtc = (Get-Date).ToUniversalTime().ToString('o') }
         }
     }

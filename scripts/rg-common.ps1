@@ -129,6 +129,67 @@ function Test-RgScanStale([string]$FinishedUtc) {
     return ($null -eq $a -or $a -gt (Get-RgScanMaxAgeHours))
 }
 
+# ---------- Quét nền tự làm mới (P10) ----------
+# scan.autoRefreshHours trong config (mặc định 6; 0 = tắt). Thiếu khoá thì dùng mặc định.
+function Get-RgScanRefreshHours($Cfg) {
+    $h = 6.0
+    try { if ($Cfg -and $Cfg.PSObject.Properties['scan'] -and $Cfg.scan -and $Cfg.scan.PSObject.Properties['autoRefreshHours']) { $h = [double]$Cfg.scan.autoRefreshHours } } catch { }
+    if ($h -lt 0) { $h = 0 }
+    return $h
+}
+
+# scan.cpuMaxPct: chỉ quét nền khi CPU trung bình 3 mẫu cuối thấp hơn mức này (mặc định 40).
+function Get-RgScanCpuMax($Cfg) {
+    $v = 40.0
+    try { if ($Cfg -and $Cfg.PSObject.Properties['scan'] -and $Cfg.scan -and $Cfg.scan.PSObject.Properties['cpuMaxPct']) { $v = [double]$Cfg.scan.cpuMaxPct } } catch { }
+    if ($v -le 0) { $v = 40.0 }
+    return $v
+}
+
+# Hàm THUẦN (không đọc file/đồng hồ): có nên khởi động một lượt quét nền ngay bây giờ không.
+#   $Now            thời điểm đang xét.
+#   $JobRunning     có bất kỳ job nền nào đang chạy (quét, dọn, tự dọn, agent...).
+#   $CpuSamples     các mẫu CPU% gần nhất (cũ -> mới); dùng trung bình 3 mẫu cuối, < $CpuMax mới quét. Chưa đủ 3 mẫu thì chờ.
+#   $LastAutoStart  lần gần nhất server tự khởi động quét nền ($null nếu chưa); mỗi lần cách nhau >= $MinGapMinutes.
+#   $RefreshHours   scan.autoRefreshHours (<= 0: tắt).
+#   $Drives         [{ drive; focusUtc; fullUtc }] focusUtc = lần ghi kết quả breakdown gần nhất (mọi scope), fullUtc = lần quét đầy đủ gần nhất; $null nếu chưa từng.
+#   $CandidatesUtc  thời điểm xong lượt quét ứng viên gần nhất ($null nếu chưa).
+# Kết quả: { due; kind = breakdown|candidates|$null; drive; scope = focus|full; because }. Mỗi lần một việc: ổ cũ nhất, hoặc quét ứng viên nếu nó cũ hơn.
+# Ổ có kết quả cũ hơn $RefreshHours -> quét 'focus'; nếu lượt đầy đủ cũ hơn $FullDays ngày (hoặc chưa có) thì quét 'full'.
+function Test-RgScanDue {
+    param([datetime]$Now, [bool]$JobRunning, [double[]]$CpuSamples = @(), $LastAutoStart = $null, [double]$RefreshHours = 6, $Drives = @(), $CandidatesUtc = $null,
+        [double]$MinGapMinutes = 10, [double]$CpuMax = 40, [double]$FullDays = 7)
+    function NoScan([string]$Why) { return [pscustomobject]@{ due = $false; kind = $null; drive = $null; scope = $null; because = $Why } }
+    if ($RefreshHours -le 0) { return (NoScan 'Tự làm mới quét nền đang tắt') }
+    if ($JobRunning) { return (NoScan 'Đang có tác vụ nền chạy') }
+    $cs = @($CpuSamples)
+    if ($cs.Count -lt 3) { return (NoScan 'Chưa đủ mẫu CPU để biết máy có rảnh không') }
+    $last3 = @($cs[($cs.Count - 3)..($cs.Count - 1)]); $avg = 0.0; foreach ($v in $last3) { $avg += $v }; $avg /= 3
+    if ($avg -ge $CpuMax) { return (NoScan ('CPU đang bận (trung bình {0:n0}%)' -f $avg)) }
+    if ($null -ne $LastAutoStart -and ($Now - [datetime]$LastAutoStart).TotalMinutes -lt $MinGapMinutes) { return (NoScan 'Vừa quét nền cách đây chưa tới 10 phút') }
+
+    $inf = [double]::MaxValue
+    $best = $null; $bestAge = -1.0
+    foreach ($d in @($Drives)) {
+        if (-not $d) { continue }
+        $age = $(if ($null -eq $d.focusUtc) { $inf } else { ($Now.ToUniversalTime() - ([datetime]$d.focusUtc).ToUniversalTime()).TotalHours })
+        if ($age -gt $RefreshHours -and $age -gt $bestAge) { $best = $d; $bestAge = $age }
+    }
+    $cAge = $(if ($null -eq $CandidatesUtc) { $inf } else { ($Now.ToUniversalTime() - ([datetime]$CandidatesUtc).ToUniversalTime()).TotalHours })
+    $candDue = ($cAge -gt $RefreshHours)
+    if ($best -and (-not $candDue -or $bestAge -ge $cAge)) {
+        $fullAge = $(if ($null -eq $best.fullUtc) { $inf } else { ($Now.ToUniversalTime() - ([datetime]$best.fullUtc).ToUniversalTime()).TotalDays })
+        $scope = $(if ($fullAge -gt $FullDays) { 'full' } else { 'focus' })
+        $why = $(if ($bestAge -eq $inf) { "Ổ $($best.drive): chưa có kết quả quét" } else { 'Ổ {0}: kết quả quét đã {1:n1} giờ' -f $best.drive, $bestAge })
+        return [pscustomobject]@{ due = $true; kind = 'breakdown'; drive = [string]$best.drive; scope = $scope; because = $why }
+    }
+    if ($candDue) {
+        $why = $(if ($cAge -eq $inf) { 'Chưa có kết quả quét mục có thể dọn' } else { 'Kết quả quét mục có thể dọn đã {0:n1} giờ' -f $cAge })
+        return [pscustomobject]@{ due = $true; kind = 'candidates'; drive = $null; scope = $null; because = $why }
+    }
+    return (NoScan 'Kết quả quét còn mới')
+}
+
 function Get-RgGroup([string]$Name, [string]$Cmd, $Cfg) {
     if ($Cmd -and $Cfg.agentCmdRegex -and (@('node', 'bun', 'python') -contains $Name) -and ($Cmd -match $Cfg.agentCmdRegex)) {
         return 'agent'
@@ -635,6 +696,127 @@ function Get-RgYoungMinBytes($Cfg) {
     return [long]($mb * 1MB)
 }
 
+# ---------- Biên lai mục dọn (why / impact / regen / regenHint / riskLevel) ----------
+# Chữ cho người dùng, tiếng Việt. KHÔNG thay thế `reason`/`risk` (chuỗi tiếng Anh mà test đang so khớp).
+
+function Format-RgSizeVi([long]$Bytes) {
+    $ci = [Globalization.CultureInfo]::GetCultureInfo('vi-VN')
+    if ($Bytes -ge 1GB) { return ('{0} GB' -f ([math]::Round($Bytes / 1GB, 1)).ToString('0.0', $ci)) }
+    if ($Bytes -ge 1MB) { return ('{0} MB' -f [math]::Round($Bytes / 1MB).ToString('0', $ci)) }
+    return ('{0} KB' -f [math]::Round($Bytes / 1KB).ToString('0', $ci))
+}
+
+# Số ngày kể từ lần ghi cuối: ưu tiên ageDays (mục young), nếu không thì tính từ newestWriteUtc, không có thì $null.
+function Get-RgItemAgeDays($Item) {
+    if ([int]$Item.ageDays -gt 0) { return [int]$Item.ageDays }
+    $s = [string]$Item.newestWriteUtc
+    if ($s) {
+        $dt = [datetime]::MinValue
+        if ([datetime]::TryParseExact($s, "yyyyMMdd'T'HHmmss'Z'", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$dt)) {
+            return [int][math]::Max(0, [math]::Floor(((Get-Date).ToUniversalTime() - $dt).TotalDays))
+        }
+    }
+    return $null
+}
+
+function Step-RgRiskLevel([string]$Level) {
+    switch ($Level) { 'low' { return 'medium' } 'medium' { return 'high' } default { return 'high' } }
+}
+
+# Dựng biên lai cho MỘT mục (hashtable từ New-RgItem hoặc object đọc từ scan-candidates.json).
+# Trả về [ordered]@{ why; impact; regen; regenHint; riskLevel }.
+function Get-RgItemReceipt($Item, $Cfg) {
+    $kind = [string]$Item.kind; $action = [string]$Item.action
+    $young = [bool]$Item.young
+    $age = Get-RgItemAgeDays $Item
+    $ageTxt = if ($null -ne $age) { "$age ngày" } else { 'một thời gian' }
+    $size = Format-RgSizeVi ([long]$Item.sizeBytes)
+    $leaf = ''
+    if ($Item.path) { $leaf = [IO.Path]::GetFileName(([string]$Item.path).TrimEnd('\')) }
+    $min = $null
+    try { if ($Cfg -and $Cfg.cleanup.minAgeDays.PSObject.Properties[$kind]) { $min = [int]$Cfg.cleanup.minAgeDays.$kind } } catch { }
+    $minTxt = if ($null -ne $min) { "$min ngày" } else { 'ngưỡng tuổi' }
+    $youngWhy = "Mới sửa cách đây $ageTxt (dưới ngưỡng $minTxt): chưa chắc đã bỏ. Mục này không bao giờ tự dọn, chỉ xoá khi bạn duyệt."
+
+    $why = ''; $impact = ''; $regen = 'none'; $regenHint = ''; $risk = 'medium'
+    switch ($kind) {
+        'temp-entry' {
+            $risk = 'low'; $regen = 'auto'
+            $impact = 'Không ảnh hưởng; chương trình tự tạo lại khi cần.'
+            $regenHint = 'Không cần làm gì: chương trình sinh lại file tạm khi chạy.'
+            $why = if ($young) { $youngWhy } else { "File tạm không được dùng $ageTxt ($size)." }
+        }
+        'dotnet-artifact' {
+            $risk = 'low'; $regen = 'rebuild'
+            $impact = 'Lần build kế tiếp của dự án này chậm hơn vì build lại từ đầu.'
+            $regenHint = 'Chạy lại lệnh build (dotnet build) trong dự án; thư mục bin/obj được sinh lại.'
+            $why = if ($young) { $youngWhy } else { "Kết quả build (bin/obj) không đụng tới $ageTxt ($size); build kế tiếp sẽ sinh lại." }
+        }
+        'node_modules' {
+            $risk = 'medium'; $regen = 'redownload'
+            $impact = 'Phải chạy lại lệnh cài gói trước khi chạy dự án; cần mạng.'
+            $regenHint = 'Chạy npm install / pnpm install / yarn trong thư mục dự án (cần kết nối mạng).'
+            $why = if ($young) { $youngWhy } else { "node_modules không đụng tới $ageTxt ($size); dự án có thể cài lại từ package.json." }
+        }
+        'cache-aged' {
+            $risk = 'low'; $regen = 'redownload'
+            $impact = 'Lần restore sau tải lại gói còn thiếu; cần mạng.'
+            $regenHint = 'Tự tải lại gói khi build/restore lần sau (cần kết nối mạng).'
+            $cd = $null; try { $cd = [int]$Cfg.cleanup.cacheMinInactiveDays } catch { }
+            $cdTxt = if ($cd) { "$cd ngày" } else { 'nhiều ngày' }
+            $why = if ($young) { "Toàn bộ bộ nhớ đệm ($size), kể cả gói mới dùng trong $cdTxt qua. Chồng lên mục 'không dùng $cdTxt'. Chưa chắc đã bỏ; không bao giờ tự dọn." }
+            else { "Gói trong bộ nhớ đệm không được đọc/ghi từ $cdTxt trở lên ($size)." }
+        }
+        'stale-repo' {
+            $risk = 'medium'; $regen = 'restore-zip'
+            $impact = 'Mã đã có trên remote, clone lại khi cần; có bản zip nếu chọn nén. File bị git bỏ qua (như .env) không có trên remote.'
+            $regenHint = 'Clone lại từ remote, hoặc giải nén bản zip nếu bạn chọn nén trước khi xoá.'
+            $why = "Repo không có thay đổi mã nguồn $ageTxt ($size); mọi commit đã có trên remote."
+        }
+        'large-item' {
+            $risk = 'high'; $regen = 'restore-zip'
+            $impact = 'Không tự tạo lại được; có bản zip nếu chọn nén.'
+            $regenHint = 'Chỉ khôi phục được từ bản zip nếu bạn chọn nén trước khi xoá.'
+            $why = "Mục lớn ($size) không đụng tới $ageTxt" + $(if ($leaf) { ": $leaf." } else { '.' })
+        }
+        'process' {
+            $risk = 'medium'; $regen = 'none'
+            $impact = 'Tiến trình bị kết thúc; việc chưa lưu trong tiến trình đó sẽ mất.'
+            $regenHint = 'Khởi động lại ứng dụng nếu cần.'
+            $nm = [string]$Item.name
+            $why = if ($action -eq 'kill') { "Tiến trình $nm do trợ lý đăng ký, nhưng tiến trình chủ đã kết thúc ($size RAM)." }
+            else { "Tiến trình $nm đang chiếm $size RAM và không còn tiến trình cha; không do trợ lý nào đăng ký." }
+        }
+        'vhdx' {
+            $risk = 'high'; $regen = 'none'
+            $impact = 'Chỉ báo cáo; Resource Guard không xoá loại này.'
+            $regenHint = 'Thu gọn thủ công (docker builder prune, wsl --manage <distro> --set-sparse true).'
+            $why = "Ổ ảo WSL/Docker chiếm $size" + $(if ($leaf) { ": $leaf." } else { '.' })
+        }
+        'app' {
+            $risk = 'high'; $regen = 'none'
+            $impact = 'Chỉ báo cáo; Resource Guard không xoá loại này.'
+            $regenHint = 'Gỡ cài đặt ở Cài đặt > Ứng dụng nếu không còn dùng.'
+            $why = "Ứng dụng không ghi file $ageTxt ($size)" + $(if ($leaf) { ": $leaf." } else { '.' })
+        }
+        default {
+            $risk = 'medium'; $regen = 'none'
+            $impact = 'Chưa rõ ảnh hưởng của loại mục này.'
+            $regenHint = 'Không có hướng dẫn lấy lại cho loại mục này.'
+            $why = "Mục $kind chiếm $size."
+        }
+    }
+    # Mục chỉ báo cáo (không xoá được): nói rõ, trừ các loại vốn đã là chỉ báo cáo.
+    if ($action -eq 'report' -and $kind -notin @('vhdx', 'app', 'process')) {
+        $impact = "Chỉ báo cáo: Resource Guard không tự xoá mục này. " + $impact
+        if ([bool]$Item.needsAdmin) { $why += ' Thuộc tài khoản khác nên cần quyền admin.' }
+    }
+    if ($action -eq 'report' -and $kind -eq 'process') { $impact = 'Chỉ báo cáo; Resource Guard không kết thúc tiến trình này.' }
+    # Mục young: rủi ro tăng một bậc (người dùng/agent phải tự cân nhắc).
+    if ($young) { $risk = Step-RgRiskLevel $risk }
+    return [ordered]@{ why = $why; impact = $impact; regen = $regen; regenHint = $regenHint; riskLevel = $risk }
+}
+
 function Get-RgCandidates {
     $cfg = Get-RgConfig
     $now = (Get-Date).ToUniversalTime()
@@ -755,6 +937,11 @@ function Get-RgCandidates {
     foreach ($p in $cand) {
         $items += New-RgItem -Kind 'process' -Action 'report' -Level 2 -ProcId $p.Pid -Start $p.Start -Name $p.Name -SizeBytes ([long]$p.RamMB * 1MB) `
             -Reason "$($p.Group) process whose parent is gone; not registered by any agent (may be your own dev server)" -Risk 'unknown: report only'
+    }
+    # Biên lai cho người dùng (why/impact/regen/regenHint/riskLevel): dựng ở MỘT chỗ, không sửa từng lời gọi New-RgItem.
+    foreach ($i in $items) {
+        $rc = Get-RgItemReceipt $i $cfg
+        foreach ($k in $rc.Keys) { $i[$k] = $rc[$k] }
     }
     return $items
 }

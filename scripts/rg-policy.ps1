@@ -443,8 +443,130 @@ function Invoke-RgAutoRun {
         freedBytes = $freed; items = $rows; skipped = @($pick.skipped | Select-Object -First 60); candidateCount = @($Candidates).Count
     }
     Write-RgFileAtomic (Get-RgAutoLastPath) (ConvertTo-Json -InputObject $rec -Depth 6 -Compress)
-    Write-RgLog 'auto-run' ([ordered]@{ mode = $rec.mode; items = $rows.Count; freedBytes = $freed; trigger = $Trigger })
+    # byKind: số mục + dung lượng ĐƯỢC CHỌN theo nhóm (trường mới; nguồn "bằng chứng chạy thử" của /api/auto/preview)
+    $byKind = [ordered]@{}
+    foreach ($c in @($pick.selected)) {
+        $k = [string]$c.kind
+        if (-not $byKind.Contains($k)) { $byKind[$k] = [ordered]@{ items = 0; bytes = 0L } }
+        $byKind[$k].items = [int]$byKind[$k].items + 1; $byKind[$k].bytes = [long]$byKind[$k].bytes + [long]$c.sizeBytes
+    }
+    Write-RgLog 'auto-run' ([ordered]@{ mode = $rec.mode; items = $rows.Count; freedBytes = $freed; trigger = $Trigger; byKind = $byKind })
     return [pscustomobject]$rec
+}
+
+# ---------- Xem trước chính sách (chỉ đọc, không lưu, không cần PIN) ----------
+
+# Các sự kiện auto-run trong $Days ngày gần nhất (đã parse: { ts; event; data }), cũ -> mới.
+function Read-RgAutoRunEvents([int]$Days = 14, $Now = $null) {
+    if ($null -eq $Now) { $Now = Get-Date }
+    $dir = Join-Path (Initialize-RgHome) 'logs'
+    $out = @()
+    for ($d = ([datetime]$Now).AddDays(-$Days).Date; $d -le ([datetime]$Now).Date; $d = $d.AddDays(1)) {
+        $f = Join-Path $dir ('rg-{0}.jsonl' -f $d.ToString('yyyyMMdd'))
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        $lines = @(); try { $lines = [RgMetricsReader]::Grep($f, '"event":"auto-run"') } catch { continue }
+        foreach ($l in $lines) { try { $out += ConvertFrom-Json $l } catch { } }
+    }
+    return @($out)
+}
+
+# Cộng bằng chứng CHẠY THỬ theo nhóm từ các sự kiện auto-run: [{ kind; dryRuns; items; bytes; sinceUtc }].
+# Chỉ tính lượt dry-run có byKind (log cũ chưa có byKind thì bỏ qua).
+function Get-RgAutoEvidence($Events) {
+    $acc = [ordered]@{}
+    foreach ($e in @($Events)) {
+        if (-not $e -or [string]$e.event -ne 'auto-run' -or [string]$e.data.mode -ne 'dry-run' -or -not $e.data.byKind) { continue }
+        foreach ($p in $e.data.byKind.PSObject.Properties) {
+            $it = [int]$p.Value.items
+            if ($it -le 0) { continue }
+            if (-not $acc.Contains($p.Name)) { $acc[$p.Name] = [ordered]@{ kind = $p.Name; dryRuns = 0; items = 0; bytes = 0L; sinceUtc = [string]$e.ts } }
+            $a = $acc[$p.Name]; $a.dryRuns++; $a.items += $it; $a.bytes += [long]$p.Value.bytes
+            if ([string]$e.ts -lt [string]$a.sinceUtc) { $a.sinceUtc = [string]$e.ts }
+        }
+    }
+    return @($acc.Values | ForEach-Object { [pscustomobject]$_ })
+}
+
+# Số lần mỗi ổ đi từ trạng thái nhẹ hơn lên >= ngưỡng kích hoạt của $Policy, theo mẫu thưa của metrics (mỗi giờ một điểm).
+# Trả [{ drive; count; lastUtc }] cho mọi ổ có trigger != off.
+function Get-RgPolicyTriggers($Policy, $Samples, $Cfg) {
+    $rank = @{ 'Normal' = 0; 'Caution' = 1; 'Critical' = 2 }
+    $out = @()
+    foreach ($L in @($Samples.Keys | Sort-Object)) {
+        $trig = [string](Get-RgDrivePolicy $Policy ([string]$L)).diskTrigger
+        if (-not $rank.ContainsKey($trig) -or $trig -eq 'Normal') { continue }   # 'off'
+        $s = @($Samples[$L] | Where-Object { $_ } | Sort-Object { $_.t })
+        $count = 0; $last = $null; $prev = $null
+        foreach ($x in $s) {
+            $r = $rank[(Get-RgDiskState ([double]$x.freeGB) $Cfg ([string]$L))]
+            if ($null -ne $prev -and $prev -lt $rank[$trig] -and $r -ge $rank[$trig]) { $count++; $last = $x.t }
+            $prev = $r
+        }
+        $out += [pscustomobject]@{ drive = [string]$L; count = $count; lastUtc = $(if ($last) { ([datetime]$last).ToUniversalTime().ToString('o') } else { $null }) }
+    }
+    return @($out)
+}
+
+<#
+Get-RgAutoPreview - "chính sách NÀY sẽ làm gì" cho một bản nháp (POST /api/auto/preview). KHÔNG lưu, KHÔNG quét, KHÔNG xoá.
+  now       : nếu chạy ngay với số liệu hiện tại thì có chạy không, vì sao.
+  forced    : giả định áp lực bật cho mọi ổ (như "Chạy thử ngay"): Select-RgAutoItems trên scan-candidates.json đã cache.
+  triggers14d / evidence / needsPin: xem docstring các hàm Get-RgPolicyTriggers / Get-RgAutoEvidence / Test-RgPolicyNeedsPin.
+Tham số cho phép test truyền dữ liệu giả; bỏ trống thì đọc state\.
+#>
+function Get-RgAutoPreview($Draft, $Candidates = $null, $Snapshot = $null, $Current = $null, $Samples = $null, $Events = $null, $Cfg = $null) {
+    if ($null -eq $Cfg) { $Cfg = Get-RgConfig }
+    $pol = ConvertTo-RgPolicy $Draft
+    if ($null -eq $Current) { $Current = Get-RgPolicy }
+    if ($null -eq $Candidates) { $Candidates = Read-RgStateJson 'scan-candidates.json' }
+    if ($null -eq $Snapshot) { $Snapshot = Read-RgStateJson 'live.json' }
+    if ($null -eq $Snapshot) { $Snapshot = Get-RgSnapshot -SkipCpu }
+    if ($null -eq $Samples) { $Samples = Get-RgDriveSamplesCached 14 }
+    if ($null -eq $Events) { $Events = Read-RgAutoRunEvents 14 }
+
+    # 1) Nếu chạy NGAY BÂY GIỜ
+    $stress = Get-RgStressInfo $pol $Cfg $Snapshot
+    $now = [ordered]@{ wouldRun = $false; because = '' }
+    if ([string]$pol.mode -eq 'off') { $now.because = 'Chế độ tự động đang Tắt' }
+    else {
+        $hot = @($stress.drives | Where-Object { $_.stress })
+        if ($hot.Count -gt 0) {
+            $d0 = $hot[0]
+            $now.wouldRun = $true
+            $now.because = "Ổ $($d0.drive) còn $($d0.freeGB) GB, đã tới ngưỡng kích hoạt" + $(if ([string]$pol.mode -eq 'dry-run') { ' (chế độ Chạy thử: chỉ ghi nhận, không xoá)' } else { '' })
+        } elseif ($stress.ramStress) {
+            $now.wouldRun = $true; $now.because = "RAM trống $($stress.availRamGB) GB, đã tới ngưỡng kích hoạt"
+        } else {
+            $now.because = $(if (@($stress.drives).Count -eq 1) { "Ổ $(@($stress.drives)[0].drive) chưa tới ngưỡng kích hoạt" } else { 'Chưa ổ nào tới ngưỡng kích hoạt' })
+        }
+    }
+
+    # 2) Giả định áp lực bật cho mọi ổ (giống AssumeStress của "Chạy thử ngay")
+    $forcedStress = Get-RgStressInfo $pol $Cfg $Snapshot
+    foreach ($d in @($forcedStress.drives)) { if ([string]$d.trigger -ne 'off') { $d.stress = $true; $forcedStress.diskStress = $true } }
+    if (@($forcedStress.drives).Count -eq 0 -and [string]$pol.diskTrigger -ne 'off') { $forcedStress.diskStress = $true }
+    if ([string]$pol.ramTrigger -ne 'off') { $forcedStress.ramStress = $true }
+    $items = @(); if ($Candidates) { $items = @($Candidates.items) }
+    $pick = Select-RgAutoItems $items $pol $forcedStress
+    $sel = @($pick.selected | ForEach-Object {
+            [ordered]@{ key = [string]$_.key; kind = [string]$_.kind; target = $(if ($_.kind -eq 'process') { "pid $($_.pid) $($_.name)" } else { [string]$_.path })
+                sizeBytes = [long]$_.sizeBytes; drive = $(if ($_.kind -eq 'process') { $null } else { Get-RgPathDrive ([string]$_.path) }) } })
+    $perDrive = @()
+    foreach ($d in @($forcedStress.drives)) {
+        $gain = 0L; foreach ($s in $sel) { if ($s.drive -eq [string]$d.drive -and $s.kind -ne 'process') { $gain += [long]$s.sizeBytes } }
+        $after = [double]$d.freeGB + $gain / 1GB
+        $perDrive += [ordered]@{ drive = [string]$d.drive; freeGB = [double]$d.freeGB; afterGB = [math]::Round($after, 1); stateBefore = [string]$d.state
+            stateAfter = (Get-RgDiskState $after $Cfg ([string]$d.drive)); targetFreeGB = [double]$d.targetFreeGB }
+    }
+    $kills = @($pick.selected | Where-Object { $_.action -eq 'kill' }).Count
+    return [ordered]@{
+        ok = $true
+        now = $now
+        forced = [ordered]@{ selected = $sel; skipped = @($pick.skipped | Select-Object -First 60); perDrive = $perDrive; kills = $kills }
+        triggers14d = @(Get-RgPolicyTriggers $pol $Samples $Cfg)
+        evidence = @(Get-RgAutoEvidence $Events)
+        needsPin = [bool](Test-RgPolicyNeedsPin $Current $pol)
+    }
 }
 
 # ---------- Dọn mục cần quyền admin (chạy trong tiến trình elevated sau khi người dùng xác nhận UAC) ----------

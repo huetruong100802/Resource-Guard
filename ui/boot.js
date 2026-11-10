@@ -2,7 +2,8 @@
 (function () {
   'use strict';
   var RG = window.RG, S = RG.S, $ = RG.$, MAX = 480;
-  var NAV = [['overview', 'home', 'Tổng quan'], ['cpu', 'cpu', 'CPU & Tiến trình'], ['disk', 'disk', 'Ổ đĩa'], ['clean', 'trash', 'Dọn dẹp'], ['policy', 'policy', 'Chính sách tự động'], ['agent', 'spark', 'Agent đánh giá'], ['settings', 'gear', 'Cài đặt']];
+  var NAV = [['home', 'home', 'Trang chủ'], ['clean', 'trash', 'Dọn dẹp'], ['disk', 'disk', 'Ổ đĩa'], ['cpu', 'cpu', 'Tiến trình'], ['policy', 'policy', 'Tự động hoá'], ['settings', 'gear', 'Cài đặt']];
+  var ALIAS = { overview: 'home', '': 'home' };   // hash cũ; #agent mở ngăn kéo trợ lý ở Trang chủ
   RG.nextAt = 0;
 
   RG.theme = function (t) {
@@ -15,15 +16,24 @@
   function dark() { var t = RG.theme(); return t === 'dark' || (t === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); }
 
   RG.go = function (name, noHash) {
-    if (!RG.pages[name]) name = 'overview';
+    var wantAgent = name === 'agent';
+    if (wantAgent) name = 'home';
+    if (ALIAS[name]) name = ALIAS[name];
+    if (!RG.pages[name]) name = 'home';
     RG.cur = name;
+    if (wantAgent) { noHash = false; setTimeout(function () { RG.askAgent(); }, 60); }
     RG.$$('#nav button').forEach(function (b) { if (b.dataset.p === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#pageTitle').textContent = RG.pages[name].title;
     if (!noHash) history.replaceState(null, '', '#' + name);
     var el = $('#page'); el.innerHTML = ''; window.scrollTo(0, 0);
     RG.pages[name].render(el);
-    document.title = (S.live ? '[' + S.live.state + '] ' : '') + 'Resource Guard · ' + RG.pages[name].title;
+    document.title = (S.live ? '[' + RG.human.state(S.live.state) + '] ' : '') + 'Resource Guard · ' + RG.pages[name].title;
   };
+  function setBadge(r) {
+    var b = $('#badge'), why = RG.human.reasons(r);
+    b.textContent = RG.human.state(r.state); b.className = 'badge ' + r.state;
+    b.title = why.length ? why.join('; ') : 'Mọi chỉ số trong ngưỡng';
+  }
 
   function driveSig(a) { return (a || []).map(function (d) { return d.drive; }).join(','); }
   function onLive(r) {
@@ -32,15 +42,14 @@
     S.live = r;
     if (changed) {
       if (S.driveSel && !(r.drives || []).some(function (d) { return d.drive === S.driveSel; })) S.driveSel = null;
-      RG.loadDrives().catch(function () { }).then(function () { var q = RG.pages[RG.cur]; if (q && q.render && (RG.cur === 'overview' || RG.cur === 'disk' || RG.cur === 'policy')) RG.go(RG.cur, true); });
+      RG.loadDrives().catch(function () { }).then(function () { var q = RG.pages[RG.cur]; if (q && q.render && (RG.cur === 'home' || RG.cur === 'disk' || RG.cur === 'policy')) RG.go(RG.cur, true); });
     }
     S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
-    var b = $('#badge'); b.textContent = r.state; b.className = 'badge ' + r.state;
+    setBadge(r);
     RG.nextAt = Date.now() + (r.intervalSec || 15) * 1000;
     if (S.settings) S.settings.intervalSec = r.intervalSec || S.settings.intervalSec;
-    document.title = '[' + r.state + '] Resource Guard · ' + RG.pages[RG.cur].title;
+    document.title = '[' + RG.human.state(r.state) + '] Resource Guard · ' + RG.pages[RG.cur].title;
     var p = RG.pages[RG.cur]; if (p && p.live) p.live();
-    onLive.n = (onLive.n || 0) + 1; if (RG.cur === 'overview' && onLive.n % 4 === 0) p.refresh();
   }
   var es = null, lostAt = 0;
   function connect() {
@@ -78,9 +87,7 @@
     }).join('');
     RG.$$('#nav button').forEach(function (b) { b.onclick = function () { RG.go(b.dataset.p); }; });
     $('#themeBtn').onclick = function () { RG.theme(dark() ? 'light' : 'dark'); };
-    $('#askBtn').onclick = function () { RG.askAgent(); };
     $('#quitBtn').onclick = function () { RG.quit(); };
-    $('#askBtn').insertAdjacentHTML('afterbegin', RG.icon('spark'));
     $('#themeBtn').innerHTML = RG.icon(dark() ? 'sun' : 'moon');
     var t = RG.theme(); if (t !== 'auto') document.documentElement.setAttribute('data-theme', t);
     window.addEventListener('resize', function () { var p = RG.pages[RG.cur]; if (p && p.live) p.live(); });
@@ -97,8 +104,9 @@
     ]).catch(function () { }).then(function () {
       if (S.hist.length) S.live = S.hist[S.hist.length - 1];
       RG.updateNavBadges();
-      RG.go(location.hash.slice(1) || 'overview', true);
-      connect(); RG.watchJobs();
+      if (S.live) setBadge(S.live);
+      RG.go(location.hash.slice(1) || 'home', true);
+      connect(); RG.watchJobs(); RG.setup.check();
     });
   }
   init();

@@ -16,28 +16,28 @@ Bốn yêu cầu của chủ sản phẩm mà plan này phải đạt:
 
 ## Giai đoạn
 
-- [ ] P1 Biên lai ứng viên + Check-Syntax — touches: tests/Check-Syntax.ps1, scripts/rg-common.ps1, scripts/rg-scan.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P2 Lịch sử theo tiến trình — deps: P1 — touches: scripts/rg-watcher.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P3 Insight: sẵn sàng + dự báo — deps: P2 — touches: scripts/rg-insight.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P4 Advice: kế hoạch đề xuất tất định — deps: P3 — touches: scripts/rg-insight.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P5 Xem trước chính sách + bằng chứng chạy thử — deps: P4 — touches: scripts/rg-policy.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P6 Hạ ưu tiên tiến trình (đảo ngược được) — deps: P5 — touches: scripts/rg-proc.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: opus — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Acceptance.ps1`
-- [ ] P7 Setup API + thông báo tiếng Việt — deps: P6 — touches: scripts/rg-server.ps1, scripts/rg-watcher.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: medium — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P8 Kiểm backend trên cả hai PowerShell — deps: P7 — kind: verify — model: sonnet — effort: low — exit: `pwsh -NoProfile -File tests/Acceptance.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Acceptance.ps1`
-- [ ] P9 Scanner v2: Win32 enumerator, vùng quét, cây thư mục — deps: P8 — touches: scripts/rg-scan.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: opus — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Acceptance.ps1`
-- [ ] P10 Quét nền tự làm mới — deps: P9 — touches: scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: medium — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P11 Spike: đọc USN journal không cần admin — touches: scripts/spikes/usn-probe.ps1 — kind: code — model: sonnet — effort: high — risk: low — exit: `pwsh -NoProfile -File scripts/spikes/usn-probe.ps1 -Drive C -Json`
-- [ ] P12 Khung UI: điều hướng mới, ngôn ngữ, giờ địa phương — deps: P8 — touches: ui/boot.js, ui/core.js, ui/index.html, ui/app.css, ui/p-overview.js — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P13 Thư viện hình ảnh hoá viz.js — deps: P12 — touches: ui/viz.js, ui/core.js, ui/app.css, ui/index.html — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P14 Trang chủ: sẵn sàng, kế hoạch đề xuất, hoạt động — deps: P13 — touches: ui/p-home.js, ui/p-overview.js, ui/boot.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P15 Trang Dọn dẹp: nhóm theo bước, thanh ảnh hưởng trực tiếp — deps: P14 — touches: ui/p-clean.js, ui/app.css — kind: code — model: sonnet — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P16 Trang Tự động hoá: câu mô tả, kéo ngưỡng, xem trước — deps: P15 — touches: ui/p-auto.js, ui/p-clean.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P17 Trang Ổ đĩa: treemap đào sâu + lớp phủ hành động — deps: P16, P10 — touches: ui/p-disk.js, ui/app.css — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P18 Trang Tiến trình: ai đang chiếm, dòng thời gian, what-if — deps: P17 — touches: ui/p-proc.js, ui/p-overview.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P19 Trợ lý: agent hoà vào kế hoạch, bỏ tab riêng — deps: P18 — touches: scripts/rg-agent.ps1, ui/p-agent.js, ui/p-home.js, ui/p-clean.js, ui/boot.js, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P20 Thiết lập lần đầu trong UI — deps: P19 — touches: ui/p-setup.js, ui/boot.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: medium — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
-- [ ] P21 Kiểm toàn bộ — deps: P20, P11 — kind: verify — model: sonnet — effort: low — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1 && pwsh -NoProfile -File tests/Acceptance.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Acceptance.ps1`
-- [ ] P22 Tài liệu — deps: P21 — touches: README.md, docs/TECHNOTE.md — kind: code — model: sonnet — effort: low — risk: low — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P1 Biên lai ứng viên + Check-Syntax — touches: tests/Check-Syntax.ps1, scripts/rg-common.ps1, scripts/rg-scan.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P2 Lịch sử theo tiến trình — deps: P1 — touches: scripts/rg-watcher.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P3 Insight: sẵn sàng + dự báo — deps: P2 — touches: scripts/rg-insight.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P4 Advice: kế hoạch đề xuất tất định — deps: P3 — touches: scripts/rg-insight.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P5 Xem trước chính sách + bằng chứng chạy thử — deps: P4 — touches: scripts/rg-policy.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P6 Hạ ưu tiên tiến trình (đảo ngược được) — deps: P5 — touches: scripts/rg-proc.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: opus — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Acceptance.ps1`
+- [x] P7 Setup API + thông báo tiếng Việt — deps: P6 — touches: scripts/rg-server.ps1, scripts/rg-watcher.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: medium — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P8 Kiểm backend trên Windows PowerShell 5.1 — deps: P7 — kind: verify — model: sonnet — effort: low — exit: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Acceptance.ps1`
+- [x] P9 Scanner v2: Win32 enumerator, vùng quét, cây thư mục — deps: P8 — touches: scripts/rg-scan.ps1, scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: opus — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Acceptance.ps1`
+- [x] P10 Quét nền tự làm mới — deps: P9 — touches: scripts/rg-server.ps1, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: medium — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P11 Spike: đọc USN journal không cần admin — touches: scripts/spikes/usn-probe.ps1 — kind: code — model: sonnet — effort: high — risk: low — exit: `pwsh -NoProfile -File scripts/spikes/usn-probe.ps1 -Drive C -Json`
+- [x] P12 Khung UI: điều hướng mới, ngôn ngữ, giờ địa phương — deps: P8 — touches: ui/boot.js, ui/core.js, ui/index.html, ui/app.css, ui/p-overview.js — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P13 Thư viện hình ảnh hoá viz.js — deps: P12 — touches: ui/viz.js, ui/core.js, ui/app.css, ui/index.html — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P14 Trang chủ: sẵn sàng, kế hoạch đề xuất, hoạt động — deps: P13 — touches: ui/p-home.js, ui/p-overview.js, ui/boot.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P15 Trang Dọn dẹp: nhóm theo bước, thanh ảnh hưởng trực tiếp — deps: P14 — touches: ui/p-clean.js, ui/app.css — kind: code — model: sonnet — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P16 Trang Tự động hoá: câu mô tả, kéo ngưỡng, xem trước — deps: P15 — touches: ui/p-auto.js, ui/p-clean.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: high — risk: high — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P17 Trang Ổ đĩa: treemap đào sâu + lớp phủ hành động — deps: P16, P10 — touches: ui/p-disk.js, ui/app.css — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P18 Trang Tiến trình: ai đang chiếm, dòng thời gian, what-if — deps: P17 — touches: ui/p-proc.js, ui/p-overview.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P19 Trợ lý: agent hoà vào kế hoạch, bỏ tab riêng — deps: P18 — touches: scripts/rg-agent.ps1, ui/p-agent.js, ui/p-home.js, ui/p-clean.js, ui/boot.js, tests/Acceptance.ps1 — kind: code — model: sonnet — effort: high — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P20 Thiết lập lần đầu trong UI — deps: P19 — touches: ui/p-setup.js, ui/boot.js, ui/index.html, ui/app.css — kind: code — model: sonnet — effort: medium — risk: medium — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
+- [x] P21 Kiểm toàn bộ — deps: P20, P11 — kind: verify — model: sonnet — effort: low — exit: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Check-Syntax.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Acceptance.ps1`
+- [x] P22 Tài liệu — deps: P21 — touches: README.md, docs/TECHNOTE.md — kind: code — model: sonnet — effort: low — risk: low — exit: `pwsh -NoProfile -File tests/Check-Syntax.ps1`
 hot-files: scripts/rg-server.ps1, ui/core.js, ui/boot.js, ui/index.html, ui/app.css, ui/p-clean.js, tests/Acceptance.ps1
 commit: none
 workdir: C:/Users/HueTruong/Work/Repositories/Researchs/DEVELOPER WORKSPACE JANITOR/resource-guard
@@ -375,6 +375,15 @@ Ngoài lệnh `exit`, phiên chính chạy app (`rg run`) và kiểm tay, ghi k�
 
 ### P22 Tài liệu
 - Cập nhật README (bảng tab, mục Agent, quét ổ, API mới) và `docs/TECHNOTE.md` (hợp đồng API, vùng quét, kết quả spike USN). Ghi rõ ảnh chụp trong `docs/img` cần chụp lại (không tự tạo ảnh).
+
+## NOTES (phiên chính)
+
+- P8 và P21 ĐÃ đóng (2026-11-11): quyết định bỏ yêu cầu `pwsh` vì không phải máy nào cũng cài PowerShell 7+. Mục tiêu hỗ trợ là Windows PowerShell 5.1 (`powershell.exe`, có sẵn trên Windows). Chạy lại: Check-Syntax OK, Acceptance 374 pass / 0 fail.
+- P9: ổ C đầy đủ 85,7 s → 23,8 s, nhanh 12,8 s (≈15% bản cũ). Server mặc định `scope=full` khi chưa có số vùng cố định. Thêm `scan.cpuMaxPct`, `GET /api/drive/history`, `agentAvailable` trong `/api/settings` (ngoài plan).
+- P11: Windows 11 build 26200 (không phải 19045), quyền thường: đọc được qua handle thư mục gốc ổ (`FILE_READ_ATTRIBUTES` + `BACKUP_SEMANTICS`), bản ghi V3 không có tên file, journal ổ C chỉ vài giờ (0,6–6,7 h) → chưa làm quét tăng dần.
+- P21 kiểm tay (Edge headless, home sandbox `%TEMP%g-p21`, fixture giả, không đụng dữ liệu thật): lượt dọn thật trên mục temp/bin/obj/cache/zip chạy đúng, kết quả có dự kiến/thực tế, điểm đánh dấu hiện ở Trang chủ; kéo ngưỡng đổi câu mô tả (chuột + phím), bật chế độ Bật khi chưa có PIN bị từ chối; quét nhanh vẽ dần, đào sâu/lùi bằng bàn phím, bảo vệ thư mục đổi ô thành viền nét đứt; hộp lần đầu 3 bước; 980/400 px không tràn ngang; Tab đi qua mọi nút có viền focus.
+- Lỗi thật tìm thấy khi kiểm tay và đã sửa: ngay sau khi bấm chạy, UI đọc nhầm bản ghi job lượt trước (hoặc chưa có) nên không bao giờ làm mới kết quả dọn/quét (`ui/core.js`, `watchJobs` + cờ `pending`); chữ trên ô vùng cố định của treemap khó đọc (`.tm .fx`).
+- Chưa kiểm: PowerShell 7+ (không bắt buộc, không phải mục tiêu hỗ trợ). Ảnh trong `docs/img` đã chụp lại ngày 2026-11-11 từ giao diện mới (server sandbox, dữ liệu giả ở thư mục demo).
 
 ---
 

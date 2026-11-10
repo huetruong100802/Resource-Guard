@@ -7,6 +7,7 @@ param([int]$TimeoutSec = 180, [double]$MaxBudgetUsd = 0.5, [string]$Model = 'hai
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rg-common.ps1')
 . (Join-Path $PSScriptRoot 'rg-policy.ps1')
+. (Join-Path $PSScriptRoot 'rg-insight.ps1')
 
 function ConvertTo-RgSafeText([string]$S) {   # không để lộ tên tài khoản Windows
     if (-not $S) { return $S }
@@ -59,9 +60,21 @@ function New-RgAgentPayload {
             categories = $cats
         }
     }
+    # Kế hoạch tất định của máy: agent biết thứ tự máy đã lập và nhóm "cần xem lại" (máy không tự quyết được) để ưu tiên đánh giá.
+    $advSteps = @(); $revKeys = @()
+    try {
+        $dr = if ($live -and $live.drives) { @($live.drives) } else { $null }
+        $adv = Get-RgAdvice -Drives $dr
+        $advSteps = @($adv.steps | ForEach-Object { [ordered]@{ id = $_.id; kind = $_.kind; bytes = $_.bytes; riskLevel = $_.riskLevel } })
+        $revKeys = @($adv.review.keys | Where-Object { $_ })
+    } catch { }
     $cands = @()
     if ($cd) {
         $sorted = @($cd.items | Sort-Object { [long]$_.sizeBytes } -Descending | Select-Object -First 50)
+        if ($revKeys.Count) {   # mục cần xem lại luôn được gửi (thêm tối đa 20) để key agent trả về còn hợp lệ
+            $have = @{}; foreach ($s in $sorted) { $have[[string]$s.key] = $true }
+            $sorted += @($cd.items | Where-Object { $revKeys -contains [string]$_.key -and -not $have.ContainsKey([string]$_.key) } | Select-Object -First 20)
+        }
         $cands = @($sorted | ForEach-Object {
                 $tgt = if ($_.kind -eq 'process') { "$($_.name) (pid $($_.pid))" } else { (ConvertTo-RgSafeText ([string]$_.path)) }
                 $prot = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $policy } else { Test-RgPathUserProtected ([string]$_.path) $policy }
@@ -74,6 +87,7 @@ function New-RgAgentPayload {
         generatedUtc = $now.ToString('o')
         thresholds = [ordered]@{ ramAvailGB = $cfg.ram; diskFreeGB = $cfg.disk }
         machine = $machine; processes = $procs; disks = $disks; cleanupCandidates = $cands
+        advice = [ordered]@{ steps = $advSteps }; review = [ordered]@{ keys = $revKeys }
         policySummary = [ordered]@{
             mode = $policy.mode; categories = $policy.categories; protectedPathCount = @($policy.protectPaths).Count
             protectedProcessNames = @($policy.protectProcesses)
@@ -97,6 +111,8 @@ Quy tắc bắt buộc:
 - Chỉ đề xuất verdict "clean" cho mục có action là delete hoặc kill. Mục action=report chỉ được "keep" hoặc "review".
 - Số ngày không dùng chỉ là MỘT tín hiệu, không phải điều kiện quyết định. Mục có belowAgeFloor=true chưa đủ tuổi theo policy nhưng vẫn được đưa vào để bạn cân nhắc: có thể "clean" nếu loại mục sinh lại được dễ (build output, cache tải lại được), dung lượng đáng kể và disk đang thiếu; nên "keep"/"review" nếu có dấu hiệu đang dùng (tiến trình build/dev đang chạy, node_modules của dự án đang làm, rủi ro cao). Với mục belowAgeFloor, "reason" phải nêu lý do vì sao tuổi thấp vẫn xoá được (hoặc không). Người dùng luôn là người duyệt cuối cùng; mục này không bao giờ tự xoá.
 - Ưu tiên (priority 1 = làm trước, 5 = sau cùng) theo dung lượng thu hồi, mức rủi ro và số ngày không dùng.
+- "review.keys" là các mục máy KHÔNG tự quyết được (chưa đủ tuổi, cần quyền admin...). Hãy đánh giá các key này TRƯỚC, mỗi key một recommendation. "advice.steps" là thứ tự dọn tất định máy đã lập; đừng lặp lại nó, chỉ nhận xét khi bạn thấy bước nào nên đổi.
+- "summary" phải trả lời thẳng "nên làm gì trước và vì sao" trong 1-2 câu ngắn, dựa trên số liệu (vd: ổ nào thiếu, bước nào đủ mục tiêu, mục nào cần giữ).
 - "findings": các nhân tố chiếm ổ đĩa lớn/bất thường (disks[].categories, mỗi phần tử là một ổ; so sánh giữa các ổ khi có nhiều ổ), tiến trình ngốn CPU/RAM bất thường, dữ liệu quét đã cũ hoặc thiếu. Mỗi finding nêu rõ con số.
 - "policySuggestions": mỗi phần tử là MỘT THAY ĐỔI so với policySummary.categories hiện tại cho kind (temp-entry, dotnet-artifact, cache-aged, node_modules, process); "setting" là chế độ MỚI (auto = tự dọn khi có áp lực, ask = chỉ hỏi tay, keep = không bao giờ đụng). Chỉ đưa khi setting KHÁC chế độ hiện tại và có lý do từ dữ liệu; thường để trống. "reason" giải thích vì sao đổi, không nhắc lại chế độ cũ.
 - Viết tiếng Việt, ngắn gọn, không quá 25 từ mỗi lý do. Tối đa 8 findings và 15 recommendations.

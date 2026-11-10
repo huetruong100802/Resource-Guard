@@ -1,6 +1,7 @@
 {
   "ram": { "normalAboveGB": 5, "cautionFromGB": 3, "restrictedFromGB": 2 },
   "disk": { "drive": "C", "normalAboveGB": 20, "cautionFromGB": 10 },
+  "scan": { "autoRefreshHours": 6, "cpuMaxPct": 40 },
   "commit": { "restrictedPct": 90, "criticalPct": 97 },
   "estimateGB": { "build": 2.0, "test": 3.0, "subagent": 0.5, "session": 0 },
   "policy": {

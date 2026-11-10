@@ -28,14 +28,15 @@ function Get-LiveInfo {
     if ($i -and (Get-Process -Id ([int]$i.pid) -ErrorAction SilentlyContinue)) { return $i }
     return $null
 }
-function Get-LnkPaths { @(Join-Path ([Environment]::GetFolderPath('Programs')) $lnkName; Join-Path ([Environment]::GetFolderPath('Desktop')) $lnkName) }
+. (Join-Path $root 'scripts\rg-setup.ps1')   # Set-RgAutostart / Set-RgShortcut: dùng chung với POST /api/setup
+function Get-LnkPaths { Get-RgLnkPaths }
 function Get-PolicyMode {
     $p = Join-Path (Get-RgHomeDir) 'state\policy.json'
     if (Test-Path -LiteralPath $p) { try { return [string](Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json).mode } catch { } }
     return 'off'
 }
-function Test-TaskInstalled { [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) }
-function Test-ShortcutExists { [bool](Get-LnkPaths | Where-Object { Test-Path -LiteralPath $_ }) }
+function Test-TaskInstalled { Test-RgTaskInstalled }
+function Test-ShortcutExists { Test-RgShortcutExists }
 
 switch ($Command) {
     { $_ -in 'start', 'open' } {
@@ -62,29 +63,14 @@ switch ($Command) {
     }
     'autostart' {
         switch ($Arg) {
-            'on' { & (Join-Path $root 'scripts\Install-Watcher.ps1') }
-            'off' { & (Join-Path $root 'scripts\Install-Watcher.ps1') -Uninstall }
+            'on' { Set-RgAutostart $true $root }
+            'off' { Set-RgAutostart $false $root }
             default { 'Dùng: rg autostart on | off' }
         }
     }
     'shortcut' {
-        if ($Arg -eq 'remove') {
-            foreach ($p in (Get-LnkPaths)) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; "Đã xoá $p" } }
-            return
-        }
-        $targets = @(Join-Path ([Environment]::GetFolderPath('Programs')) $lnkName)
-        if ($Desktop) { $targets += Join-Path ([Environment]::GetFolderPath('Desktop')) $lnkName }
-        $sh = New-Object -ComObject WScript.Shell
-        foreach ($t in $targets) {
-            $l = $sh.CreateShortcut($t)
-            $l.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            $l.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" start' -f (Join-Path $root 'rg.ps1')
-            $l.WorkingDirectory = $root
-            $l.WindowStyle = 7
-            $l.Description = 'Mở Resource Guard (chạy ngầm nếu chưa chạy)'
-            $l.Save()
-            "Đã tạo lối tắt: $t"
-        }
+        if ($Arg -eq 'remove') { Set-RgShortcut $false $root; return }
+        Set-RgShortcut $true $root -Desktop:$Desktop
     }
     'path' {
         $cur = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not $cur) { $cur = '' }

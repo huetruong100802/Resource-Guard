@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var RG = window.RG = {
-    pages: {}, cur: 'overview',
+    pages: {}, cur: 'home',
     S: { hist: [], live: null, thr: null, settings: null, policy: null, draft: null, dirty: false, pinConfigured: false, kinds: [],
       jobs: {}, disk: null, drives: [], roots: [], driveSel: null, cands: null, autoLast: null, agent: null, cleanupLast: null, selected: {}, events: [] }
   };
@@ -16,8 +16,14 @@
     if (b == null || isNaN(b)) return '–';
     var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0, v = +b;
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-    return (i >= 3 ? v.toFixed(v >= 100 ? 0 : 1) : (i === 2 ? v.toFixed(v >= 100 ? 0 : 1) : Math.round(v))) + ' ' + u[i];
+    return String(i >= 2 ? v.toFixed(v >= 100 ? 0 : 1) : Math.round(v)).replace('.', ',') + ' ' + u[i];
   };
+  RG.fmtGB = function (g) { if (g == null || isNaN(g)) return '–'; return String(Math.round(g * 10) / 10).replace('.', ',') + ' GB'; };
+  RG.pad2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  /* Mốc thời gian -> ms. Chuỗi "yyyy-MM-dd HH:mm:ss" (metrics) là giờ địa phương; chuỗi ISO có Z là UTC. */
+  RG.tsMs = function (ts) { if (ts == null) return NaN; if (typeof ts === 'number') return ts; var s = String(ts); return Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d/.test(s) ? s.replace(' ', 'T') : s); };
+  /* Giờ địa phương dd/MM HH:mm cho mọi kiểu mốc thời gian. */
+  RG.fmtLocal = function (ts) { var t = RG.tsMs(ts); if (isNaN(t)) return '–'; var d = new Date(t); return RG.pad2(d.getDate()) + '/' + RG.pad2(d.getMonth() + 1) + ' ' + RG.pad2(d.getHours()) + ':' + RG.pad2(d.getMinutes()); };
   RG.fmtAge = function (d) { if (d == null) return '–'; if (d < 1) return 'hôm nay'; if (d < 60) return d + ' ngày'; if (d < 730) return Math.round(d / 30) + ' tháng'; return (d / 365).toFixed(1) + ' năm'; };
   RG.daysSince = function (iso) { if (!iso) return null; var t = Date.parse(iso); return isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 864e5)); };
   RG.hhmm = function (ts) { return (ts || '').slice(11, 19); };
@@ -38,7 +44,9 @@
     moon: '<path d="M21 13a9 9 0 11-10-10 7 7 0 0010 10z"/>',
     chev: '<path d="M9 6l6 6-6 6"/>', refresh: '<path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/>',
     x: '<path d="M6 6l12 12M18 6L6 18"/>', up: '<path d="M6 15l6-6 6 6"/>', down: '<path d="M6 9l6 6 6-6"/>',
-    play: '<path d="M7 4l13 8-13 8V4z"/>', eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>', inbox: '<path d="M3 13l3-8h12l3 8v6H3v-6zM3 13h5l1 3h6l1-3h5"/>'
+    play: '<path d="M7 4l13 8-13 8V4z"/>', eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>', inbox: '<path d="M3 13l3-8h12l3 8v6H3v-6zM3 13h5l1 3h6l1-3h5"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>', alert: '<path d="M12 4l9 16H3L12 4zM12 10v4M12 17.5v.5"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    back: '<path d="M15 6l-6 6 6 6"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/>'
   };
   RG.icon = function (n, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[n] || '') + '</svg>'; };
 
@@ -99,6 +107,35 @@
     });
   };
 
+  /* ---------- Ngôn ngữ cho người dùng (không lộ Normal/Caution/commit/ứng viên) ---------- */
+  RG.human = {
+    stateNames: { Normal: 'Ổn', Caution: 'Cần chú ý', Restricted: 'Hạn chế', Critical: 'Nguy cấp' },
+    state: function (st) { return RG.human.stateNames[st] || st || '–'; },
+    kinds: {
+      'temp-entry': { l: 'File tạm', d: 'Thư mục/tệp trong %TEMP% lâu không đụng tới; chương trình tự tạo lại khi cần.' },
+      'dotnet-artifact': { l: 'bin/obj (.NET)', d: 'Kết quả build, sinh lại ở lần build kế tiếp.' },
+      'cache-aged': { l: 'Cache dev', d: 'NuGet/npm/pnpm: chỉ file không dùng ≥ N ngày; tải lại khi cần (cần mạng).' },
+      'node_modules': { l: 'node_modules', d: 'Gỡ gói npm của dự án lâu không mở; cài lại bằng package manager.' },
+      'process': { l: 'Tiến trình', d: 'Chỉ tiến trình agent đã đăng ký và đã mất chủ; mọi tiến trình khác chỉ báo cáo.' },
+      'stale-repo': { l: 'Repo cũ', d: 'Repo git không sửa file nguồn ≥ 90 ngày và mọi thứ đã có trên remote. Nên nén zip trước khi xoá.' },
+      'large-item': { l: 'Mục lớn', d: 'File/thư mục ≥ 500 MB trong Downloads, Videos không đụng ≥ 60 ngày. Có thể nén zip trước khi xoá.' },
+      'app': { l: 'Ứng dụng', d: 'Ứng dụng cài đặt lâu không ghi file. Chỉ báo cáo: gỡ bằng Cài đặt > Ứng dụng của Windows.' }
+    },
+    kind: function (k) { return RG.human.kinds[k] || { l: k, d: '' }; },
+    regens: { auto: 'Tự tạo lại', rebuild: 'Build lại', redownload: 'Tải lại (cần mạng)', 'restore-zip': 'Giải nén bản zip', none: 'Không lấy lại được' },
+    regen: function (r) { return RG.human.regens[r] || r || '–'; },
+    risks: { low: 'Rủi ro thấp', medium: 'Rủi ro vừa', high: 'Rủi ro cao' },
+    risk: function (r) { return RG.human.risks[r] || r || '–'; },
+    // Câu cho người dùng dựng từ số liệu có cấu trúc của `live` (không phân tích chuỗi reasons tiếng Anh).
+    reasons: function (l) {
+      var out = []; if (!l) return out;
+      if (RG.ramState(l.availRamGB) !== 'Normal') out.push('RAM còn ' + RG.fmtGB(l.availRamGB) + ' trong tổng ' + RG.fmtGB(l.totalRamGB));
+      RG.driveList().forEach(function (d) { if (d.state && d.state !== 'Normal') out.push('Ổ ' + d.drive + ' còn ' + RG.fmtGB(d.freeGB)); });
+      if (RG.commitState(l.commitPct) !== 'Normal') out.push('Bộ nhớ cam kết đã dùng ' + Math.round(l.commitPct) + '%');
+      return out;
+    }
+  };
+
   /* ---------- Trạng thái theo ngưỡng ---------- */
   RG.stateColor = function (st) { return { Normal: 'var(--normal)', Caution: 'var(--caution)', Restricted: 'var(--restricted)', Critical: 'var(--critical)' }[st] || 'var(--normal)'; };
   RG.ramState = function (a) { var t = S.thr && S.thr.ramAvailGB; if (!t) return 'Normal'; return a > t.normalAbove ? 'Normal' : (a >= t.cautionFrom ? 'Caution' : (a >= t.restrictedFrom ? 'Restricted' : 'Critical')); };
@@ -117,7 +154,7 @@
     if (o.n && pts.length > o.n) pts = pts.slice(-o.n);
     if (pts.length < 2) { svg.innerHTML = axes ? '<text x="' + pl + '" y="' + (H / 2) + '">Đang thu thập dữ liệu…</text>' : ''; svg.__ctx = null; return; }
     var min = o.min || 0, hi = o.max;
-    if (hi == null) { hi = 0; pts.forEach(function (r) { hi = Math.max(hi, +get(r)); }); (o.lines || []).forEach(function (l) { hi = Math.max(hi, l.v); }); hi = hi * 1.1 || 1; }
+    if (hi == null) { hi = 0; pts.forEach(function (r) { hi = Math.max(hi, +get(r)); }); (o.lines || []).forEach(function (l) { hi = Math.max(hi, l.v); }); if (o.dragLine) hi = Math.max(hi, o.dragLine.v); hi = hi * 1.1 || 1; }
     var X = function (i) { return pl + i * (W - pl - pr) / (pts.length - 1); };
     var Y = function (v) { return pt + (H - pt - pb) * (1 - (Math.min(Math.max(v, min), hi) - min) / (hi - min)); };
     var s = '';
@@ -126,10 +163,67 @@
     var p = pts.map(function (r, i) { return X(i).toFixed(1) + ',' + Y(+get(r)).toFixed(1); }).join(' ');
     if (o.area) s += '<polygon points="' + pl + ',' + (H - pb) + ' ' + p + ' ' + X(pts.length - 1).toFixed(1) + ',' + (H - pb) + '" fill="' + o.color + '" opacity=".16"/>';
     s += '<polyline fill="none" stroke="' + o.color + '" stroke-width="' + (axes ? 2 : 1.4) + '" stroke-linejoin="round" points="' + p + '"/>';
-    if (axes) s += '<text x="' + pl + '" y="' + (H - 2) + '">' + RG.hhmm(pts[0].ts) + '</text><text x="' + (W - pr) + '" y="' + (H - 2) + '" text-anchor="end">' + RG.hhmm(pts[pts.length - 1].ts) + '</text>';
+    var xf = o.xfmt || RG.hhmm;
+    if (axes) s += '<text x="' + pl + '" y="' + (H - 2) + '">' + xf(pts[0].ts) + '</text><text x="' + (W - pr) + '" y="' + (H - 2) + '" text-anchor="end">' + xf(pts[pts.length - 1].ts) + '</text>';
     s += '<line class="xh" x1="0" x2="0" y1="' + pt + '" y2="' + (H - pb) + '" stroke="' + RG.css('--mut') + '" opacity="0"/>';
+    // Điểm đánh dấu sự kiện: vạch dọc + chấm tròn ở đỉnh; chỉ vẽ mốc nằm trong khoảng dữ liệu (lệch tối đa một bước lấy mẫu).
+    if (o.markers && o.markers.length) {
+      var tms = pts.map(function (r) { return RG.tsMs(r.ts); }), step = (tms[tms.length - 1] - tms[0]) / Math.max(1, tms.length - 1);
+      var mcol = { 'auto-run': '--normal', 'manual-cleanup': '--normal', 'policy-change': '--accent', 'proc-priority': '--cpu' };
+      o.markers.forEach(function (m, mi) {
+        var t = RG.tsMs(m.ts); if (isNaN(t) || t < tms[0] - step || t > tms[tms.length - 1] + step) return;
+        var bi = 0, bd = Infinity; for (var q = 0; q < tms.length; q++) { var dd = Math.abs(tms[q] - t); if (dd < bd) { bd = dd; bi = q; } }
+        var mx = X(bi).toFixed(1), c = RG.css(mcol[m.type] || '--mut') || RG.css('--mut');
+        s += '<g class="mk" data-mi="' + mi + '" tabindex="0" role="button" aria-label="' + RG.esc(m.label || m.type) + '" style="cursor:pointer"><title>' + RG.esc(m.label || m.type) + '</title>' +
+          '<line x1="' + mx + '" x2="' + mx + '" y1="' + (pt + 8) + '" y2="' + (H - pb) + '" stroke="' + c + '" stroke-dasharray="2 3" opacity=".7"/>' +
+          '<circle cx="' + mx + '" cy="' + (pt + 6) + '" r="5.5" fill="' + c + '" stroke="var(--panel)" stroke-width="1.5"/><rect x="' + (mx - 9) + '" y="' + pt + '" width="18" height="' + (H - pt - pb) + '" fill="transparent"/></g>';
+      });
+    }
+    // Đường ngưỡng kéo được (chuột + phím mũi tên).
+    var dl = o.dragLine;
+    if (dl) {
+      var dy = Y(dl.v), dc = dl.color || RG.css('--accent');
+      s += '<g class="dl" tabindex="0" role="slider" aria-label="' + RG.esc(dl.label || 'Ngưỡng') + '" aria-valuemin="' + dl.min + '" aria-valuemax="' + dl.max + '" aria-valuenow="' + dl.v + '" aria-valuetext="' + RG.esc(dl.text || (dl.v + (o.unit || ''))) + '" style="cursor:ns-resize">' +
+        '<rect x="' + pl + '" y="' + (dy - 8) + '" width="' + (W - pl - pr) + '" height="16" fill="transparent"/><line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + dy + '" y2="' + dy + '" stroke="' + dc + '" stroke-width="2"/>' +
+        '<circle cx="' + (W - pr - 10) + '" cy="' + dy + '" r="6" fill="' + dc + '" stroke="var(--panel)" stroke-width="2"/><text x="' + (pl + 4) + '" y="' + (dy - 4) + '" style="fill:' + dc + ';font-weight:600">' + RG.esc(dl.text || (dl.v + (o.unit || ''))) + '</text></g>';
+    }
     svg.innerHTML = s;
-    svg.__ctx = { pts: pts, get: get, o: o, pl: pl, pr: pr, W: W };
+    svg.__ctx = { pts: pts, get: get, o: o, pl: pl, pr: pr, W: W, H: H, pt: pt, pb: pb, lo: min, hi: hi };
+    if (svg.__keepFocus) { var fg = svg.querySelector('.dl'); if (fg) fg.focus(); }
+    if (!svg.__evBound) {
+      svg.__evBound = true;
+      var drag = null;
+      var valAt = function (e) {
+        var c = svg.__ctx, r = svg.getBoundingClientRect(), y = (e.clientY - r.top) * c.H / r.height, d = c.o.dragLine;
+        var v = c.lo + (c.hi - c.lo) * (1 - (y - c.pt) / (c.H - c.pt - c.pb)); v = Math.round(v / (d.step || 1)) * (d.step || 1);
+        return Math.max(d.min, Math.min(d.max, v));
+      };
+      svg.addEventListener('pointerdown', function (e) {
+        var c = svg.__ctx; if (!c) return;
+        var t = e.target.closest ? e.target.closest('.dl') : null;
+        if (t && c.o.dragLine) { drag = true; try { svg.setPointerCapture(e.pointerId); } catch (x) { } e.preventDefault(); }
+      });
+      svg.addEventListener('pointermove', function (e) {
+        var c = svg.__ctx; if (!drag || !c || !c.o.dragLine) return;
+        var v = valAt(e), d = c.o.dragLine; if (v === d.v) return; d.v = v; if (d.onChange) d.onChange(v);
+      });
+      var end = function (e) { if (drag) { drag = null; try { svg.releasePointerCapture(e.pointerId); } catch (x) { } } };
+      svg.addEventListener('pointerup', end); svg.addEventListener('pointercancel', end);
+      svg.addEventListener('click', function (e) {
+        var c = svg.__ctx, g = e.target.closest ? e.target.closest('.mk') : null;
+        if (g && c && c.o.onMarker) c.o.onMarker(c.o.markers[+g.dataset.mi]);
+      });
+      svg.addEventListener('keydown', function (e) {
+        var c = svg.__ctx; if (!c) return;
+        var g = e.target.closest ? e.target.closest('.dl') : null, m = e.target.closest ? e.target.closest('.mk') : null;
+        if (m && (e.key === 'Enter' || e.key === ' ') && c.o.onMarker) { e.preventDefault(); c.o.onMarker(c.o.markers[+m.dataset.mi]); return; }
+        if (!g || !c.o.dragLine) return;
+        var d = c.o.dragLine, dv = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 }[e.key]; if (!dv) return;
+        e.preventDefault(); var v = Math.max(d.min, Math.min(d.max, d.v + dv * (d.step || 1) * (e.shiftKey ? 5 : 1)));
+        if (v !== d.v) { d.v = v; svg.__keepFocus = true; if (d.onChange) d.onChange(v); }
+      });
+      svg.addEventListener('focusout', function () { setTimeout(function () { if (!svg.contains(document.activeElement)) svg.__keepFocus = false; }, 0); });
+    }
     if (o.readout && !svg.__bound) {
       svg.__bound = true;
       svg.addEventListener('mousemove', function (e) {
@@ -202,6 +296,8 @@
       RG.api('/api/jobs').then(function (j) {
         NAMES.forEach(function (n) {
           var prev = S.jobs[n], cur = j[n];
+          // vừa bấm chạy: bản ghi job của server có thể còn là lượt trước (đã 'done'); chưa coi là xong lượt này
+          if (prev && prev.pending && Date.now() - prev.t0 < 20000 && (!cur || (cur.status !== 'running' && Date.parse(cur.startedUtc || 0) < prev.t0 - 1000))) cur = prev;
           S.jobs[n] = cur;
           if (prev && prev.status === 'running' && cur && cur.status !== 'running') RG.onJobDone(n, cur);
         });
@@ -226,7 +322,7 @@
     return RG.api(path, { method: 'POST', body: body || {} }).then(function (j) {
       if (okMsg) RG.toast(j.already ? 'Tác vụ này đang chạy.' : okMsg);
       var n = { '/api/disk/scan': 'breakdown', '/api/candidates/scan': 'candidates', '/api/cleanup/apply': 'cleanup', '/api/cleanup/elevate': 'cleanup', '/api/archive/restore': 'cleanup','/api/auto/run': 'auto', '/api/agent/run': 'agent' }[path];
-      if (n) S.jobs[n] = { status: 'running', pct: 0, message: 'đang khởi động…', startedUtc: new Date().toISOString() };
+      if (n) S.jobs[n] = { status: 'running', pct: 0, message: 'đang khởi động…', startedUtc: new Date().toISOString(), pending: true, t0: Date.now() };
       RG.watchJobs();
       if (RG.pages[RG.cur] && RG.pages[RG.cur].jobs) RG.pages[RG.cur].jobs();
       return j;
@@ -246,8 +342,43 @@
     var out = live.map(function (d) { var m = meta[d.drive] || {}; return Object.assign({}, m, d); });
     return out.length ? out : (S.drives || []);
   };
+  /* Ngưỡng dung lượng trống của một ổ (GB): { normalAbove, cautionFrom }. /api/drives trả tên khoá có hậu tố GB, /api/settings thì không. */
+  RG.diskThr = function (L) {
+    var d = RG.driveInfo(L), t = d && d.thresholds;
+    if (t) return { normalAbove: t.normalAboveGB != null ? t.normalAboveGB : t.normalAbove, cautionFrom: t.cautionFromGB != null ? t.cautionFromGB : t.cautionFrom };
+    return (S.thr && S.thr.diskFreeGB) || { normalAbove: 20, cautionFrom: 10 };
+  };
   RG.driveInfo = function (L) { var l = RG.driveList().filter(function (d) { return d.drive === L; }); return l[0] || null; };
   RG.loadCands = function () { return RG.api('/api/candidates').then(function (j) { S.cands = j; if (j.progress) S.jobs.candidates = j.progress; }); };
+  RG.loadInsight = function () { return RG.api('/api/insight').then(function (j) { S.insight = j; return j; }); };
+  RG.loadAdvice = function () { return RG.api('/api/advice').then(function (j) { S.advice = j; return j; }); };
+  RG.loadEvents = function () { return RG.api('/api/events?max=200').then(function (j) { S.events = j || []; return S.events; }); };
+  /* Câu một dòng mô tả sự kiện (chưa escape). */
+  RG.human.modes = { off: 'Tắt', 'dry-run': 'Chạy thử', on: 'Bật' };
+  RG.human.event = function (e) {
+    var d = e.data || {}, H = RG.human;
+    switch (e.event) {
+      case 'state-change': return 'Trạng thái ' + H.state(d.from) + ' → ' + H.state(d.to);
+      case 'would-kill-orphans': return 'Có ' + (d.items || []).length + ' tiến trình mồ côi của agent';
+      case 'settings-change': return 'Đổi chu kỳ lấy mẫu: ' + d.intervalSec + ' giây';
+      case 'watcher-start': case 'server-start': return 'Resource Guard khởi động';
+      case 'auto-run': return (d.mode === 'dry-run' ? 'Chạy thử tự dọn: sẽ dọn ' : 'Tự dọn: ') + d.items + ' mục' + (d.mode === 'dry-run' ? '' : ', giải phóng ' + RG.fmtBytes(d.freedBytes));
+      case 'manual-cleanup': return 'Dọn tay: ' + d.items + ' mục, giải phóng ' + RG.fmtBytes(d.freedBytes);
+      case 'policy-change': return 'Đổi chính sách (chế độ ' + (H.modes[d.mode] || d.mode) + ')';
+      case 'proc-priority': return (String(d.to) === 'Normal' ? 'Trả ưu tiên bình thường: ' : 'Hạ ưu tiên: ') + d.name;
+      case 'agent-eval': return 'Trợ lý AI đánh giá xong';
+      default: return e.event;
+    }
+  };
+  /* Gộp các sự kiện liền nhau giống hệt (cùng câu) thành "… (×11)". Đầu vào mới → cũ. */
+  RG.groupEvents = function (list) {
+    var out = [];
+    (list || []).forEach(function (e) {
+      var tx = RG.human.event(e), last = out[out.length - 1];
+      if (last && last.text === tx) last.n++; else out.push({ e: e, text: tx, n: 1 });
+    });
+    return out;
+  };
   RG.loadAuto = function () { return RG.api('/api/auto/last').then(function (j) { S.autoLast = j.last; if (j.progress) S.jobs.auto = j.progress; }); };
   RG.loadAgent = function () { return RG.api('/api/agent/last').then(function (j) { S.agent = j.last; if (j.progress) S.jobs.agent = j.progress; }); };
 

@@ -10,6 +10,8 @@ $ErrorActionPreference = 'Stop'
 $argNoToast = [bool]$NoToast; $argPort = $Port; $argNoOpen = [bool]$NoOpen; $argDetach = [bool]$Detach; $argStop = [bool]$Stop; $argForce = [bool]$Force
 . (Join-Path $PSScriptRoot 'rg-watcher.ps1')   # nạp hàm (rg-watcher tự return khi bị dot-source)
 . (Join-Path $PSScriptRoot 'rg-policy.ps1')
+. (Join-Path $PSScriptRoot 'rg-insight.ps1')
+. (Join-Path $PSScriptRoot 'rg-proc.ps1')
 . (Join-Path $PSScriptRoot 'rg-agent.ps1')
 $NoToast = [switch]$argNoToast; $Port = $argPort
 
@@ -152,7 +154,7 @@ function Get-RgRecentEvents([int]$Max = 30) {
     $dir = Join-Path (Initialize-RgHome) 'logs'
     $out = @()
     foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'rg-*.jsonl' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 3)) {
-        foreach ($l in @(Get-Content -LiteralPath $f.FullName -Tail 400 -Encoding UTF8 | Where-Object { $_ -match '"event":"(state-change|would-kill-orphans|settings-change|watcher-start|server-start|auto-run|manual-cleanup|policy-change|agent-eval)"' })) {
+        foreach ($l in @(Get-Content -LiteralPath $f.FullName -Tail 400 -Encoding UTF8 | Where-Object { $_ -match '"event":"(state-change|would-kill-orphans|settings-change|watcher-start|server-start|auto-run|manual-cleanup|policy-change|agent-eval|proc-priority)"' })) {
             try { $out += ConvertFrom-Json $l } catch { }
         }
         if ($out.Count -ge $Max) { break }
@@ -208,6 +210,7 @@ if (-not $argNoOpen) { try { Start-Process $url } catch { } }
 
 $sse = New-Object System.Collections.ArrayList
 $script:AutoSpawnedAt = [datetime]::MinValue
+$script:ScanCheckAt = [datetime]::MinValue; $script:ScanAutoAt = $null; $script:CpuRing = New-Object System.Collections.ArrayList   # quét nền tự làm mới (P10)
 $script:StopRequested = $false
 $live = $null
 $nextSample = [datetime]::MinValue
@@ -242,9 +245,41 @@ try {
                 }
                 elseif ($path -eq '/api/state') { Send-Json $ctx $live }
                 elseif ($path -eq '/api/history') { Send-Json $ctx @(Read-RgMetricsTail 480) }
-                elseif ($path -eq '/api/events') { Send-Json $ctx @(Get-RgRecentEvents 30) }
+                elseif ($path -eq '/api/events') {
+                    $mx = 30; $mq = 0
+                    if ([int]::TryParse([string]$req.QueryString['max'], [ref]$mq) -and $mq -ge 1) { $mx = [math]::Min(200, $mq) }
+                    Send-Json $ctx @(Get-RgRecentEvents $mx)
+                }
+                elseif ($path -eq '/api/insight' -and $req.HttpMethod -eq 'GET') {
+                    if (-not $live) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Chưa có số liệu, thử lại sau vài giây.' }) 503 }
+                    else { Send-Json $ctx (Get-RgInsight $live @($script:RgTableCache)) }
+                }
+                elseif ($path -eq '/api/drive/history' -and $req.HttpMethod -eq 'GET') {
+                    # Dung lượng trống của một ổ, mỗi giờ một điểm (cache 10 phút), để vẽ biểu đồ nhiều ngày. ts là giờ địa phương như metrics.
+                    $dq = ([string]$req.QueryString['drive']).Trim().TrimEnd(':').ToUpperInvariant()
+                    $dd = 14; $dn = 0
+                    if ([int]::TryParse([string]$req.QueryString['days'], [ref]$dn) -and $dn -ge 1) { $dd = [math]::Min(14, $dn) }
+                    if ($dq -notmatch '^[A-Z]$') { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Tên ổ không hợp lệ.' }) 400 }
+                    else {
+                        $sm = Get-RgDriveSamplesCached 14
+                        $cut = (Get-Date).AddDays(-$dd)
+                        $pts = @(); if ($sm.ContainsKey($dq)) { $pts = @($sm[$dq] | Where-Object { $_.t -ge $cut } | ForEach-Object { [ordered]@{ ts = $_.t.ToString('yyyy-MM-dd HH:mm:ss'); freeGB = [math]::Round($_.freeGB, 2) } }) }
+                        Send-Json $ctx ([ordered]@{ drive = $dq; days = $dd; points = $pts })
+                    }
+                }
+                elseif ($path -eq '/api/advice' -and $req.HttpMethod -eq 'GET') {
+                    $dr = if ($live -and $live.drives) { @($live.drives) } else { $null }
+                    Send-Json $ctx (Get-RgAdvice -Drives $dr)
+                }
+                elseif ($path -eq '/api/process/history' -and $req.HttpMethod -eq 'GET') {
+                    $pn = ([string]$req.QueryString['name']).ToLowerInvariant()
+                    $pm = 60; $pq = 0
+                    if ([int]::TryParse([string]$req.QueryString['min'], [ref]$pq) -and $pq -ge 1) { $pm = [math]::Min(1440, $pq) }
+                    if ($pn -notmatch '^[a-z0-9._ -]{1,64}$') { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Tên tiến trình không hợp lệ.' }) 400 }
+                    else { Send-Json $ctx (Get-RgProcHistory $pn $pm) }
+                }
                 elseif ($path -eq '/api/settings' -and $req.HttpMethod -eq 'GET') {
-                    Send-Json $ctx ([ordered]@{ intervalSec = (Get-RgSettings).intervalSec; minSec = $script:MinIntervalSec; maxSec = $script:MaxIntervalSec; defaultSec = $script:DefaultIntervalSec; thresholds = (Get-RgThresholds); mode = (Get-RgPolicy).mode })
+                    Send-Json $ctx ([ordered]@{ intervalSec = (Get-RgSettings).intervalSec; minSec = $script:MinIntervalSec; maxSec = $script:MaxIntervalSec; defaultSec = $script:DefaultIntervalSec; thresholds = (Get-RgThresholds); mode = (Get-RgPolicy).mode; agentAvailable = [bool](Get-Command claude -ErrorAction SilentlyContinue) })
                 }
                 elseif ($path -eq '/api/settings' -and $req.HttpMethod -eq 'POST') {
                     $body = (New-Object IO.StreamReader($req.InputStream, [Text.Encoding]::UTF8)).ReadToEnd()
@@ -262,10 +297,32 @@ try {
                 }
                 elseif ($path -eq '/api/processes') {
                     $pol = Get-RgPolicy
+                    $pctx = New-RgProcContext -Policy $pol
+                    $tbl = @{}; foreach ($t in @($script:RgTableCache)) { if ($t) { $tbl[[int]$t.Pid] = $t } }
                     $rows = @($script:RgLastProcs | ForEach-Object {
-                            [ordered]@{ pid = $_.pid; name = $_.name; cpu = $_.cpu; ramMB = $_.ramMB; group = $_.group; agent = $_.agent; protected = (Test-RgProcessProtected ([string]$_.name) $pol) }
+                            $tr = $tbl[[int]$_.pid]
+                            $st = if ($tr) { [string]$tr.Start } else { '' }
+                            $low = ($st -ne '') -and $pctx.lowered.ContainsKey("$([int]$_.pid)|$st")
+                            $why = ''
+                            if ($st -eq '') { $why = 'Chưa đọc được thời điểm khởi động; thử lại sau vài giây.' }
+                            elseif ($low) { $why = 'Đã hạ ưu tiên rồi; có thể trả về bình thường.' }
+                            else { $why = Get-RgProcLowerVerdict ([int]$_.pid) ([string]$_.name) ([string]$_.group) $(if ($tr) { [string]$tr.Cmd } else { '' }) $_.session $pctx }
+                            [ordered]@{ pid = $_.pid; name = $_.name; cpu = $_.cpu; ramMB = $_.ramMB; group = $_.group; agent = $_.agent; protected = (Test-RgProcessProtected ([string]$_.name) $pol)
+                                start = $st; lowered = $low; canLower = ($why -eq ''); whyNot = $why }
                         })
                     Send-Json $ctx ([ordered]@{ ts = $(if ($live) { $live.ts } else { $null }); logical = (Get-RgCpuInfo).logical; procs = $rows })
+                }
+                elseif ($path -eq '/api/process/priority' -and $req.HttpMethod -eq 'POST') {
+                    # Chỉ nhận pid + start + level (không đường dẫn, không tên). Mọi kiểm tra nằm trong Set-RgProcPriority.
+                    try {
+                        $b = Read-RgBody $req
+                        $bp = 0
+                        if ($null -eq $b -or -not [int]::TryParse([string]$b.pid, [ref]$bp) -or $bp -le 0) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'PID không hợp lệ.' }) 400 }
+                        else {
+                            $pr = Set-RgProcPriority $bp ([string]$b.start) ([string]$b.level)
+                            if ($pr.ok) { Send-Json $ctx $pr } else { Send-Json $ctx $pr 400 }
+                        }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
                 }
                 elseif ($path -eq '/api/jobs') {
                     Send-Json $ctx ([ordered]@{
@@ -299,14 +356,32 @@ try {
                         Send-RawJson $ctx ('{"drive":"' + $q + '","breakdown":' + $b + ',"progress":' + (ConvertTo-Json -InputObject (Get-RgJobState 'scan-breakdown.progress.json') -Compress -Depth 3) + '}')
                     }
                 }
+                elseif ($path -eq '/api/disk/tree' -and $req.HttpMethod -eq 'GET') {
+                    # Cây thư mục của lượt quét gần nhất (scan-tree-<ổ>.json, đã gộp nút nhỏ). Chỉ đọc file cache.
+                    $q = ([string]$req.QueryString['drive']).Trim().TrimEnd(':').ToUpperInvariant()
+                    if (-not $q) { $dl = @(Get-RgDrives); $pd = Get-RgPrimaryDrive $dl (Get-RgConfig); $q = $(if ($pd) { $pd.drive } else { 'C' }) }
+                    if ($q -notmatch '^[A-Z]$') { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Tên ổ không hợp lệ.' }) 400 }
+                    else {
+                        $tt = Read-RgStateText ("scan-tree-{0}.json" -f $q)
+                        if (-not $tt) { Send-Json $ctx ([ordered]@{ ok = $false; error = "Chưa có cây thư mục của ổ ${q}: hãy quét ổ trước." }) 404 }
+                        else { Send-RawJson $ctx $tt }
+                    }
+                }
                 elseif ($path -eq '/api/disk/scan' -and $req.HttpMethod -eq 'POST') {
                     $b = $null; try { $b = Read-RgBody $req } catch { }
                     $want = ''; if ($b -and $b.drive) { $want = ([string]$b.drive).Trim().TrimEnd(':').ToUpperInvariant() }
+                    $scanScope = ''; $scopeBad = $false
+                    if ($b -and $null -ne $b.scope -and [string]$b.scope -ne '') { $scanScope = ([string]$b.scope).Trim().ToLowerInvariant(); if ($scanScope -notin 'focus', 'full') { $scopeBad = $true } }
                     $dl = @(Get-RgDrives)
                     if (-not $want) { $pd = Get-RgPrimaryDrive $dl (Get-RgConfig); if ($pd) { $want = $pd.drive } }
                     if ($want -notmatch '^[A-Z]$' -or -not (@($dl | Where-Object { $_.drive -eq $want }))) { Send-Json $ctx ([ordered]@{ ok = $false; error = "Ổ '$want' không có hoặc không được giám sát." }) 400 }
+                    elseif ($scopeBad) { Send-Json $ctx ([ordered]@{ ok = $false; error = "scope chỉ nhận 'focus' hoặc 'full'." }) 400 }
                     elseif (Test-RgJobRunning 'scan-breakdown.progress.json') { $cur = Get-RgJobState 'scan-breakdown.progress.json'; Send-Json $ctx ([ordered]@{ ok = $true; already = $true; drive = [string]$cur.drive }) }
-                    else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'breakdown', '-Drive', $want); Send-Json $ctx ([ordered]@{ ok = $true; drive = $want }) }
+                    else {
+                        # Không nói rõ scope: ổ chưa có phần vùng cố định (chưa từng quét đầy đủ) thì quét full để có số nền, còn lại quét focus.
+                        if (-not $scanScope) { $scanScope = $(if (Test-Path -LiteralPath (Join-Path (Initialize-RgHome) ('state\scan-fixed-{0}.json' -f $want))) { 'focus' } else { 'full' }) }
+                        Start-RgJob 'rg-scan.ps1' @('-Mode', 'breakdown', '-Drive', $want, '-Scope', $scanScope); Send-Json $ctx ([ordered]@{ ok = $true; drive = $want; scope = $scanScope })
+                    }
                 }
                 elseif ($path -eq '/api/candidates' -and $req.HttpMethod -eq 'GET') {
                     $pol = Get-RgPolicy
@@ -320,7 +395,9 @@ try {
                                 $prot = $userProt -or $ak
                                 [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; level = $_.level; path = $_.path; drive = (Get-RgPathDrive ([string]$_.path)); pid = $_.pid; name = $_.name; sizeBytes = $_.sizeBytes
                                     protectedBy = $(if ($userProt) { 'user' } elseif ($ak) { 'agent' } else { $null }); keepReason = $(if ($ak) { $ak.reason } else { $null }); keepUntilUtc = $(if ($ak) { $ak.expiresUtc } else { $null })
-                                    ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; young = [bool]$_.young; canArchive =(Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
+                                    ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; young = [bool]$_.young
+                                    why = [string]$_.why; impact = [string]$_.impact; regen = [string]$_.regen; regenHint = [string]$_.regenHint; riskLevel = [string]$_.riskLevel
+                                    canArchive =(Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
                                     setting = $(if ($pol.categories.Contains([string]$_.kind)) { $pol.categories[[string]$_.kind] } else { 'keep' }) }
                             })
                     }
@@ -410,6 +487,22 @@ try {
                         }
                     } catch { if (-not $replied) { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 } }
                 }
+                elseif ($path -eq '/api/setup' -and $req.HttpMethod -eq 'GET') {
+                    Send-Json $ctx (Get-RgSetupInfo)
+                }
+                elseif ($path -eq '/api/setup' -and $req.HttpMethod -eq 'POST') {
+                    try {   # đặt PIN KHÔNG qua đây (chỉ console); chỉ autostart / shortcut / firstRunDone
+                        $sr = Invoke-RgSetupPost (Read-RgBody $req)
+                        if ($sr.ok) { Send-Json $ctx ([ordered]@{ ok = $true; setup = $sr.info }) } else { Send-Json $ctx ([ordered]@{ ok = $false; error = $sr.error }) 400 }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
+                elseif ($path -eq '/api/auto/preview' -and $req.HttpMethod -eq 'POST') {
+                    try {   # chỉ đọc: không lưu bản nháp, không cần PIN
+                        $b = Read-RgBody $req
+                        if ($null -eq $b -or $null -eq $b.policy) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Thiếu bản nháp chính sách.' }) 400 }
+                        else { Send-Json $ctx (Get-RgAutoPreview $b.policy -Snapshot $live) }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
                 elseif ($path -eq '/api/auto/run' -and $req.HttpMethod -eq 'POST') {
                     if (Test-RgJobRunning 'auto.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
                     else { Start-RgJob 'rg-auto.ps1' @('-Force', '-DryRun', '-Trigger', 'manual'); Send-Json $ctx ([ordered]@{ ok = $true }) }
@@ -473,7 +566,7 @@ try {
                     commitPct = $rec.commitPct; cpuPct = $rec.cpuPct; diskDrive = $rec.diskDrive; diskFreeGB = $rec.diskFreeGB; drives = $rec.drives
                     heavy = $rec.heavy; ledgerOrphans = $rec.ledgerOrphans; top = $rec.top
                     reasons = @($script:RgLastReasons); intervalSec = $iv
-                    cores = $rec.cores; topCpu = $rec.topCpu; procCount = $rec.procCount; uptimeSec = $rec.uptimeSec; cpuInfo = (Get-RgCpuInfo)
+                    cores = $rec.cores; topCpu = $rec.topCpu; procCount = $rec.procCount; uptimeSec = $rec.uptimeSec; cpuInfo = (Get-RgCpuInfo); procTop = $rec.procTop
                 }
                 try { Write-RgFileAtomic (Join-Path (Initialize-RgHome) 'state\live.json') (ConvertTo-Json -InputObject $live -Depth 5 -Compress) } catch { }
                 try {   # tự dọn nền: chỉ spawn khi mode != off, có áp lực và hết cooldown
@@ -487,6 +580,28 @@ try {
                         }
                     }
                 } catch { Write-RgLog 'auto-check-error' ([string]$_) }
+                try {   # quét nền tự làm mới (P10): Test-RgScanDue (thuần) quyết định; ở đây chỉ gom đầu vào rồi khởi động job
+                    if ($null -ne $rec.cpuPct) { [void]$script:CpuRing.Add([double]$rec.cpuPct); while ($script:CpuRing.Count -gt 3) { $script:CpuRing.RemoveAt(0) } }
+                    if (((Get-Date) - $script:ScanCheckAt).TotalSeconds -ge 60) {
+                        $script:ScanCheckAt = Get-Date
+                        $scanCfg = Get-RgConfig
+                        $refreshH = Get-RgScanRefreshHours $scanCfg
+                        if ($refreshH -gt 0) {
+                            $anyJob = $false
+                            foreach ($pf in 'scan-breakdown', 'scan-candidates', 'cleanup', 'auto', 'agent') { if (Test-RgJobRunning "$pf.progress.json") { $anyJob = $true; break } }
+                            $sDir = Join-Path (Initialize-RgHome) 'state'
+                            $wt = { param($f) if (Test-Path -LiteralPath $f) { (Get-Item -LiteralPath $f).LastWriteTimeUtc } else { $null } }
+                            $dv = @(Get-RgDrives | ForEach-Object { [pscustomobject]@{ drive = $_.drive; focusUtc = (& $wt (Join-Path $sDir "scan-breakdown-$($_.drive).json")); fullUtc = (& $wt (Join-Path $sDir "scan-fixed-$($_.drive).json")) } })
+                            $dec = Test-RgScanDue -Now (Get-Date) -JobRunning $anyJob -CpuSamples @($script:CpuRing) -LastAutoStart $script:ScanAutoAt -RefreshHours $refreshH -CpuMax (Get-RgScanCpuMax $scanCfg) -Drives $dv -CandidatesUtc (& $wt (Join-Path $sDir 'scan-candidates.json'))
+                            if ($dec.due) {
+                                $script:ScanAutoAt = Get-Date
+                                Write-RgLog 'scan-auto' ([ordered]@{ kind = $dec.kind; drive = $dec.drive; scope = $dec.scope; because = $dec.because })
+                                if ($dec.kind -eq 'breakdown') { Start-RgJob 'rg-scan.ps1' @('-Mode', 'breakdown', '-Drive', [string]$dec.drive, '-Scope', [string]$dec.scope) }
+                                else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'candidates') }
+                            }
+                        }
+                    }
+                } catch { Write-RgLog 'scan-auto-error' ([string]$_) }
                 Send-RgSse $sse "data: $(ConvertTo-Json -InputObject $live -Depth 6 -Compress)`n`n"
             } catch { Write-RgLog 'server-tick-error' ([string]$_) }
             # Tính từ lúc BẮT ĐẦU tick (không cộng thời gian tick vào chu kỳ); tối thiểu 1s để không quay vòng liên tục.

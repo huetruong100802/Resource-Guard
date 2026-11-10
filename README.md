@@ -13,7 +13,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/img/overview.png" alt="Tổng quan Resource Guard" width="860">
+  <img src="docs/img/overview.png" alt="Trang chủ Resource Guard" width="860">
 </p>
 
 ---
@@ -33,7 +33,9 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 | | |
 |---|---|
 | 📈 **Realtime** | Dashboard trên `localhost` đẩy dữ liệu bằng Server-Sent Events; RAM, CPU (từng nhân), commit, ổ đĩa, chu kỳ lấy mẫu mặc định 15 giây. |
-| 🥧 **Phân tích ổ đĩa** | Biểu đồ tròn theo nhóm (chương trình, AppData, repo, Windows, cache dev, temp…) và liệt kê đầy đủ từng nhân tố chiếm dung lượng. |
+| 🏠 **Biết ngay nên làm gì** | Trang chủ trả lời bằng một câu: máy có đủ chỗ để build/test/chạy agent không, ổ nào sắp đầy (dự báo ngày đầy), và **kế hoạch đề xuất** dọn gì trước, được bao nhiêu. |
+| 📊 **Thấy trước ảnh hưởng** | Thanh “trước → sau” cho từng ổ, cập nhật tức thì khi tick/bỏ tick; kéo ngưỡng tự động hoá là câu mô tả, số lần chạm và danh sách mục đổi theo; hạ ưu tiên tiến trình có nút hoàn tác. |
+| 🥧 **Phân tích ổ đĩa** | Treemap đào sâu (chuột/bàn phím) với lớp phủ: mục dọn được, đang chọn, được bảo vệ, vùng cố định. **Quét nhanh** chỉ quét phần dọn được; **quét đầy đủ** quét hết. Chạy nền, kết quả hiện dần. |
 | 🧹 **Dọn dẹp có kiểm soát** | File tạm, `bin/obj`, `node_modules`, cache dev, repo cũ đã đồng bộ remote, mục lớn lâu không đụng, tiến trình mồ côi của agent. |
 | 🤖 **Tự động hoá theo chính sách** | Chế độ Tắt / Chạy thử / Bật; ngưỡng kích hoạt, cooldown, giới hạn GB mỗi lượt, thứ tự ưu tiên, vùng bảo vệ. |
 | 🧠 **Agent đánh giá (tuỳ chọn)** | `claude -p --model haiku --effort high` đọc **metadata** và gợi ý nên dọn/giữ gì; “nên dọn” chỉ chọn sẵn ô, con người xác nhận; “nên giữ” (tin cậy cao) tự bảo vệ có thời hạn. |
@@ -45,13 +47,19 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/img/cpu.png" alt="CPU và tiến trình kiểu Task Manager"><br><sub><b>CPU & Tiến trình</b> — đồ thị CPU, từng nhân logic, bảng tiến trình gộp theo tên/PID.</sub></td>
-    <td width="50%"><img src="docs/img/disk-light.png" alt="Phân tích ổ đĩa"><br><sub><b>Ổ đĩa</b> — biểu đồ tròn theo nhóm và danh sách nhân tố.</sub></td>
+    <td width="50%"><img src="docs/img/cleanup.png" alt="Trang Dọn dẹp: nhóm theo bước, tác động nếu dọn"><br><sub><b>Dọn dẹp</b> — mục dọn được xếp theo bước an toàn; ô bên phải cho thấy tác động trước khi xác nhận.</sub></td>
+    <td width="50%"><img src="docs/img/disk-light.png" alt="Phân tích ổ đĩa"><br><sub><b>Ổ đĩa</b> — phân bố theo nhóm và treemap thư mục (bấm đúp để đào sâu).</sub></td>
   </tr>
   <tr>
-    <td colspan="2"><img src="docs/img/settings.png" alt="Cài đặt"><br><sub><b>Cài đặt</b> — chu kỳ lấy mẫu, ngưỡng trạng thái, giao diện sáng/tối.</sub></td>
+    <td width="50%"><img src="docs/img/cpu.png" alt="Tiến trình và RAM theo thời gian"><br><sub><b>Tiến trình</b> — ai đang chiếm RAM theo thời gian, đồ thị CPU, bảng tiến trình gộp theo tên/PID.</sub></td>
+    <td width="50%"><img src="docs/img/automation.png" alt="Trang Tự động hoá"><br><sub><b>Tự động hoá</b> — câu mô tả việc sẽ làm, kéo ngưỡng kích hoạt, chọn Tắt / Chạy thử / Bật theo từng nhóm.</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/img/settings.png" alt="Cài đặt"><br><sub><b>Cài đặt</b> — chu kỳ lấy mẫu, ngưỡng trạng thái, khởi động cùng Windows, giao diện sáng/tối.</sub></td>
   </tr>
 </table>
+
+> Ảnh chụp từ bản chạy thật trên dữ liệu giả (thư mục demo), nên đường dẫn và dung lượng dọn được chỉ mang tính minh hoạ.
 
 ## Yêu cầu
 
@@ -103,13 +111,14 @@ Thêm `-Json` vào lệnh để lấy đầu ra máy-đọc. Các script lẻ (`
 
 | Tab | Chức năng |
 |---|---|
-| **Tổng quan** | Thẻ RAM/CPU/commit và **mỗi ổ đĩa một thẻ + một biểu đồ** theo ngưỡng, biểu đồ realtime, trạng thái tự dọn, sự kiện gần đây. |
-| **CPU & Tiến trình** | Kiểu Task Manager: đồ thị CPU, từng nhân logic, bảng tiến trình (gộp theo tên/từng PID, sắp xếp, lọc) và nút khiên để bảo vệ tiến trình khỏi tự dọn. |
-| **Ổ đĩa** | Chọn ổ ở thanh tab (khi có từ 2 ổ), biểu đồ tròn theo nhóm + liệt kê đầy đủ nhân tố (hoặc top 80). Quét từng ổ ~1–2 phút ở process riêng, chỉ đọc; mỗi lần quét một ổ. |
-| **Dọn dẹp** | Ứng viên dọn → tick chọn → xác nhận → `plan → approve → apply`. UI chỉ gửi *key*, không bao giờ gửi đường dẫn. |
-| **Chính sách tự động** | Tắt / Chạy thử / Bật; ghi đè ngưỡng kích hoạt và mức trống mục tiêu **theo từng ổ**; mỗi nhóm *Tự động / Hỏi tay / Luôn giữ*; thứ tự ưu tiên; vùng bảo vệ (thư mục + tên tiến trình). |
-| **Agent đánh giá** | Xem trước chính xác dữ liệu sẽ gửi, nhận tóm tắt, phát hiện, gợi ý theo ưu tiên và gợi ý chính sách. |
-| **Cài đặt** | Chu kỳ lấy mẫu (2–300 giây), ngưỡng, giao diện sáng/tối/theo hệ thống. |
+| **Trang chủ** | Một câu trạng thái; “Sẵn sàng cho” build/test/agent (thiếu bao nhiêu GB); mỗi ổ một thanh tác động + dự báo ngày đầy; **kế hoạch đề xuất** theo bước (rê vào bước thì thanh ảnh hưởng đổi); biểu đồ “Resource Guard đã làm gì” với điểm đánh dấu bấm được để mở *biên lai*; nút **Hỏi trợ lý** (ngăn kéo, ẩn nếu không có `claude` trong PATH). |
+| **Dọn dẹp** | Các bước của kế hoạch dưới dạng nhóm mở được; tick cả nhóm hoặc từng mục; thanh ảnh hưởng `trước → sau` đổi tức thì; hộp xác nhận cho thấy cả hành động lẫn ảnh hưởng; sau khi dọn có **dự kiến / thực tế**. UI chỉ gửi *key*, không bao giờ gửi đường dẫn. Vẫn có khối Bản nén đã tạo, Cần quyền admin, Agent đang giữ. |
+| **Ổ đĩa** | Thanh phân bố theo nhóm (hiện dần khi đang quét), **treemap** đào sâu bằng chuột hoặc Enter (Esc/Backspace để lùi), tab *Top lớn nhất*, ngăn kéo cho từng thư mục (bảo vệ thư mục, chọn mục dọn). **Quét nhanh** / **Quét đầy đủ**. |
+| **Tiến trình** | Biểu đồ RAM xếp chồng theo tiến trình, CPU kèm điểm đánh dấu khi hạ ưu tiên, bảng tiến trình. Ngăn kéo từng tiến trình: lịch sử, “nếu đóng ứng dụng này sẽ giải phóng bao nhiêu” (ước tính), **hạ ưu tiên / hoàn tác**, bảo vệ. Không có nút kết thúc tiến trình. |
+| **Tự động hoá** | Một câu mô tả chính sách; **kéo vạch ngưỡng** trên biểu đồ ổ (hoặc dùng phím mũi tên) để đổi; xem trước (số lần chạm trong 14 ngày, mục sẽ bị chọn) trước khi Lưu; 3 mức điền sẵn; mục Nâng cao (ngưỡng RAM, thứ tự, vùng bảo vệ) thu gọn. Lưu khi *Bật* hoặc nới lỏng vẫn cần PIN. |
+| **Cài đặt** | Chu kỳ lấy mẫu (2–300 giây), ngưỡng, giao diện sáng/tối/theo hệ thống, công tắc **chạy cùng Windows** và **lối tắt Start Menu**. |
+
+Lần đầu mở, một hộp 3 bước giới thiệu app, bật chạy cùng Windows/lối tắt và chọn chế độ tự động (mặc định **Chạy thử**). Có thể bỏ qua; mọi thứ đổi lại được ở Cài đặt và Tự động hoá. Đặt PIN vẫn chỉ ở console (`rg pin`).
 
 <details>
 <summary><b>Các loại ứng viên dọn dẹp</b></summary>
@@ -149,7 +158,18 @@ Tool giám sát mọi ổ **cố định** (Fixed) đã sẵn sàng; ổ USB/m�
 - Chính sách: `drives` trong `policy.json`, ví dụ `{ "D": { "diskTrigger": "Caution", "targetFreeGB": 60 } }`. Thiếu khoá nào thì dùng giá trị chung. Nới lỏng ghi đè theo ổ cũng cần PIN khi chế độ là *Bật*.
 - Ngưỡng cảnh báo: `disk.drives.<X>` trong `config` (ghi đè `normalAboveGB`/`cautionFromGB` cho riêng ổ); `disk.exclude` loại ổ khỏi giám sát.
 - Thư mục mã nguồn: ngoài `cleanup.workspaceRoots`, tool tự nhận các thư mục tên `Work`, `Repositories`, `Repos`, `Source`, `Src`, `Projects`, `Dev`, `Code`, `Workspace` ở gốc các ổ không phải ổ hệ thống (`cleanup.autoRootNames` đổi danh sách tên, `cleanup.autoRoots: false` tắt hẳn).
-- Kết quả quét ổ lưu ở `state\scan-breakdown-<X>.json`.
+- Kết quả quét ổ lưu ở `state\scan-breakdown-<X>.json` (số theo nhóm), `state\scan-tree-<X>.json` (cây thư mục đã cắt tỉa cho treemap) và `state\scan-fixed-<X>.json` (số của vùng cố định, dùng lại ở *Quét nhanh*).
+
+### Quét ổ đĩa
+
+| Phạm vi | Làm gì |
+|---|---|
+| **Quét nhanh** (`focus`) | Bỏ qua **vùng cố định** (Windows, Program Files, ProgramData, hồ sơ người dùng khác): không dọn được nên không cần quét lại; số của vùng này lấy từ lượt quét đầy đủ gần nhất (ô được đánh dấu “chưa quét chi tiết”). Chưa có lượt đầy đủ nào thì server tự chạy quét đầy đủ. |
+| **Quét đầy đủ** (`full`) | Quét mọi thứ; làm mới số của vùng cố định. |
+
+Bộ quét dùng Win32 `FindFirstFileExW` đa luồng, ưu tiên thấp (BelowNormal). Đo trên máy phát triển (ổ C, ~270 nghìn file): bản cũ 85,7 giây; bản mới **23,8 giây** (đầy đủ), **12,8 giây** (nhanh). Số file/byte của các nhóm không đổi giữa hai lượt quét khớp với bản cũ.
+
+**Tự làm mới nền:** khi máy rảnh (CPU dưới `scan.cpuMaxPct`, mặc định 40%), kết quả quét cũ hơn `scan.autoRefreshHours` (mặc định 6; `0` = tắt) (và không có tác vụ nền nào đang chạy) thì server tự chạy một lượt ở ổ có số liệu cũ nhất, hoặc quét mục có thể dọn nếu nó cũ hơn. Mặc định là quét nhanh; lượt đầy đủ gần nhất cũ hơn 7 ngày thì quét đầy đủ. Hai lượt tự chạy cách nhau ít nhất 10 phút, mỗi lần một việc, ghi `scan-auto` vào log.
 
 ## Agent đánh giá
 
@@ -157,6 +177,7 @@ Tool giám sát mọi ổ **cố định** (Fixed) đã sẵn sàng; ổ USB/m�
 - Agent chỉ nhận **metadata**: tên thư mục, kích thước, số ngày không dùng, số liệu RAM/CPU/ổ đĩa, tên tiến trình, tóm tắt chính sách. **Không gửi nội dung file**; đường dẫn đã thay tên tài khoản bằng `~`.
 - Có nút *Xem trước dữ liệu sẽ gửi* để kiểm tra chính xác payload.
 - Kết quả là JSON có cấu trúc; key do agent bịa ra bị loại. Verdict **nên dọn** chỉ **chọn sẵn ô**, con người xác nhận mới xoá.
+- Trợ lý không còn là tab riêng: nút **Hỏi trợ lý** ở Trang chủ mở ngăn kéo; `#agent` trên URL mở Trang chủ kèm ngăn kéo. Không có `claude` trong PATH thì nút ẩn đi, kế hoạch tất định vẫn đầy đủ. Payload mang cả kế hoạch đề xuất và danh sách “cần xem lại”; agent được yêu cầu đánh giá các mục cần xem lại trước và để phần tóm tắt trả lời “nên làm gì trước”.
 - Verdict **nên giữ** với độ tin cậy cao được **tự bảo vệ 30 ngày** (chỉ áp cho thư mục/file, không áp cho tiến trình): mục đó ẩn khỏi danh sách dọn và không bao giờ bị tự dọn. Khối “Agent đang giữ” ở tab Dọn dẹp cho xem lý do, ngày hết hạn và bỏ giữ từng mục. Agent chỉ thêm được bảo vệ, không gỡ được; dữ liệu ở `state\agent-keep.json`.
 
 ## Kiến trúc
@@ -189,7 +210,11 @@ resource-guard/
 │   ├── rg-policy.ps1          # chính sách, PIN, engine tự động
 │   ├── rg-server.ps1          # HTTP + SSE, router
 │   ├── rg-watcher.ps1         # vòng lấy mẫu, hysteresis, toast
-│   ├── rg-scan.ps1            # quét đĩa và ứng viên dọn
+│   ├── rg-scan.ps1            # quét đĩa (nhanh/đầy đủ, cây thư mục) và ứng viên dọn
+│   ├── rg-insight.ps1         # mức sẵn sàng, dự báo ngày đầy, kế hoạch đề xuất tất định
+│   ├── rg-proc.ps1            # hạ/hoàn tác ưu tiên tiến trình, lịch sử theo tiến trình
+│   ├── rg-setup.ps1           # chạy cùng Windows, lối tắt, trạng thái lần đầu
+│   ├── spikes/usn-probe.ps1   # spike: đọc USN journal không cần admin (xem TECHNOTE)
 │   ├── rg-cleanup.ps1         # dọn mục người dùng chọn (theo key)
 │   ├── rg-auto.ps1            # lượt dọn tự động
 │   ├── rg-agent.ps1           # dựng payload, gọi claude, lọc kết quả
@@ -198,6 +223,7 @@ resource-guard/
 │   └── Install-Watcher.ps1    # tự chạy khi đăng nhập
 ├── ui/                     # dashboard (HTML/CSS/JS thuần)
 ├── tests/Acceptance.ps1    # bộ test nghiệm thu
+├── tests/Check-Syntax.ps1  # kiểm cú pháp mọi .ps1 và .js
 └── docs/                   # tài liệu kỹ thuật
 ```
 
@@ -215,6 +241,7 @@ Muốn đổi ngưỡng hoặc thư mục gốc, sao chép `config.default.json`
 | `cleanup.workspaceRoots` | Thư mục gốc chứa repo/dự án được phép quét |
 | `cleanup.cacheDirs` | Đường dẫn cache dev (NuGet, npm, pnpm, Yarn, pip) |
 | `cleanup.staleRepo`, `largeItem`, `apps` | Ngưỡng cho repo cũ, mục lớn, ứng dụng |
+| `scan.autoRefreshHours`, `scan.cpuMaxPct` | Tự làm mới kết quả quét ổ khi máy rảnh (giờ; `0` = tắt) và ngưỡng CPU coi là rảnh |
 | `protected.segments` | Các segment đường dẫn không bao giờ bị xoá (`.git`, `.ssh`, `Documents`…) |
 
 ## An toàn
@@ -244,11 +271,14 @@ Muốn đổi ngưỡng hoặc thư mục gốc, sao chép `config.default.json`
 Bộ test nghiệm thu chạy trong sandbox ở `%TEMP%`, không đụng dữ liệu thật:
 
 ```powershell
-pwsh -NoProfile -File tests\Acceptance.ps1            # PowerShell 7+
-powershell.exe -NoProfile -File tests\Acceptance.ps1  # Windows PowerShell 5.1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Acceptance.ps1   # Windows PowerShell 5.1 (có sẵn, không cần cài thêm)
 ```
 
-Kết quả hiện tại: **132 pass, 0 fail**.
+Kiểm cú pháp nhanh (mọi `.ps1` và `.js`): `powershell.exe -NoProfile -File tests\Check-Syntax.ps1`.
+
+Kết quả hiện tại trên Windows PowerShell 5.1: **374 pass, 0 fail**. Dự án nhắm tới Windows PowerShell 5.1 (có sẵn trên Windows); PowerShell 7+ (`pwsh`) không bắt buộc và chưa được kiểm.
+
+Đừng chạy test khi một server Resource Guard khác đang chạy: mutex watcher dùng chung toàn máy nên nhóm `[api]` sẽ lỗi.
 
 ## Giới hạn đã biết
 
@@ -256,7 +286,7 @@ Kết quả hiện tại: **132 pass, 0 fail**.
 - Chưa có hook Claude/Codex (P2). `Test-ResourceBudget.ps1` hiện chỉ trả JSON + exit code; cần map theo giao thức hook của từng CLI và kiểm thử trước khi bật chặn.
 - Giới hạn subagent mới theo state, chưa đếm subagent đang chạy (cần SubagentStart/Stop hook).
 - Phân loại tiến trình và "heavy task" dựa trên tên + regex command line (xem `config.default.json`), cần hiệu chỉnh theo máy thật.
-- Quét đĩa dùng PowerShell + C# đa luồng, chưa thay được các công cụ chuyên dụng như WizTree.
+- Quét đĩa dùng PowerShell + C# đa luồng (`FindFirstFileExW`), chưa thay được các công cụ chuyên dụng như WizTree. Chưa có quét tăng dần bằng USN journal: spike cho thấy ổ C giữ journal chỉ vài giờ nên chưa đáng làm (chi tiết ở TECHNOTE).
 
 ## Tài liệu
 

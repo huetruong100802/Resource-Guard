@@ -18,9 +18,8 @@ powershell -NoProfile -File scripts\resource-manager.ps1 serve setpin
 # Dừng
 powershell -NoProfile -File scripts\resource-manager.ps1 serve stop
 
-# Test nghiệm thu (95 test, chạy được trên PS 7 và Windows PS 5.1)
-pwsh -NoProfile -File tests\Acceptance.ps1
-powershell -NoProfile -File tests\Acceptance.ps1
+# Test nghiệm thu (374 test; chạy trên Windows PowerShell 5.1, không cần pwsh)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Acceptance.ps1
 ```
 
 - Toolbox đăng ký: `resource-guard-manager` = `powershell -NoProfile -File scripts\resource-manager.ps1` + args `serve`.
@@ -48,7 +47,10 @@ rg-server.ps1  ── vòng lặp đơn luồng: lấy mẫu → ghi state\live.
 | `rg-common.ps1` | Hàm dùng chung: log, ghi file atomic, đọc file chia sẻ (`Read-RgFileShared`), allowlist xoá, plan/approve/apply |
 | `rg-policy.ps1` | Chính sách, PIN, engine tự động, trạng thái job (`Get/Write-RgJobState`) |
 | `rg-server.ps1` | HTTP + SSE, router, auto-spawn khi chạm ngưỡng |
-| `rg-scan.ps1` | Quét đĩa (nhân tố chiếm dung lượng) và danh sách ứng viên dọn |
+| `rg-scan.ps1` | Quét đĩa (Win32 `FindFirstFileExW`, đa luồng, phạm vi nhanh/đầy đủ, cây thư mục) và danh sách ứng viên dọn |
+| `rg-insight.ps1` | Mức sẵn sàng build/test/agent, dự báo ngày đầy ổ, kế hoạch đề xuất tất định (`New-RgAdvice`) |
+| `rg-proc.ps1` | Hạ ưu tiên tiến trình (đảo ngược được), lịch sử theo tiến trình |
+| `rg-setup.ps1` | Chạy cùng Windows, lối tắt Start Menu, cờ lần đầu (`state\setup.json`) |
 | `rg-auto.ps1` | Một lượt dọn tự động trong process riêng |
 | `rg-cleanup.ps1` | Dọn các mục người dùng chọn (theo key) |
 | `rg-agent.ps1` | Dựng payload, prompt, gọi `claude`, lọc kết quả |
@@ -62,16 +64,18 @@ SSE thay cho polling. Mất kết nối thì UI tự nối lại. Mỗi tick ser
 
 ## 3. Giao diện
 
-Sidebar + 6 trang, sáng/tối, responsive, có aria.
+Sidebar + 6 trang, sáng/tối, responsive (kiểm ở 1280/980/400 px), điều hướng được bằng bàn phím, có aria. Hash cũ `#overview` → `#home`; `#agent` → `#home` + ngăn kéo trợ lý.
 
-| Trang | Nội dung |
-|---|---|
-| Tổng quan | Mức RAM/đĩa (Normal → Critical), biểu đồ, cảnh báo |
-| CPU & Tiến trình | Đồ thị tổng, lưới từng nhân, bảng tiến trình (gộp theo tên, sắp xếp, lọc, biểu tượng khiên) |
-| Ổ đĩa | Donut theo nhóm; accordion liệt kê **mọi** nhân tố mỗi nhóm; chế độ Top 80; nút quét + tiến độ |
-| Dọn dẹp | Bảng ứng viên, tick chọn, hộp xác nhận, kết quả lần dọn |
-| Chính sách | Chế độ, ngưỡng kích hoạt, nhóm Tự động/Hỏi/Giữ, ưu tiên, vùng bảo vệ, chạy thử |
-| Agent | Xem trước payload, chạy đánh giá, kết quả, áp gợi ý |
+| Trang (hash) | Tệp | Nội dung |
+|---|---|---|
+| Trang chủ (`#home`) | `p-home.js` | Câu trạng thái, mức sẵn sàng, thanh tác động từng ổ, kế hoạch đề xuất, “Resource Guard đã làm gì” (điểm đánh dấu → biên lai), chỉ số chi tiết thu gọn |
+| Dọn dẹp (`#clean`) | `p-clean.js` | Nhóm theo bước của `/api/advice`, thanh ảnh hưởng trực tiếp, hộp xác nhận trước → sau, dự kiến vs thực tế |
+| Ổ đĩa (`#disk`) | `p-disk.js` | Thanh nhóm hiện dần (`cats` trong progress), treemap + lớp phủ, Top lớn nhất, ngăn kéo thư mục |
+| Tiến trình (`#cpu`) | `p-proc.js` | RAM xếp chồng, CPU + điểm đánh dấu `proc-priority`, bảng, ngăn kéo (lịch sử, what-if, hạ ưu tiên) |
+| Tự động hoá (`#policy`) | `p-auto.js` | Câu mô tả, vạch ngưỡng kéo được, xem trước `/api/auto/preview` (debounce 300 ms), mức điền sẵn, mục Nâng cao |
+| Cài đặt (`#settings`) | `p-overview.js` | Chu kỳ, ngưỡng, giao diện, công tắc chạy cùng Windows/lối tắt |
+
+Thư viện dùng chung: `core.js` (`RG.human` — nhãn tiếng Việt cho lý do/sự kiện, `RG.lineChart` có `markers`/`dragLine`, `RG.fmtLocal` giờ địa phương), `viz.js` (`RG.viz.impactBar/treemap/stackArea`, `RG.drawer`, `RG.receipt`; trang thử `#viz-demo`), `p-setup.js` (hộp lần đầu), `p-agent.js` (`RG.askAgent`). UI luôn chỉ gửi key/pid, không gửi đường dẫn.
 
 Kiểm thử UI bằng Edge headless qua CDP (`--screenshot` bị treo vì SSE nên không dùng được).
 
@@ -122,6 +126,7 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
   - Chỉ làm chặt hơn nên không cần PIN. Đã giữ thì không gia hạn; hết hạn thì được đánh giá lại ở lượt sau.
   - Bỏ giữ từng mục: `POST /api/agent/keep/release {key}` (chỉ nhận key; không cần PIN vì chỉ trả mục về trạng thái policy người dùng đã đặt).
   - Không áp cho tiến trình: bảo vệ theo tên sẽ chặn cả nhóm tiến trình cùng tên; verdict `keep` của tiến trình vẫn chỉ là gợi ý.
+- Hoà vào kế hoạch: payload có `advice.steps` và `review.keys` (mục chưa đủ tuổi); mục `review` luôn nằm trong `cleanupCandidates`; prompt yêu cầu đánh giá `review.keys` trước và để `summary` trả lời “nên làm gì trước”. Không đổi quyền: verdict vẫn chỉ chọn sẵn ô / bảo vệ có thời hạn. `/api/settings` có `agentAvailable` (có `claude` trong PATH) để UI ẩn nút.
 - Đo thực tế: 1 lượt ≈ 37 giây, ≈ **$0.006**, payload ≈ 12 KB.
 
 ## 7. An toàn (các chốt chặn)
@@ -138,7 +143,19 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
 ## 8. API (rút gọn)
 
 `GET /api/processes` · `/api/jobs` · `/api/drives` (ổ + trạng thái + ngưỡng + chính sách hiệu lực + `workspaceRoots`) · `/api/disk?drive=X` · `/api/candidates` · `/api/policy` · `/api/auto/last` · `/api/cleanup/last` · `/api/agent/{payload,last}`
-`POST /api/disk/scan {drive}` (mỗi lần một ổ; ổ không hợp lệ bị từ chối) · `/api/candidates/scan` · `/api/cleanup/apply` · `/api/policy` · `/api/auto/run` · `/api/agent/run`
+`POST /api/disk/scan {drive, scope}` (`scope` = `focus` | `full`, sai → 400; mỗi lần một ổ; mặc định `full` khi chưa có số vùng cố định) · `/api/candidates/scan` · `/api/cleanup/apply` · `/api/policy` · `/api/auto/run` · `/api/agent/run`
+
+API thêm trong đợt đổi UX (mọi POST cần `X-RG-Client`):
+
+| Route | Ý nghĩa |
+|---|---|
+| `GET /api/disk/tree?drive=X` | Cây thư mục đã cắt tỉa (độ sâu 5 theo tiền tố luật; nút nhỏ hơn max(100 MB, 0,2% dung lượng dùng) gộp vào `(khác)`) |
+| `GET /api/insight` · `GET /api/advice` | Mức sẵn sàng + dự báo ngày đầy; kế hoạch đề xuất tất định (`steps`, `review`) |
+| `GET /api/drive/history?drive=X&days=N` | Dung lượng trống theo giờ (biểu đồ 14 ngày) |
+| `GET /api/process/history?name=X&min=N` | Lịch sử RAM/CPU của tiến trình theo tên (mặc định 60 phút, tối đa 1440) |
+| `POST /api/process/priority {pid,start,level}` | Chỉ đổi PriorityClass `Normal` ↔ `BelowNormal` (`below` / `normal`), **không có đường kết thúc tiến trình**. Một hàm quyết định (`Get-RgProcLowerVerdict`) dùng chung cho `canLower/whyNot` ở danh sách và lúc thực thi; từ chối tiến trình Windows/giao diện và các tiến trình của chính Resource Guard; PID + start time + tên phải khớp dữ liệu sống |
+| `POST /api/auto/preview {policy}` | Xem trước chính sách chưa lưu: số lần chạm, mục sẽ bị chọn, bằng chứng của lượt chạy thử |
+| `GET/POST /api/setup` | `firstRun`, `autostart`, `shortcut`; POST chỉ nhận bool và `firstRunDone`; **PIN không đặt qua đây** |
 Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-locked` · `pin-not-set`.
 
 ## 9. Bẫy đã gặp (đọc trước khi sửa code)
@@ -161,7 +178,28 @@ Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-lo
 ## 10. Giới hạn & việc có thể làm tiếp
 
 - `Install-Watcher.ps1` (tự khởi động cùng Windows) chưa được cài trên máy này; hiện phải chạy `serve` thủ công.
-- Quét đĩa là tác vụ nặng I/O 1–2 phút; chưa có quét tăng dần.
+- Quét đĩa nhanh hơn nhiều (xem mục 11) nhưng vẫn là tác vụ nặng I/O; chưa có quét tăng dần (USN) — xem mục 12.
+- Mục tiêu hỗ trợ là Windows PowerShell 5.1 (có sẵn trên Windows, không phải máy nào cũng có `pwsh`); Acceptance 374 test chạy ở 5.1. PowerShell 7+ chưa được kiểm và không bắt buộc.
 - Agent chỉ thấy metadata nên không phân biệt được file "trông như rác nhưng quan trọng" — đó là lý do cá nhân/không rõ nguồn gốc luôn ở dạng gợi ý.
 - Chưa đo ảnh hưởng của chính watcher lên CPU/RAM trong nhiều giờ liên tục.
 - Ảnh chụp di động sau khi sửa banner (`.alert` flex-wrap) chưa chụp lại.
+
+## 11. Quét ổ v2: vùng quét và cây thư mục
+
+- `rg-scan.ps1 -Mode breakdown -Drive X -Scope focus|full -Threads N` (`0` = tự chọn). C# trong `Add-Type`, duyệt bằng `FindFirstFileExW` (`FindExInfoBasic` + `LARGE_FETCH`), đa luồng, ưu tiên BelowNormal.
+- **Vùng**: `fixed` (Windows, Program Files, ProgramData, hồ sơ người dùng khác; bị bỏ qua khi `focus`), `hot` và `warm` (nơi có ứng viên dọn). `scan-fixed-X.json` giữ số của vùng cố định từ lượt đầy đủ gần nhất.
+- Đầu ra: `scan-breakdown-X.json` (theo nhóm), `scan-tree-X.json` (cây cắt tỉa cho treemap), `scan-fixed-X.json`. `RgDiskScanner.SnapshotCats` cấp `cats` cho progress nên UI vẽ thanh nhóm hiện dần.
+- Làm mới nền: `Test-RgScanDue` (hàm thuần trong `rg-common.ps1`) quyết định theo: không có job nền nào chạy, CPU trung bình 3 mẫu cuối < `scan.cpuMaxPct`, cách lượt tự quét trước ≥ 10 phút, tuổi dữ liệu > `scan.autoRefreshHours` (ổ cũ nhất trước, hoặc quét ứng viên nếu nó cũ hơn); scope là `focus`, thành `full` nếu lượt đầy đủ gần nhất cũ hơn 7 ngày; vòng tick của server gọi nó (`$script:CpuRing`, `scan-auto`). Cấu hình: `scan.autoRefreshHours`, `scan.cpuMaxPct`. Test cấu hình `autoRefreshHours = 0` để server trong test không quét ổ thật.
+- Đo ổ C máy phát triển: cũ 85,7 s → mới 23,8 s (đầy đủ) / 12,8 s (nhanh, ≈15%).
+
+## 12. Spike USN journal (P11): đọc không cần admin
+
+Mục tiêu: xem có thể quét **tăng dần** bằng USN journal mà không đòi quyền admin không. Script: `scripts/spikes/usn-probe.ps1 -Drive C -Json` (chỉ đọc, luôn thoát 0).
+
+Kết quả trên Windows 11 build 26200 (không phải build 19045 như giả định ban đầu của plan), tài khoản không nâng quyền:
+
+- Đọc được **không cần admin**, nhưng chỉ khi mở handle ở **thư mục gốc ổ** với `FILE_READ_ATTRIBUTES` + `FILE_FLAG_BACKUP_SEMANTICS`; mở handle volume (`\\.\C:`) thì hoặc FSCTL query báo lỗi 1 (`none`/`attr`) hoặc mở bị từ chối (lỗi 5, `read`). Đọc phải bắt đầu từ `FirstUsn` (nếu không gặp lỗi 87); `FSCTL_READ_USN_JOURNAL` đặc quyền không dùng được (lỗi 5).
+- Bản ghi là V3 và **không kèm tên file** (`FileNameLength = 0`), chỉ có mã file và cờ lý do: muốn biết thư mục nào đổi phải tra ngược từng mã, đắt hơn lợi ích.
+- Journal ổ C chỉ giữ **vài giờ** (đo được 0,6 giờ ở lần đầu và 6,7 giờ ở lần sau; `maxSize` 32 MB, quay vòng theo mức hoạt động); ổ D giữ khoảng 28 ngày: với ổ hệ thống, cửa sổ quá ngắn để thay một lượt quét định kỳ.
+
+Kết luận: chưa triển khai quét tăng dần bằng USN. Quét nhanh + tự làm mới nền (mục 11) đã đủ nhanh; xem lại nếu có nhu cầu theo dõi ổ dữ liệu có journal dài.
