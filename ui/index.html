@@ -15,6 +15,7 @@
     <div class="side-foot">
       <div class="row"><span class="dot" id="dot"></span><span id="connTxt">đang kết nối…</span></div>
       <div class="row">Mẫu tiếp theo sau <b class="num" id="cd">–</b>s</div>
+      <button class="btn sm quit" id="quitBtn" title="Dừng giám sát và tắt Resource Guard">Thoát Resource Guard</button>
     </div>
   </aside>
   <main class="main">
@@ -25,6 +26,7 @@
       <button class="btn primary" id="askBtn" title="Gửi bản tóm tắt cho Claude (haiku, effort high) để đánh giá">Nhờ agent đánh giá</button>
       <button class="icon-btn" id="themeBtn" aria-label="Đổi giao diện sáng/tối"></button>
     </div>
+    <div class="lost" id="lost" role="alert"><b>Mất kết nối với Resource Guard.</b> Ứng dụng có thể đã bị tắt. Mở lại bằng lối tắt <b>Resource Guard</b> (Start Menu) hoặc lệnh <code>rg start</code>; trang này sẽ tự nối lại khi app chạy trở lại.</div>
     <div id="page"></div>
   </main>
 </div>

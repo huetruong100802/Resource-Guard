@@ -25,8 +25,16 @@
     document.title = (S.live ? '[' + S.live.state + '] ' : '') + 'Resource Guard · ' + RG.pages[name].title;
   };
 
+  function driveSig(a) { return (a || []).map(function (d) { return d.drive; }).join(','); }
   function onLive(r) {
-    S.live = r; S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
+    // Tập ổ thay đổi (cắm/rút ổ): nạp lại meta (ngưỡng, chính sách) và vẽ lại trang.
+    var changed = S.live && driveSig(S.live.drives) !== driveSig(r.drives);
+    S.live = r;
+    if (changed) {
+      if (S.driveSel && !(r.drives || []).some(function (d) { return d.drive === S.driveSel; })) S.driveSel = null;
+      RG.loadDrives().catch(function () { }).then(function () { var q = RG.pages[RG.cur]; if (q && q.render && (RG.cur === 'overview' || RG.cur === 'disk' || RG.cur === 'policy')) RG.go(RG.cur, true); });
+    }
+    S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
     var b = $('#badge'); b.textContent = r.state; b.className = 'badge ' + r.state;
     RG.nextAt = Date.now() + (r.intervalSec || 15) * 1000;
     if (S.settings) S.settings.intervalSec = r.intervalSec || S.settings.intervalSec;
@@ -34,12 +42,35 @@
     var p = RG.pages[RG.cur]; if (p && p.live) p.live();
     onLive.n = (onLive.n || 0) + 1; if (RG.cur === 'overview' && onLive.n % 4 === 0) p.refresh();
   }
+  var es = null, lostAt = 0;
   function connect() {
-    var es = new EventSource('/events');
-    es.onopen = function () { $('#dot').className = 'dot on'; $('#connTxt').textContent = 'trực tiếp'; };
+    es = new EventSource('/events');
+    es.onopen = function () { lostAt = 0; $('#lost').classList.remove('on'); $('#dot').className = 'dot on'; $('#connTxt').textContent = 'trực tiếp'; };
     es.onmessage = function (m) { try { onLive(JSON.parse(m.data)); } catch (e) { } };
-    es.onerror = function () { $('#dot').className = 'dot'; $('#connTxt').textContent = 'mất kết nối, đang thử lại…'; };
+    es.onerror = function () { if (!lostAt) lostAt = Date.now(); $('#dot').className = 'dot'; $('#connTxt').textContent = 'mất kết nối, đang thử lại…'; };
   }
+  setInterval(function () { if (lostAt && Date.now() - lostAt > 12000) $('#lost').classList.add('on'); }, 2000);
+
+  /* Thoát: xác nhận -> /api/shutdown (server dừng êm) -> màn hình "đã dừng" kèm cách mở lại. */
+  function showStopped() {
+    if (es) es.close();
+    lostAt = 0; document.title = 'Resource Guard đã dừng';
+    var d = document.createElement('div'); d.className = 'stopped'; d.setAttribute('role', 'alertdialog'); d.setAttribute('aria-label', 'Resource Guard đã dừng');
+    d.innerHTML = '<div class="card">' + RG.icon('shield') + '<h2>Resource Guard đã dừng</h2>' +
+      '<p class="mut">Giám sát realtime và tự dọn nền đã tắt. Không có file nào bị thay đổi.</p>' +
+      '<p>Mở lại bằng lối tắt <b>Resource Guard</b> trong Start Menu, hoặc chạy <code>rg start</code>. Có thể đóng tab này.</p></div>';
+    document.body.appendChild(d);
+  }
+  RG.quit = function () {
+    RG.confirm('Thoát Resource Guard?',
+      '<p>Giám sát realtime sẽ dừng. <b>Tự dọn nền chỉ hoạt động khi Resource Guard đang chạy</b>, nên sẽ không dọn khi đã tắt.</p>' +
+      '<p class="mut">Lượt quét ổ đĩa hoặc agent đang chạy sẽ bị huỷ. Mở lại bất cứ lúc nào bằng lối tắt Resource Guard hoặc <code>rg start</code>.</p>', 'Thoát', true)
+      .then(function (ok) {
+        if (!ok) return;
+        RG.api('/api/shutdown', { method: 'POST' }).then(showStopped)
+          .catch(function (e) { RG.toast(e.data && e.data.busy ? e.message + ' Hãy chờ lượt đó xong rồi thử lại.' : 'Không thoát được: ' + e.message, 'err', 9000); });
+      });
+  };
 
   function init() {
     $('#nav').innerHTML = NAV.map(function (n) {
@@ -48,6 +79,7 @@
     RG.$$('#nav button').forEach(function (b) { b.onclick = function () { RG.go(b.dataset.p); }; });
     $('#themeBtn').onclick = function () { RG.theme(dark() ? 'light' : 'dark'); };
     $('#askBtn').onclick = function () { RG.askAgent(); };
+    $('#quitBtn').onclick = function () { RG.quit(); };
     $('#askBtn').insertAdjacentHTML('afterbegin', RG.icon('spark'));
     $('#themeBtn').innerHTML = RG.icon(dark() ? 'sun' : 'moon');
     var t = RG.theme(); if (t !== 'auto') document.documentElement.setAttribute('data-theme', t);
@@ -61,7 +93,7 @@
       RG.api('/api/history').then(function (h) { S.hist = (h || []).slice(-MAX); }),
       RG.loadPolicy().catch(function () { }),
       RG.loadCands().catch(function () { }),
-      RG.loadDisk().catch(function () { })
+      RG.loadDrives().catch(function () { }).then(function () { return RG.loadDisk(); }).catch(function () { })
     ]).catch(function () { }).then(function () {
       if (S.hist.length) S.live = S.hist[S.hist.length - 1];
       RG.updateNavBadges();

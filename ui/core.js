@@ -4,7 +4,7 @@
   var RG = window.RG = {
     pages: {}, cur: 'overview',
     S: { hist: [], live: null, thr: null, settings: null, policy: null, draft: null, dirty: false, pinConfigured: false, kinds: [],
-      jobs: {}, disk: null, cands: null, autoLast: null, agent: null, cleanupLast: null, selected: {}, events: [] }
+      jobs: {}, disk: null, drives: [], roots: [], driveSel: null, cands: null, autoLast: null, agent: null, cleanupLast: null, selected: {}, events: [] }
   };
   var S = RG.S;
 
@@ -213,7 +213,7 @@
   };
   RG.onJobDone = function (n, cur) {
     var bad = cur.status === 'error';
-    if (n === 'breakdown') { RG.toast(bad ? 'Quét ổ đĩa lỗi: ' + cur.message : 'Quét ổ đĩa xong.', bad ? 'err' : 'ok'); RG.loadDisk().then(function () { if (RG.pages[RG.cur].refresh) RG.pages[RG.cur].refresh(); }); }
+    if (n === 'breakdown') { var dn = cur.drive ? 'ổ ' + cur.drive + ':' : 'ổ đĩa'; RG.toast(bad ? 'Quét ' + dn + ' lỗi: ' + cur.message : 'Quét ' + dn + ' xong.', bad ? 'err' : 'ok'); RG.loadDrives().catch(function () { }); RG.loadDisk().then(function () { if (RG.pages[RG.cur].refresh) RG.pages[RG.cur].refresh(); }); }
     if (n === 'candidates') { RG.toast(bad ? 'Quét ứng viên lỗi: ' + cur.message : 'Quét ứng viên xong: ' + cur.message, bad ? 'err' : 'ok'); RG.loadCands().then(function () { if (RG.pages[RG.cur].refresh) RG.pages[RG.cur].refresh(); }); }
     if (n === 'cleanup') {
       RG.toast(bad ? 'Dọn dẹp lỗi: ' + cur.message : 'Dọn dẹp xong: ' + cur.message, bad ? 'err' : 'ok', 8000);
@@ -234,7 +234,19 @@
   };
 
   /* ---------- Loaders ---------- */
-  RG.loadDisk = function () { return RG.api('/api/disk').then(function (j) { S.disk = j.breakdown; if (j.progress) S.jobs.breakdown = j.progress; }); };
+  RG.loadDisk = function (drive) {
+    var d = drive || S.driveSel || '';
+    return RG.api('/api/disk' + (d ? '?drive=' + encodeURIComponent(d) : '')).then(function (j) { S.disk = j.breakdown; S.driveSel = j.drive; if (j.progress) S.jobs.breakdown = j.progress; });
+  };
+  RG.loadDrives = function () { return RG.api('/api/drives').then(function (j) { S.drives = j.drives || []; S.roots = j.workspaceRoots || []; if (!S.driveSel) S.driveSel = j.primary; return j; }); };
+  /* Danh sách ổ: ưu tiên dữ liệu realtime (SSE, mỗi chu kỳ), rồi tới /api/drives (có ngưỡng, chính sách, lần quét). Gộp theo chữ cái. */
+  RG.driveList = function () {
+    var live = (S.live && S.live.drives) || [], meta = {};
+    (S.drives || []).forEach(function (d) { meta[d.drive] = d; });
+    var out = live.map(function (d) { var m = meta[d.drive] || {}; return Object.assign({}, m, d); });
+    return out.length ? out : (S.drives || []);
+  };
+  RG.driveInfo = function (L) { var l = RG.driveList().filter(function (d) { return d.drive === L; }); return l[0] || null; };
   RG.loadCands = function () { return RG.api('/api/candidates').then(function (j) { S.cands = j; if (j.progress) S.jobs.candidates = j.progress; }); };
   RG.loadAuto = function () { return RG.api('/api/auto/last').then(function (j) { S.autoLast = j.last; if (j.progress) S.jobs.auto = j.progress; }); };
   RG.loadAgent = function () { return RG.api('/api/agent/last').then(function (j) { S.agent = j.last; if (j.progress) S.jobs.agent = j.progress; }); };

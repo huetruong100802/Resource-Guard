@@ -5,9 +5,9 @@
 # Giám sát realtime (SSE) + quản lý dọn dẹp: quét ổ đĩa, chính sách giữ/dọn, tự dọn nền, nhờ agent đánh giá.
 # Mọi thao tác xoá/kill đi qua Invoke-RgApply (allowlist + revalidate); client chỉ gửi key, không gửi đường dẫn.
 [CmdletBinding()]
-param([int]$Port = 8765, [switch]$NoOpen, [switch]$NoToast, [switch]$Detach, [switch]$Stop)
+param([int]$Port = 8765, [switch]$NoOpen, [switch]$NoToast, [switch]$Detach, [switch]$Stop, [switch]$Force)
 $ErrorActionPreference = 'Stop'
-$argNoToast = [bool]$NoToast; $argPort = $Port; $argNoOpen = [bool]$NoOpen; $argDetach = [bool]$Detach; $argStop = [bool]$Stop
+$argNoToast = [bool]$NoToast; $argPort = $Port; $argNoOpen = [bool]$NoOpen; $argDetach = [bool]$Detach; $argStop = [bool]$Stop; $argForce = [bool]$Force
 . (Join-Path $PSScriptRoot 'rg-watcher.ps1')   # nạp hàm (rg-watcher tự return khi bị dot-source)
 . (Join-Path $PSScriptRoot 'rg-policy.ps1')
 . (Join-Path $PSScriptRoot 'rg-agent.ps1')
@@ -32,10 +32,29 @@ function Get-RgLiveInfo {   # trả server.json chỉ khi process đó còn số
 # ---------- Stop / Detach (chạy ở process gọi, không vào server) ----------
 if ($argStop) {
     $i = Get-RgLiveInfo
-    if (-not $i) { 'Không có server đang chạy.'; return }
-    Stop-Process -Id ([int]$i.pid) -Force
+    if (-not $i) { Remove-Item -LiteralPath $script:InfoPath -Force -ErrorAction SilentlyContinue; 'Không có server đang chạy.'; return }
+    $procId = [int]$i.pid
+    $graceful = $false
+    if (-not $argForce) {
+        # Dừng êm qua API: đóng listener, nhả mutex, huỷ job chỉ-đọc. Từ chối nếu đang dọn/xoá dở.
+        try {
+            $r = Invoke-RestMethod -Method Post -Uri ($i.url + 'api/shutdown') -Headers @{ 'X-RG-Client' = 'ui' } -ContentType 'application/json' -Body '{}' -TimeoutSec 5
+            $graceful = [bool]$r.ok
+        } catch {
+            $body = $null
+            try { $body = ConvertFrom-Json ([string]$_.ErrorDetails.Message) } catch { }
+            if ($body -and $body.busy) { "Chưa dừng: $($body.error) Chờ xong rồi chạy lại, hoặc dùng -Force để buộc dừng."; return }
+        }
+        if ($graceful) {
+            try { Wait-Process -Id $procId -Timeout 10 -ErrorAction Stop } catch { }
+        }
+    }
+    if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+        $how = if ($argForce) { 'buộc dừng' } else { 'không phản hồi nên buộc dừng' }
+    } else { $how = 'dừng êm' }
     Remove-Item -LiteralPath $script:InfoPath -Force -ErrorAction SilentlyContinue
-    "Đã dừng server (pid $($i.pid))."
+    "Đã dừng Resource Guard ($how, pid $procId)."
     return
 }
 
@@ -55,7 +74,7 @@ if ($argDetach) {
     for ($k = 0; $k -lt 40; $k++) {
         Start-Sleep -Milliseconds 250
         $i = Get-RgLiveInfo
-        if ($i) { "Resource Guard chạy ngầm: $($i.url)  (pid $($i.pid)). Dừng: rg-server.ps1 -Stop"; if (-not $argNoOpen) { Start-Process $i.url }; return }
+        if ($i) { "Resource Guard chạy ngầm: $($i.url)  (pid $($i.pid)). Dừng: nút ""Thoát Resource Guard"" trên giao diện, hoặc rg stop"; if (-not $argNoOpen) { Start-Process $i.url }; return }
     }
     throw 'Server không lên sau 10 giây; xem logs\rg-*.jsonl.'
 }
@@ -108,6 +127,19 @@ function Start-RgJob([string]$Script, [string[]]$ScriptArgs = @()) {
 function Test-RgJobRunning([string]$File) {
     $j = Get-RgJobState $File
     return [bool]($j -and $j.status -eq 'running')
+}
+
+# Job chỉ-đọc (quét ổ, quét ứng viên, agent): huỷ cả cây tiến trình khi thoát. Job ghi (dọn/khôi phục/tự dọn) không bao giờ bị huỷ ở đây.
+function Stop-RgReadOnlyJobs {
+    foreach ($f in @('scan-breakdown.progress.json', 'scan-candidates.progress.json', 'agent.progress.json')) {
+        $j = Get-RgJobState $f
+        if (-not ($j -and $j.status -eq 'running' -and $j.pid)) { continue }
+        $p = Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue
+        if (-not $p -or @('pwsh', 'powershell') -notcontains $p.ProcessName) { continue }   # chống PID bị tái sử dụng
+        & taskkill.exe /PID ([int]$j.pid) /T /F 2>&1 | Out-Null
+        $j.status = 'error'; $j.message = 'đã huỷ vì Resource Guard thoát'
+        try { Write-RgJobState $f $j } catch { }
+    }
 }
 
 function Read-RgStateText([string]$Name) {
@@ -168,7 +200,7 @@ Write-Host ''
 Write-Host "  Resource Guard đang chạy (tự dọn: $((Get-RgPolicy).mode))" -ForegroundColor Green
 Write-Host "  UI realtime : $url" -ForegroundColor Cyan
 Write-Host "  Cài đặt     : ${url}#settings    (chu kỳ lấy mẫu hiện tại: $((Get-RgSettings).intervalSec)s)"
-Write-Host "  Dừng        : Ctrl+C trong terminal này"
+Write-Host "  Dừng        : nút ""Thoát Resource Guard"" trên giao diện, hoặc Ctrl+C trong terminal này (đóng cửa sổ này cũng dừng app)"
 Write-Host ''
 if (-not $argNoOpen) { try { Start-Process $url } catch { } }
 
@@ -176,12 +208,13 @@ if (-not $argNoOpen) { try { Start-Process $url } catch { } }
 
 $sse = New-Object System.Collections.ArrayList
 $script:AutoSpawnedAt = [datetime]::MinValue
+$script:StopRequested = $false
 $live = $null
 $nextSample = [datetime]::MinValue
 $nextBeat = (Get-Date).AddSeconds(10)
 $accept = $listener.GetContextAsync()
 try {
-    while ($listener.IsListening) {
+    while ($listener.IsListening -and -not $script:StopRequested) {
         $got = $false
         try { $got = $accept.Wait(200) } catch { $accept = $listener.GetContextAsync(); Start-Sleep -Milliseconds 200 }
         if ($got) {
@@ -194,6 +227,18 @@ try {
                 elseif ($path -eq '/' -or $path -eq '/index.html') {
                     $f = Join-Path $script:UiDir 'index.html'
                     Send-Bytes $ctx 200 'text/html; charset=utf-8' ([IO.File]::ReadAllBytes($f))
+                }
+                elseif ($path -eq '/api/shutdown' -and $req.HttpMethod -eq 'POST') {
+                    $busyNames = @()
+                    if (Test-RgJobRunning 'cleanup.progress.json') { $busyNames += 'dọn dẹp/khôi phục' }
+                    if (Test-RgJobRunning 'auto.progress.json') { $busyNames += 'tự dọn' }
+                    if ($busyNames.Count) {
+                        Send-Json $ctx ([ordered]@{ ok = $false; busy = $true; error = 'Đang có lượt ' + ($busyNames -join ' và ') + ' chưa xong; thoát lúc này có thể bỏ dở thao tác xoá.' }) 409
+                    } else {
+                        Stop-RgReadOnlyJobs
+                        Send-Json $ctx ([ordered]@{ ok = $true })
+                        $script:StopRequested = $true
+                    }
                 }
                 elseif ($path -eq '/api/state') { Send-Json $ctx $live }
                 elseif ($path -eq '/api/history') { Send-Json $ctx @(Read-RgMetricsTail 480) }
@@ -228,14 +273,40 @@ try {
                             cleanup = (Get-RgJobState 'cleanup.progress.json'); auto = (Get-RgJobState 'auto.progress.json'); agent = (Get-RgJobState 'agent.progress.json')
                         })
                 }
+                elseif ($path -eq '/api/drives') {
+                    $cfg = Get-RgConfig; $pol = Get-RgPolicy
+                    $dl = @(Get-RgDrives)
+                    $rows = @($dl | ForEach-Object {
+                            $dp = Get-RgDrivePolicy $pol $_.drive
+                            $sf = Join-Path (Initialize-RgHome) ("state\scan-breakdown-{0}.json" -f $_.drive)
+                            [ordered]@{ drive = $_.drive; label = $_.label; isSystem = $_.isSystem; totalBytes = $_.totalBytes; freeBytes = $_.freeBytes; freeGB = $_.freeGB; totalGB = $_.totalGB; state = $_.state
+                                diskTrigger = $dp.diskTrigger; targetFreeGB = $dp.targetFreeGB; overridden = $dp.overridden
+                                thresholds = (Get-RgDiskThresholds $cfg $_.drive)
+                                scannedUtc = $(if (Test-Path -LiteralPath $sf) { (Get-Item -LiteralPath $sf).LastWriteTimeUtc.ToString('o') } else { $null }) }
+                        })
+                    $prim = Get-RgPrimaryDrive $dl $cfg
+                    Send-Json $ctx ([ordered]@{ drives = $rows; primary = $(if ($prim) { $prim.drive } else { $null }); workspaceRoots = @(Get-RgWorkspaceRoots $cfg.cleanup) })
+                }
                 elseif ($path -eq '/api/disk') {
-                    $b = Read-RgStateText 'scan-breakdown.json'
-                    if (-not $b) { $b = 'null' }
-                    Send-RawJson $ctx ('{"breakdown":' + $b + ',"progress":' + (ConvertTo-Json -InputObject (Get-RgJobState 'scan-breakdown.progress.json') -Compress -Depth 3) + '}')
+                    $q = [string]$req.QueryString['drive']
+                    $dl = @(Get-RgDrives)
+                    if (-not $q) { $pd = Get-RgPrimaryDrive $dl (Get-RgConfig); $q = $(if ($pd) { $pd.drive } else { 'C' }) }
+                    $q = $q.ToUpperInvariant()
+                    if ($q -notmatch '^[A-Z]$') { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Tên ổ không hợp lệ.' }) 400 }
+                    else {
+                        $b = Read-RgStateText ("scan-breakdown-{0}.json" -f $q)
+                        if (-not $b) { $b = 'null' }
+                        Send-RawJson $ctx ('{"drive":"' + $q + '","breakdown":' + $b + ',"progress":' + (ConvertTo-Json -InputObject (Get-RgJobState 'scan-breakdown.progress.json') -Compress -Depth 3) + '}')
+                    }
                 }
                 elseif ($path -eq '/api/disk/scan' -and $req.HttpMethod -eq 'POST') {
-                    if (Test-RgJobRunning 'scan-breakdown.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
-                    else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'breakdown', '-Drive', ([string](Get-RgConfig).disk.drive).TrimEnd(':', '\')); Send-Json $ctx ([ordered]@{ ok = $true }) }
+                    $b = $null; try { $b = Read-RgBody $req } catch { }
+                    $want = ''; if ($b -and $b.drive) { $want = ([string]$b.drive).Trim().TrimEnd(':').ToUpperInvariant() }
+                    $dl = @(Get-RgDrives)
+                    if (-not $want) { $pd = Get-RgPrimaryDrive $dl (Get-RgConfig); if ($pd) { $want = $pd.drive } }
+                    if ($want -notmatch '^[A-Z]$' -or -not (@($dl | Where-Object { $_.drive -eq $want }))) { Send-Json $ctx ([ordered]@{ ok = $false; error = "Ổ '$want' không có hoặc không được giám sát." }) 400 }
+                    elseif (Test-RgJobRunning 'scan-breakdown.progress.json') { $cur = Get-RgJobState 'scan-breakdown.progress.json'; Send-Json $ctx ([ordered]@{ ok = $true; already = $true; drive = [string]$cur.drive }) }
+                    else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'breakdown', '-Drive', $want); Send-Json $ctx ([ordered]@{ ok = $true; drive = $want }) }
                 }
                 elseif ($path -eq '/api/candidates' -and $req.HttpMethod -eq 'GET') {
                     $pol = Get-RgPolicy
@@ -244,13 +315,16 @@ try {
                     $items = @()
                     if ($cd) {
                         $items = @($cd.items | ForEach-Object {
-                                $prot = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $pol } else { Test-RgPathProtected ([string]$_.path) $pol }
-                                [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; level = $_.level; path = $_.path; pid = $_.pid; name = $_.name; sizeBytes = $_.sizeBytes
-                                    ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; canArchive = (Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
+                                $userProt = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $pol } else { Test-RgPathUserProtected ([string]$_.path) $pol }
+                                $ak = if ($_.kind -eq 'process' -or $userProt) { $null } else { Get-RgAgentKeepMatch ([string]$_.path) }
+                                $prot = $userProt -or $ak
+                                [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; level = $_.level; path = $_.path; drive = (Get-RgPathDrive ([string]$_.path)); pid = $_.pid; name = $_.name; sizeBytes = $_.sizeBytes
+                                    protectedBy = $(if ($userProt) { 'user' } elseif ($ak) { 'agent' } else { $null }); keepReason = $(if ($ak) { $ak.reason } else { $null }); keepUntilUtc = $(if ($ak) { $ak.expiresUtc } else { $null })
+                                    ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; young = [bool]$_.young; canArchive =(Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
                                     setting = $(if ($pol.categories.Contains([string]$_.kind)) { $pol.categories[[string]$_.kind] } else { 'keep' }) }
                             })
                     }
-                    Send-Json $ctx ([ordered]@{ finishedUtc = $(if ($cd) { $cd.finishedUtc } else { $null }); seconds = $(if ($cd) { $cd.seconds } else { $null }); items = $items; progress = (Get-RgJobState 'scan-candidates.progress.json') })
+                    Send-Json $ctx ([ordered]@{ finishedUtc = $(if ($cd) { $cd.finishedUtc } else { $null }); seconds = $(if ($cd) { $cd.seconds } else { $null }); maxAgeHours = (Get-RgScanMaxAgeHours); items = $items; progress = (Get-RgJobState 'scan-candidates.progress.json') })
                 }
                 elseif ($path -eq '/api/candidates/scan' -and $req.HttpMethod -eq 'POST') {
                     if (Test-RgJobRunning 'scan-candidates.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
@@ -352,6 +426,23 @@ try {
                     if (Test-RgJobRunning 'agent.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
                     else { Start-RgJob 'rg-agent.ps1'; Send-Json $ctx ([ordered]@{ ok = $true }) }
                 }
+                elseif ($path -eq '/api/agent/keep/release' -and $req.HttpMethod -eq 'POST') {
+                    # Bỏ giữ một mục do agent bảo vệ. Chỉ nhận key (không nhận đường dẫn từ client). Không cần PIN: chỉ đưa mục về trạng thái
+                    # trước khi agent đánh giá, không cấp thêm quyền xoá nào so với policy người dùng đã đặt.
+                    try {
+                        $b = Read-RgBody $req
+                        $t = Read-RgStateText 'scan-candidates.json'
+                        $cd = $null; if ($t) { try { $cd = ConvertFrom-Json $t } catch { } }
+                        $c = if ($cd) { @($cd.items | Where-Object { $_.key -eq [string]$b.key }) | Select-Object -First 1 } else { $null }
+                        $m = if ($c -and $c.kind -ne 'process') { Get-RgAgentKeepMatch ([string]$c.path) } else { $null }
+                        if (-not $m) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Mục này không do agent giữ (hoặc đã hết hạn).' }) 404 }
+                        else {
+                            [void](Remove-RgAgentKeep ([string]$m.target))
+                            Write-RgLog 'agent-keep-release' ([ordered]@{ key = [string]$b.key })
+                            Send-Json $ctx ([ordered]@{ ok = $true })
+                        }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
                 elseif ($path -eq '/api/agent/last') {
                     $t = Read-RgStateText 'agent-last.json'; if (-not $t) { $t = 'null' }
                     Send-RawJson $ctx ('{"last":' + $t + ',"progress":' + (ConvertTo-Json -InputObject (Get-RgJobState 'agent.progress.json') -Compress -Depth 3) + '}')
@@ -379,7 +470,7 @@ try {
                 $iv = (Get-RgSettings).intervalSec
                 $live = [pscustomobject]@{
                     ts = $rec.ts; state = $rec.state; rawState = $rec.rawState; availRamGB = $rec.availRamGB; totalRamGB = $rec.totalRamGB
-                    commitPct = $rec.commitPct; cpuPct = $rec.cpuPct; diskDrive = $rec.diskDrive; diskFreeGB = $rec.diskFreeGB
+                    commitPct = $rec.commitPct; cpuPct = $rec.cpuPct; diskDrive = $rec.diskDrive; diskFreeGB = $rec.diskFreeGB; drives = $rec.drives
                     heavy = $rec.heavy; ledgerOrphans = $rec.ledgerOrphans; top = $rec.top
                     reasons = @($script:RgLastReasons); intervalSec = $iv
                     cores = $rec.cores; topCpu = $rec.topCpu; procCount = $rec.procCount; uptimeSec = $rec.uptimeSec; cpuInfo = (Get-RgCpuInfo)
@@ -407,7 +498,7 @@ try {
     }
 }
 finally {
-    Write-RgLog 'server-stop' ([ordered]@{ pid = $PID })
+    Write-RgLog 'server-stop' ([ordered]@{ pid = $PID; reason = $(if ($script:StopRequested) { 'ui-or-cli' } else { 'ctrl-c-or-error' }) })
     foreach ($c in @($sse.ToArray())) { try { $c.Close() } catch { } }
     try { $listener.Stop(); $listener.Close() } catch { }
     Remove-Item -LiteralPath $script:InfoPath -Force -ErrorAction SilentlyContinue

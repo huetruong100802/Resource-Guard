@@ -21,6 +21,7 @@ function Get-RgDefaultPolicy {
         cooldownMin = 30
         maxGBPerRun = 10
         targetFreeGB = 25             # dừng chọn thêm khi ước tính đã đủ trống
+        drives = [ordered]@{}         # ghi đè theo ổ: { "D": { diskTrigger: off|Caution|Critical, targetFreeGB: n } }; thiếu thì dùng giá trị chung ở trên
         maxKillsPerRun = 5
         categories = [ordered]@{ 'temp-entry' = 'auto'; 'dotnet-artifact' = 'auto'; 'cache-aged' = 'ask'; 'node_modules' = 'ask'; 'process' = 'ask' }
         priority = @('temp-entry', 'dotnet-artifact', 'cache-aged', 'node_modules', 'process')
@@ -52,9 +53,23 @@ function ConvertTo-RgPolicy($In) {
     $v = [string](& $get 'diskTrigger'); if (@('off', 'Caution', 'Critical') -contains $v) { $p.diskTrigger = $v }
     $v = [string](& $get 'ramTrigger'); if (@('off', 'Restricted', 'Critical') -contains $v) { $p.ramTrigger = $v }
     $n = & $get 'cooldownMin'; if ($null -ne $n) { $p.cooldownMin = [int][math]::Min(1440, [math]::Max(1, [double]$n)) }
-    $n = & $get 'maxGBPerRun'; if ($null -ne $n) { $p.maxGBPerRun = [double][math]::Min(500, [math]::Max(0.1, [double]$n)) }
-    $n = & $get 'targetFreeGB'; if ($null -ne $n) { $p.targetFreeGB = [double][math]::Min(1000, [math]::Max(1, [double]$n)) }
+    $n = & $get 'maxGBPerRun'; if ($null -ne $n) { $p.maxGBPerRun = [double][math]::Min(500.0, [math]::Max(0.1, [double]$n)) }
+    $n = & $get 'targetFreeGB'; if ($null -ne $n) { $p.targetFreeGB = [double][math]::Min(1000.0, [math]::Max(1.0, [double]$n)) }
     $n = & $get 'maxKillsPerRun'; if ($null -ne $n) { $p.maxKillsPerRun = [int][math]::Min(50, [math]::Max(0, [double]$n)) }
+    $dv = & $get 'drives'
+    if ($dv) {
+        $prop = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { $o[$n] } else { $null } } elseif ($o -and $o.PSObject.Properties[$n]) { $o.$n } else { $null } }
+        $keys = if ($dv -is [System.Collections.IDictionary]) { @($dv.Keys) } else { @($dv.PSObject.Properties | ForEach-Object { $_.Name }) }
+        foreach ($k in $keys) {
+            $L = ([string]$k).Trim().TrimEnd(':').ToUpperInvariant()
+            if ($L -notmatch '^[A-Z]$') { continue }
+            $o = & $prop $dv $k
+            $e = [ordered]@{}
+            $t = [string](& $prop $o 'diskTrigger'); if (@('off', 'Caution', 'Critical') -contains $t) { $e['diskTrigger'] = $t }
+            $g = & $prop $o 'targetFreeGB'; if ($null -ne $g -and [string]$g -ne '') { $e['targetFreeGB'] = [double][math]::Min(10000.0, [math]::Max(1.0, [double]$g)) }
+            if ($e.Count -gt 0) { $p.drives[$L] = $e }
+        }
+    }
     $c = & $get 'categories'
     if ($c) {
         foreach ($k in $script:RgPolicyKinds) {
@@ -103,6 +118,10 @@ function Test-RgPolicyTightening($Old, $New) {
     foreach ($k in $script:RgPolicyKinds) { if ($cr[[string]$New.categories[$k]] -gt $cr[[string]$Old.categories[$k]]) { return $false } }
     $tr = @{ 'off' = 0; 'Critical' = 1; 'Restricted' = 2; 'Caution' = 3 }   # trigger càng sớm (Caution) càng mạnh tay
     if ($tr[[string]$New.diskTrigger] -gt $tr[[string]$Old.diskTrigger]) { return $false }
+    $letters = @(@($Old.drives.Keys) + @($New.drives.Keys) | Select-Object -Unique)
+    foreach ($L in $letters) {   # trigger hiệu lực của từng ổ (đã gồm giá trị chung): ổ nào bị nới thì không phải "chặt hơn"
+        if ($tr[[string](Get-RgDrivePolicy $New $L).diskTrigger] -gt $tr[[string](Get-RgDrivePolicy $Old $L).diskTrigger]) { return $false }
+    }
     if ($tr[[string]$New.ramTrigger] -gt $tr[[string]$Old.ramTrigger]) { return $false }
     if ([double]$New.maxGBPerRun -gt [double]$Old.maxGBPerRun) { return $false }
     if ([int]$New.maxKillsPerRun -gt [int]$Old.maxKillsPerRun) { return $false }
@@ -112,6 +131,21 @@ function Test-RgPolicyTightening($Old, $New) {
     return $true
 }
 
+# Chính sách hiệu lực của một ổ: ghi đè riêng của ổ đó nếu có, không thì giá trị chung.
+function Get-RgDrivePolicy($Policy, [string]$Drive) {
+    $t = [string]$Policy.diskTrigger; $g = [double]$Policy.targetFreeGB
+    $o = $null
+    if ($Policy.drives -is [System.Collections.IDictionary]) { if ($Policy.drives.Contains($Drive)) { $o = $Policy.drives[$Drive] } }
+    elseif ($Policy.drives -and $Policy.drives.PSObject.Properties[$Drive]) { $o = $Policy.drives.$Drive }
+    if ($o) {
+        $ot = if ($o -is [System.Collections.IDictionary]) { $o['diskTrigger'] } else { $o.diskTrigger }
+        $og = if ($o -is [System.Collections.IDictionary]) { $o['targetFreeGB'] } else { $o.targetFreeGB }
+        if ($ot) { $t = [string]$ot }
+        if ($null -ne $og) { $g = [double]$og }
+    }
+    return [pscustomobject]@{ diskTrigger = $t; targetFreeGB = $g; overridden = [bool]$o }
+}
+
 function Test-RgPolicyNeedsPin($Old, $New) {
     if ([string]$New.mode -ne 'on') { return $false }
     return (-not (Test-RgPolicyTightening $Old $New))
@@ -119,15 +153,84 @@ function Test-RgPolicyNeedsPin($Old, $New) {
 
 # ---------- Vùng bảo vệ ----------
 
-function Test-RgPathProtected([string]$Path, $Policy) {
+function Test-RgPathInList([string]$Path, $List) {
     $t = $Path.TrimEnd('\')
-    foreach ($pp in @($Policy.protectPaths)) {
+    foreach ($pp in @($List)) {
         $q = ([string]$pp).TrimEnd('\')
         if ($t -ieq $q) { return $true }
         if ($t.StartsWith($q + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }   # mục nằm trong vùng bảo vệ
         if ($q.StartsWith($t + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }   # xoá mục sẽ kéo theo vùng bảo vệ bên trong
     }
     return $false
+}
+# Chỉ vùng bảo vệ do NGƯỜI DÙNG đặt (policy.protectPaths); dùng để phân biệt nguồn bảo vệ với "agent giữ".
+function Test-RgPathUserProtected([string]$Path, $Policy) { return (Test-RgPathInList $Path $Policy.protectPaths) }
+# Được bảo vệ bởi người dùng HOẶC bởi agent (còn hạn). Mọi đường dọn (danh sách, tay, tự dọn) đều hỏi hàm này.
+function Test-RgPathProtected([string]$Path, $Policy) {
+    if (Test-RgPathInList $Path $Policy.protectPaths) { return $true }
+    return [bool](Get-RgAgentKeepMatch $Path)
+}
+
+# ---------- Agent giữ: bảo vệ CÓ THỜI HẠN do verdict "keep" (độ tin cậy cao) của agent đánh giá ----------
+# Chỉ làm chặt hơn (ít bị xoá hơn) nên không cần PIN; tách khỏi protectPaths của người dùng, tự hết hạn, bỏ giữ được từng mục.
+# Chỉ áp cho ĐƯỜNG DẪN (mục xoá). Tiến trình không có: bảo vệ theo tên sẽ chặn cả nhóm tiến trình cùng tên.
+$script:RgAgentKeepDays = 30
+$script:RgAgentKeepMax = 200
+$script:RgAgentKeepCache = $null
+function Get-RgAgentKeepPath { return (Join-Path (Initialize-RgHome) 'state\agent-keep.json') }
+# Toàn bộ mục trong file (kể cả đã hết hạn), cache theo mtime+size để hàm kiểm tra gọi theo từng ứng viên không đọc đĩa lại.
+function Read-RgAgentKeepRaw {
+    $f = Get-RgAgentKeepPath
+    if (-not (Test-Path -LiteralPath $f)) { $script:RgAgentKeepCache = $null; return @() }
+    $fi = Get-Item -LiteralPath $f
+    $sig = "$($fi.LastWriteTimeUtc.Ticks)/$($fi.Length)"
+    if ($script:RgAgentKeepCache -and $script:RgAgentKeepCache.sig -eq $sig) { return $script:RgAgentKeepCache.items }
+    $items = New-Object System.Collections.ArrayList
+    try {
+        foreach ($e in @((ConvertFrom-Json (Read-RgFileShared $f)).items)) {
+            $t = ([string]$e.target).TrimEnd('\')
+            if (-not $t -or -not [IO.Path]::IsPathRooted($t)) { continue }
+            try { $exp = [datetime]::Parse([string]$e.expiresUtc, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind').ToUniversalTime() } catch { continue }
+            [void]$items.Add([pscustomobject]@{ target = $t; reason = [string]$e.reason; confidence = [string]$e.confidence; createdUtc = [string]$e.createdUtc; expiresUtc = $exp.ToString('o'); exp = $exp })
+        }
+    } catch { Write-RgLog 'agent-keep-read-error' ([string]$_) }
+    $script:RgAgentKeepCache = @{ sig = $sig; items = $items.ToArray() }
+    return $script:RgAgentKeepCache.items
+}
+function Get-RgAgentKeep {
+    $now = (Get-Date).ToUniversalTime()
+    return @(Read-RgAgentKeepRaw | Where-Object { $_.exp -gt $now })
+}
+function Write-RgAgentKeep($Items) {
+    $out = @($Items | ForEach-Object { [ordered]@{ target = $_.target; reason = $_.reason; confidence = $_.confidence; createdUtc = $_.createdUtc; expiresUtc = $_.expiresUtc } })
+    Write-RgFileAtomic (Get-RgAgentKeepPath) (ConvertTo-Json -InputObject ([ordered]@{ version = 1; items = $out }) -Depth 4)
+    $script:RgAgentKeepCache = $null
+}
+# Mục agent-giữ còn hạn khớp đường dẫn (cùng quy tắc hai chiều với protectPaths), hoặc $null.
+function Get-RgAgentKeepMatch([string]$Path) {
+    foreach ($e in @(Get-RgAgentKeep)) { if (Test-RgPathInList $Path @($e.target)) { return $e } }
+    return $null
+}
+# Trả $true nếu vừa thêm. Đã giữ thì KHÔNG gia hạn (hết hạn tự được đánh giá lại); đầu vào lạ bị bỏ.
+function Add-RgAgentKeep([string]$Path, [string]$Reason, [string]$Confidence) {
+    $p = $Path.TrimEnd('\')
+    if (-not $p -or $p.Length -gt 260 -or $p -match '[\x00-\x1f]' -or -not [IO.Path]::IsPathRooted($p)) { return $false }
+    $live = @(Get-RgAgentKeep)
+    if (@($live | Where-Object { $_.target -ieq $p }).Count -gt 0 -or $live.Count -ge $script:RgAgentKeepMax) { return $false }
+    $now = (Get-Date).ToUniversalTime()
+    $r = ([string]$Reason -replace '[\x00-\x1f]', ' ').Trim(); if ($r.Length -gt 200) { $r = $r.Substring(0, 200) }
+    $live += [pscustomobject]@{ target = $p; reason = $r; confidence = $Confidence; createdUtc = $now.ToString('o'); expiresUtc = $now.AddDays($script:RgAgentKeepDays).ToString('o') }
+    Write-RgAgentKeep $live
+    return $true
+}
+# Bỏ mục agent-giữ có target đúng bằng $Target (lấy từ Get-RgAgentKeepMatch).
+function Remove-RgAgentKeep([string]$Target) {
+    $t = $Target.TrimEnd('\')
+    $live = @(Get-RgAgentKeep)
+    $rest = @($live | Where-Object { $_.target -ine $t })
+    if ($rest.Count -eq $live.Count) { return $false }
+    Write-RgAgentKeep $rest
+    return $true
 }
 
 function Test-RgProcessProtected([string]$Name, $Policy) {
@@ -212,23 +315,49 @@ function Write-RgJobState([string]$File, $Obj) {
 
 function Get-RgStressInfo($Policy, $Cfg, $Snap) {
     $rk = @{ 'Normal' = 0; 'Caution' = 1; 'Restricted' = 2; 'Critical' = 3 }
-    $ds = Get-RgDiskState $Snap.diskFreeGB $Cfg
     $rs = Get-RgRamState ([double]$Snap.availRamGB) $Cfg
-    $diskStress = ([string]$Policy.diskTrigger -ne 'off') -and ($rk[$ds] -ge $rk[[string]$Policy.diskTrigger])
     $ramStress = ([string]$Policy.ramTrigger -ne 'off') -and ($rk[$rs] -ge $rk[[string]$Policy.ramTrigger])
-    return [pscustomobject]@{ diskState = $ds; ramState = $rs; diskStress = $diskStress; ramStress = $ramStress; diskFreeGB = $Snap.diskFreeGB; availRamGB = $Snap.availRamGB }
+    # Áp lực ổ đĩa tính RIÊNG từng ổ (ngưỡng trạng thái + trigger + mục tiêu trống theo ổ). Snapshot cũ không có danh sách ổ thì coi như một ổ.
+    $list = @($Snap.drives | Where-Object { $_ })
+    if ($list.Count -eq 0 -and $null -ne $Snap.diskFreeGB) { $list = @([pscustomobject]@{ drive = [string]$Snap.diskDrive; freeGB = $Snap.diskFreeGB; totalGB = $null }) }
+    $drv = @()
+    foreach ($d in $list) {
+        $L = [string]$d.drive
+        $st = Get-RgDiskState $d.freeGB $Cfg $L
+        $dp = Get-RgDrivePolicy $Policy $L
+        $drv += [pscustomobject]@{
+            drive = $L; freeGB = $d.freeGB; totalGB = $d.totalGB; state = $st; trigger = $dp.diskTrigger; targetFreeGB = $dp.targetFreeGB
+            stress = (([string]$dp.diskTrigger -ne 'off') -and ($rk[$st] -ge $rk[[string]$dp.diskTrigger]))
+        }
+    }
+    $ds = 'Normal'; foreach ($d in $drv) { if ($rk[$d.state] -gt $rk[$ds]) { $ds = $d.state } }
+    $diskStress = [bool](@($drv | Where-Object { $_.stress }).Count -gt 0)
+    return [pscustomobject]@{ diskState = $ds; ramState = $rs; diskStress = $diskStress; ramStress = $ramStress; diskFreeGB = $Snap.diskFreeGB; availRamGB = $Snap.availRamGB; drives = @($drv) }
 }
 
 # Chọn mục theo chính sách. Trả {selected; skipped}. Không xoá gì.
 function Select-RgAutoItems($Candidates, $Policy, $Stress) {
     $sel = @(); $skip = @()
+    $byDrive = @{}; foreach ($d in @($Stress.drives | Where-Object { $_ })) { $byDrive[[string]$d.drive] = $d }
+    $legacy = ($byDrive.Count -eq 0)   # Stress dựng tay không có danh sách ổ: giữ cách tính một ổ như cũ
     $pri = @($Policy.priority)
     $eligible = @()
     foreach ($c in @($Candidates)) {
         $target = if ($c.kind -eq 'process') { "pid $($c.pid) $($c.name)" } else { [string]$c.path }
         $why = $null
+        $stressWhy = $null
+        if ($c.action -eq 'delete') {
+            if ($legacy) { if (-not $Stress.diskStress) { $stressWhy = 'ổ đĩa chưa tới ngưỡng kích hoạt' } }
+            else {
+                $dl = Get-RgPathDrive ([string]$c.path)
+                if (-not $dl) { $stressWhy = 'đường dẫn không nằm trên ổ cục bộ' }
+                elseif (-not $byDrive.ContainsKey($dl)) { $stressWhy = "ổ ${dl}: không được giám sát" }
+                elseif (-not $byDrive[$dl].stress) { $stressWhy = "ổ ${dl}: chưa tới ngưỡng kích hoạt" }
+            }
+        }
         if ($c.action -eq 'report') { $why = 'chỉ báo cáo' }
-        elseif ($c.action -eq 'delete' -and -not $Stress.diskStress) { $why = 'ổ đĩa chưa tới ngưỡng kích hoạt' }
+        elseif ([bool]$c.young) { $why = 'mục dưới ngưỡng tuổi: chỉ người duyệt mới được xoá' }
+        elseif ($stressWhy) { $why = $stressWhy }
         elseif ($c.action -eq 'kill' -and -not $Stress.ramStress) { $why = 'RAM chưa tới ngưỡng kích hoạt' }
         elseif ([string]$Policy.categories[[string]$c.kind] -ne 'auto') { $why = "nhóm '$($c.kind)' đặt ở chế độ $($Policy.categories[[string]$c.kind])" }
         elseif ($c.action -eq 'delete' -and (Test-RgPathProtected ([string]$c.path) $Policy)) { $why = 'nằm trong vùng bảo vệ' }
@@ -238,18 +367,22 @@ function Select-RgAutoItems($Candidates, $Policy, $Stress) {
     }
     $idx = { param($k) $i = [array]::IndexOf($pri, [string]$k); if ($i -lt 0) { 99 } else { $i } }
     $ordered = @($eligible | Sort-Object @{ Expression = { & $idx $_.kind } }, @{ Expression = { [long]$_.sizeBytes }; Descending = $true })
-    $cum = 0L; $kills = 0
-    $cap = [long]([double]$Policy.maxGBPerRun * 1GB)
-    $need = [long]([math]::Max(0, ([double]$Policy.targetFreeGB - [double]$Stress.diskFreeGB)) * 1GB)
+    $cumBy = @{}; $kills = 0
+    $cap = [long]([double]$Policy.maxGBPerRun * 1GB)   # giới hạn GB mỗi lượt áp dụng cho TỪNG ổ
     foreach ($c in $ordered) {
         $target = if ($c.kind -eq 'process') { "pid $($c.pid) $($c.name)" } else { [string]$c.path }
         if ($c.action -eq 'kill') {
             if ($kills -ge [int]$Policy.maxKillsPerRun) { $skip += [pscustomobject]@{ target = $target; kind = $c.kind; reason = 'vượt số tiến trình tối đa mỗi lượt' }; continue }
             $kills++; $sel += $c; continue
         }
-        if ($cum -ge $need) { $skip += [pscustomobject]@{ target = $target; kind = $c.kind; reason = 'đã đủ dung lượng mục tiêu' }; continue }
-        if (($cum + [long]$c.sizeBytes) -gt $cap) { $skip += [pscustomobject]@{ target = $target; kind = $c.kind; reason = 'vượt giới hạn GB mỗi lượt' }; continue }
-        $cum += [long]$c.sizeBytes; $sel += $c
+        $dk = if ($legacy) { '*' } else { [string](Get-RgPathDrive ([string]$c.path)) }
+        if (-not $cumBy.ContainsKey($dk)) { $cumBy[$dk] = 0L }
+        $tgt = if ($legacy) { [double]$Policy.targetFreeGB - [double]$Stress.diskFreeGB } else { [double]$byDrive[$dk].targetFreeGB - [double]$byDrive[$dk].freeGB }
+        $need = [long]([math]::Max(0, $tgt) * 1GB)
+        $lbl = if ($legacy) { '' } else { " (ổ $dk`:)" }
+        if ($cumBy[$dk] -ge $need) { $skip += [pscustomobject]@{ target = $target; kind = $c.kind; reason = "đã đủ dung lượng mục tiêu$lbl" }; continue }
+        if (($cumBy[$dk] + [long]$c.sizeBytes) -gt $cap) { $skip += [pscustomobject]@{ target = $target; kind = $c.kind; reason = "vượt giới hạn GB mỗi lượt$lbl" }; continue }
+        $cumBy[$dk] = [long]$cumBy[$dk] + [long]$c.sizeBytes; $sel += $c
     }
     return [pscustomobject]@{ selected = @($sel); skipped = @($skip) }
 }
@@ -280,7 +413,8 @@ function Invoke-RgAutoRun {
     $snap = Get-RgSnapshot -SkipCpu
     $stress = Get-RgStressInfo $Policy $cfg $snap
     if ($AssumeStress) {   # chạy thử: coi như có áp lực để thấy engine SẼ chọn gì
-        if ([string]$Policy.diskTrigger -ne 'off') { $stress.diskStress = $true }
+        foreach ($d in @($stress.drives)) { if ([string]$d.trigger -ne 'off') { $d.stress = $true; $stress.diskStress = $true } }
+        if (@($stress.drives).Count -eq 0 -and [string]$Policy.diskTrigger -ne 'off') { $stress.diskStress = $true }
         if ([string]$Policy.ramTrigger -ne 'off') { $stress.ramStress = $true }
     }
     $started = (Get-Date).ToUniversalTime().ToString('o')
@@ -304,7 +438,8 @@ function Invoke-RgAutoRun {
     $rec = [ordered]@{
         startedUtc = $started; finishedUtc = (Get-Date).ToUniversalTime().ToString('o'); trigger = $Trigger
         mode = $(if ($Real) { 'on' } else { 'dry-run' }); planId = $planId
-        stress = [ordered]@{ diskState = $stress.diskState; ramState = $stress.ramState; diskFreeGB = $stress.diskFreeGB; availRamGB = $stress.availRamGB }
+        stress = [ordered]@{ diskState = $stress.diskState; ramState = $stress.ramState; diskFreeGB = $stress.diskFreeGB; availRamGB = $stress.availRamGB
+            drives = @($stress.drives | ForEach-Object { [ordered]@{ drive = $_.drive; freeGB = $_.freeGB; state = $_.state; trigger = $_.trigger; targetFreeGB = $_.targetFreeGB; stress = $_.stress } }) }
         freedBytes = $freed; items = $rows; skipped = @($pick.skipped | Select-Object -First 60); candidateCount = @($Candidates).Count
     }
     Write-RgFileAtomic (Get-RgAutoLastPath) (ConvertTo-Json -InputObject $rec -Depth 6 -Compress)

@@ -73,9 +73,12 @@ function Get-RgSnapshot {
     $commitPct = 0
     if ($totalVirt -gt 0) { $commitPct = [math]::Round((1 - $freeVirt / $totalVirt) * 100, 1) }
 
+    $drives = @(Get-RgDrives)
     $drive = ([string]$cfg.disk.drive).TrimEnd(':', '\')
     $diskFree = $null
-    try { $diskFree = [math]::Round((New-Object IO.DriveInfo($drive)).AvailableFreeSpace / 1GB, 2) } catch { }
+    $primary = Get-RgPrimaryDrive $drives $cfg
+    if ($primary) { $drive = $primary.drive; $diskFree = $primary.freeGB }
+    else { try { $diskFree = [math]::Round((New-Object IO.DriveInfo($drive)).AvailableFreeSpace / 1GB, 2) } catch { } }
 
     $pageFiles = @()
     try {
@@ -97,6 +100,7 @@ function Get-RgSnapshot {
         cpuPct        = $cpu
         diskDrive     = $drive
         diskFreeGB    = $diskFree
+        drives        = $drives
         pageFiles     = $pageFiles
     }
 }
@@ -111,6 +115,19 @@ function ConvertTo-RgStamp($DateTime) {
 }
 
 function Get-RgNowStamp { return (ConvertTo-RgStamp (Get-Date)) }
+
+# Dọn tay: từ chối nếu lượt quét ứng viên cũ hơn ngưỡng này (TECHNOTE §5). UI đọc ngưỡng qua /api/candidates.
+function Get-RgScanMaxAgeHours { return 12 }
+# Tuổi (giờ) của lượt quét; $null nếu không đọc được thời điểm.
+function Get-RgScanAgeHours([string]$FinishedUtc) {
+    if (-not $FinishedUtc) { return $null }
+    try { return ((Get-Date).ToUniversalTime() - [datetime]::Parse($FinishedUtc, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind').ToUniversalTime()).TotalHours } catch { return $null }
+}
+# Fail-closed: không đọc được thời điểm thì coi là cũ.
+function Test-RgScanStale([string]$FinishedUtc) {
+    $a = Get-RgScanAgeHours $FinishedUtc
+    return ($null -eq $a -or $a -gt (Get-RgScanMaxAgeHours))
+}
 
 function Get-RgGroup([string]$Name, [string]$Cmd, $Cfg) {
     if ($Cmd -and $Cfg.agentCmdRegex -and (@('node', 'bun', 'python') -contains $Name) -and ($Cmd -match $Cfg.agentCmdRegex)) {
@@ -189,7 +206,7 @@ function Read-RgLedger {
     $p = Get-RgLedgerPath
     if (Test-Path -LiteralPath $p) {
         $raw = Get-Content -LiteralPath $p -Raw -Encoding UTF8
-        if ($raw -and $raw.Trim()) { return @(ConvertFrom-Json $raw) }
+        if ($raw -and $raw.Trim()) { return @(ConvertFrom-Json $raw | ForEach-Object { $_ }) }   # ForEach-Object: PS 5.1 không tự bung mảng JSON
     }
     return @()
 }
@@ -250,11 +267,87 @@ function Get-RgRamState([double]$AvailGB, $Cfg) {
     return 'Critical'
 }
 
-function Get-RgDiskState($FreeGB, $Cfg) {
+# Ngưỡng ổ đĩa theo từng ổ: cfg.disk.drives.<X>.{normalAboveGB,cautionFromGB} ghi đè ngưỡng chung cfg.disk.*.
+function Get-RgDiskThresholds($Cfg, [string]$Drive = '') {
+    $n = [double]$Cfg.disk.normalAboveGB; $c = [double]$Cfg.disk.cautionFromGB
+    if ($Drive -and $Cfg.disk.drives) {
+        $o = $Cfg.disk.drives.PSObject.Properties[$Drive.ToUpperInvariant()]
+        if ($o -and $o.Value) {
+            if ($null -ne $o.Value.normalAboveGB) { $n = [double]$o.Value.normalAboveGB }
+            if ($null -ne $o.Value.cautionFromGB) { $c = [double]$o.Value.cautionFromGB }
+        }
+    }
+    return [pscustomobject]@{ normalAboveGB = $n; cautionFromGB = $c }
+}
+
+function Get-RgDiskState($FreeGB, $Cfg, [string]$Drive = '') {
     if ($null -eq $FreeGB) { return 'Normal' }
-    if ([double]$FreeGB -gt [double]$Cfg.disk.normalAboveGB) { return 'Normal' }
-    if ([double]$FreeGB -ge [double]$Cfg.disk.cautionFromGB) { return 'Caution' }
+    $t = Get-RgDiskThresholds $Cfg $Drive
+    if ([double]$FreeGB -gt $t.normalAboveGB) { return 'Normal' }
+    if ([double]$FreeGB -ge $t.cautionFromGB) { return 'Caution' }
     return 'Critical'
+}
+
+# Chữ cái ổ của một đường dẫn ('D:\x' -> 'D'); $null nếu không phải đường dẫn có ổ (UNC...).
+function Get-RgPathDrive([string]$Path) {
+    if ($Path -match '^([A-Za-z]):[\\/]') { return $Matches[1].ToUpperInvariant() }
+    return $null
+}
+
+# Các ổ cố định đang sẵn sàng (bỏ ổ gỡ được, ổ mạng, ổ chưa sẵn sàng, và ổ trong cfg.disk.exclude).
+function Get-RgDrives {
+    $cfg = Get-RgConfig
+    $ex = @($cfg.disk.exclude | ForEach-Object { ([string]$_).TrimEnd(':', '\').ToUpperInvariant() })
+    $sys = ([string]$env:SystemDrive).TrimEnd(':', '\').ToUpperInvariant()
+    $out = @()
+    foreach ($d in [IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($d.DriveType -ne [IO.DriveType]::Fixed -or -not $d.IsReady) { continue }
+            $letter = $d.Name.Substring(0, 1).ToUpperInvariant()
+            if ($ex -contains $letter) { continue }
+            $label = ''; try { $label = [string]$d.VolumeLabel } catch { }
+            $free = [math]::Round($d.AvailableFreeSpace / 1GB, 2)
+            $out += [pscustomobject]@{
+                drive = $letter; label = $label; isSystem = ($letter -eq $sys)
+                totalBytes = [long]$d.TotalSize; freeBytes = [long]$d.AvailableFreeSpace
+                totalGB = [math]::Round($d.TotalSize / 1GB, 1); freeGB = $free
+                state = (Get-RgDiskState $free $cfg $letter)
+            }
+        } catch { }
+    }
+    return @($out | Sort-Object drive)
+}
+
+# Thư mục gốc workspace được phép quét/dọn: cleanup.workspaceRoots + (nếu cleanup.autoRoots != false) các thư mục tên quen thuộc
+# (Work, Repositories, Source, Projects...) ngay dưới gốc của MỌI ổ cố định khác ổ hệ thống. Dùng chung cho quét và cho blocker xoá
+# để hai bên luôn khớp. Kết quả cache 30s vì blocker gọi theo từng mục.
+function Get-RgWorkspaceRoots($Cleanup) {
+    if ($script:RgRootsCache -and ((Get-Date) - $script:RgRootsCacheAt).TotalSeconds -lt 30 -and $script:RgRootsCacheKey -eq ($Cleanup | ConvertTo-Json -Compress -Depth 4)) { return $script:RgRootsCache }
+    $roots = New-Object System.Collections.ArrayList
+    $add = { param($p) $dup = $false; foreach ($e in $roots) { if ($e -ieq $p) { $dup = $true; break } }; if (-not $dup) { [void]$roots.Add($p) } }
+    foreach ($w in @($Cleanup.workspaceRoots)) { if ($w) { & $add (Expand-RgPath ([string]$w)) } }
+    $auto = $true
+    if ($Cleanup.PSObject.Properties['autoRoots'] -and $null -ne $Cleanup.autoRoots) { $auto = [bool]$Cleanup.autoRoots }
+    if ($auto) {
+        $names = @('Work', 'Repositories', 'Repos', 'Source', 'Src', 'Projects', 'Dev', 'Code', 'Workspace')
+        if ($Cleanup.PSObject.Properties['autoRootNames'] -and $Cleanup.autoRootNames) { $names = @($Cleanup.autoRootNames | ForEach-Object { [string]$_ } | Where-Object { $_ -and $_ -notmatch '[\\/:*?"<>|]' }) }
+        foreach ($d in (Get-RgDrives)) {
+            if ($d.isSystem) { continue }
+            foreach ($n in $names) { $p = "$($d.drive):\$n"; if (Test-Path -LiteralPath $p -PathType Container) { & $add $p } }
+        }
+    }
+    $script:RgRootsCache = $roots.ToArray(); $script:RgRootsCacheAt = Get-Date
+    $script:RgRootsCacheKey = ($Cleanup | ConvertTo-Json -Compress -Depth 4)
+    return $script:RgRootsCache
+}
+
+# Ổ "chính" cho các chỗ còn dùng một số duy nhất (diskDrive/diskFreeGB): cfg.disk.drive nếu có, không thì ổ hệ thống, không thì ổ đầu.
+function Get-RgPrimaryDrive($Drives, $Cfg) {
+    $want = ([string]$Cfg.disk.drive).TrimEnd(':', '\').ToUpperInvariant()
+    $p = @($Drives | Where-Object { $_.drive -eq $want }) | Select-Object -First 1
+    if (-not $p) { $p = @($Drives | Where-Object { $_.isSystem }) | Select-Object -First 1 }
+    if (-not $p) { $p = @($Drives) | Select-Object -First 1 }
+    return $p
 }
 
 function Get-RgCommitState([double]$Pct, $Cfg) {
@@ -278,9 +371,13 @@ function Get-RgBudget {
     $reasons = New-Object System.Collections.ArrayList
 
     $ramState = Get-RgRamState $Snapshot.availRamGB $cfg
-    $diskState = Get-RgDiskState $Snapshot.diskFreeGB $cfg
+    # Trạng thái ổ đĩa = xấu nhất trong các ổ được giám sát (snapshot không có danh sách ổ thì dùng ổ chính như cũ).
+    $driveStates = @()
+    foreach ($d in @($Snapshot.drives)) { if ($d) { $driveStates += [pscustomobject]@{ drive = $d.drive; freeGB = $d.freeGB; state = (Get-RgDiskState $d.freeGB $cfg ([string]$d.drive)) } } }
+    if ($driveStates.Count -eq 0) { $driveStates = @([pscustomobject]@{ drive = $Snapshot.diskDrive; freeGB = $Snapshot.diskFreeGB; state = (Get-RgDiskState $Snapshot.diskFreeGB $cfg ([string]$Snapshot.diskDrive)) }) }
+    $diskState = Get-RgWorstState @($driveStates | ForEach-Object { $_.state })
     $commitState = Get-RgCommitState $Snapshot.commitPct $cfg
-    if ($null -eq $Snapshot.diskFreeGB) { [void]$reasons.Add('disk free space unknown') }
+    if ($null -eq $Snapshot.diskFreeGB -and $driveStates.Count -le 1) { [void]$reasons.Add('disk free space unknown') }
 
     $est = 0.0
     if ($cfg.estimateGB.PSObject.Properties[$Task]) { $est = [double]$cfg.estimateGB.$Task }
@@ -288,7 +385,7 @@ function Get-RgBudget {
     $state = Get-RgWorstState @($ramState, $diskState, $commitState, $projState)
 
     if ($ramState -ne 'Normal') { [void]$reasons.Add("available RAM $($Snapshot.availRamGB)GB -> $ramState") }
-    if ($diskState -ne 'Normal') { [void]$reasons.Add("disk $($Snapshot.diskDrive): free $($Snapshot.diskFreeGB)GB -> $diskState") }
+    foreach ($ds in $driveStates) { if ($ds.state -ne 'Normal') { [void]$reasons.Add("disk $($ds.drive): free $($ds.freeGB)GB -> $($ds.state)") } }
     if ($commitState -ne 'Normal') { [void]$reasons.Add("commit charge $($Snapshot.commitPct)% -> $commitState") }
     if ($est -gt 0 -and $projState -ne $ramState) { [void]$reasons.Add("projected RAM after '$Task' (~${est}GB) -> $projState") }
 
@@ -520,40 +617,56 @@ function Get-RgElevatedDeleteBlocker([string]$Path, $Cfg, [string]$TempRoot) {
 function New-RgItem {
     param([string]$Kind, [string]$Action, [int]$Level, [string]$Path = '', [int]$ProcId = 0, [string]$Start = '',
         [string]$Name = '', [long]$SizeBytes = 0, [string]$NewestUtc = '', [string]$Reason = '', [string]$Risk = '', [int]$AgeDays = 0,
-        [bool]$NeedsAdmin = $false, [bool]$Archive = $false)
+        [bool]$NeedsAdmin = $false, [bool]$Archive = $false, [bool]$Young = $false)
     return [ordered]@{
         id = 0; kind = $Kind; action = $Action; level = $Level; path = $Path; pid = $ProcId; start = $Start
         name = $Name; sizeBytes = $SizeBytes; ageDays = $AgeDays; newestWriteUtc = $NewestUtc; reason = $Reason; risk = $Risk
-        needsAdmin = $NeedsAdmin; archive = $Archive
+        needsAdmin = $NeedsAdmin; archive = $Archive; young = $Young
     }
+}
+
+# Mục "young" = dưới ngưỡng tuổi của policy nhưng vẫn được đưa vào danh sách để agent/người dùng cân nhắc.
+# Tuổi chỉ là một tín hiệu; mục young KHÔNG BAO GIỜ được tự dọn, chỉ xoá khi người duyệt.
+# cleanup.youngMinMB: dung lượng tối thiểu để đưa mục young vào danh sách (mặc định 50; số âm = tắt hẳn).
+function Get-RgYoungMinBytes($Cfg) {
+    $mb = 50
+    if ($Cfg.cleanup.PSObject.Properties['youngMinMB'] -and $null -ne $Cfg.cleanup.youngMinMB) { $mb = [double]$Cfg.cleanup.youngMinMB }
+    if ($mb -lt 0) { return -1L }
+    return [long]($mb * 1MB)
 }
 
 function Get-RgCandidates {
     $cfg = Get-RgConfig
     $now = (Get-Date).ToUniversalTime()
     $items = @()
+    $youngMin = Get-RgYoungMinBytes $cfg   # mục dưới ngưỡng tuổi: vẫn đưa vào (gắn young) nếu đủ lớn, để agent/người dùng quyết
 
-    # 1) Artifact trong workspace: bin/obj, node_modules (đủ tuổi mới đề xuất)
-    $roots = @($cfg.cleanup.workspaceRoots | ForEach-Object { Expand-RgPath $_ })
+    # 1) Artifact trong workspace: bin/obj, node_modules (mục chưa đủ tuổi gắn young)
+    $roots = @(Get-RgWorkspaceRoots $cfg.cleanup)
     foreach ($a in (Find-RgWorkspaceArtifacts $roots ([int]$cfg.cleanup.maxDepth))) {
         $st = Get-RgDirStats $a.Path
         $dirTime = (Get-Item -LiteralPath $a.Path -Force).LastWriteTimeUtc
         $newest = $st.newestUtc; if ($dirTime -gt $newest) { $newest = $dirTime }
         $ageDays = [math]::Floor(($now - $newest).TotalDays)
         $min = [int]$cfg.cleanup.minAgeDays.($a.Kind)
-        if ($ageDays -lt $min) { continue }
+        $young = $ageDays -lt $min
+        if ($young -and ($youngMin -lt 0 -or $st.bytes -lt $youngMin)) { continue }
+        $ageArg = if ($young) { [int]$ageDays } else { 0 }
+        $yNote = if ($young) { "; modified only $ageDays days ago (below the $min-day floor): agent/user must judge, never auto-cleaned" } else { '' }
         if ($a.Kind -eq 'dotnet-artifact') {
-            $items += New-RgItem -Kind $a.Kind -Action 'delete' -Level 1 -Path $a.Path -SizeBytes $st.bytes -NewestUtc (ConvertTo-RgStamp $newest) `
-                -Reason "build output untouched for $ageDays days (regenerated by next build)" -Risk 'low'
+            $items += New-RgItem -Kind $a.Kind -Action 'delete' -Level 1 -Path $a.Path -SizeBytes $st.bytes -NewestUtc (ConvertTo-RgStamp $newest) -AgeDays $ageArg -Young $young `
+                -Reason $(if ($young) { "build output (regenerated by next build)$yNote" } else { "build output untouched for $ageDays days (regenerated by next build)" }) `
+                -Risk $(if ($young) { 'medium: recently built, may be in use by a running build/debug session' } else { 'low' })
         } else {
-            $items += New-RgItem -Kind $a.Kind -Action 'delete' -Level 2 -Path $a.Path -SizeBytes $st.bytes -NewestUtc (ConvertTo-RgStamp $newest) `
-                -Reason "node_modules untouched for $ageDays days (restore with package manager)" -Risk 'medium: needs reinstall + network'
+            $items += New-RgItem -Kind $a.Kind -Action 'delete' -Level 2 -Path $a.Path -SizeBytes $st.bytes -NewestUtc (ConvertTo-RgStamp $newest) -AgeDays $ageArg -Young $young `
+                -Reason $(if ($young) { "node_modules (restore with package manager)$yNote" } else { "node_modules untouched for $ageDays days (restore with package manager)" }) `
+                -Risk $(if ($young) { 'high: project is likely in active use; needs reinstall + network' } else { 'medium: needs reinstall + network' })
         }
     }
 
     # 2) Temp entries cũ (top N theo dung lượng)
     $tempRoot = Get-RgTempRoot $cfg
-    $temp = @()
+    $temp = @(); $tempYoung = @()
     if (Test-Path -LiteralPath $tempRoot) {
         foreach ($e in (Get-ChildItem -LiteralPath $tempRoot -Force -ErrorAction SilentlyContinue)) {
             if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
@@ -566,7 +679,14 @@ function Get-RgCandidates {
                 if ($e.LastWriteTimeUtc -gt $newest) { $newest = $e.LastWriteTimeUtc }
             } else { $size = $e.Length; $newest = $e.LastWriteTimeUtc }
             $ageDays = [math]::Floor(($now - $newest).TotalDays)
-            if ($ageDays -lt [int]$cfg.cleanup.minAgeDays.'temp-entry') { continue }
+            if ($ageDays -lt [int]$cfg.cleanup.minAgeDays.'temp-entry') {
+                # chưa đủ tuổi: chỉ đưa vào khi đủ lớn và xoá được bằng quyền hiện tại (mục của tài khoản khác bỏ qua)
+                if ($youngMin -ge 0 -and $size -ge $youngMin -and (Test-RgOwnedByCurrentUser $e.FullName)) {
+                    $tempYoung += New-RgItem -Kind 'temp-entry' -Action 'delete' -Level 2 -Path $e.FullName -SizeBytes $size -NewestUtc (ConvertTo-RgStamp $newest) -AgeDays ([int]$ageDays) -Young $true `
+                        -Reason "temp entry modified only $ageDays days ago (below the $([int]$cfg.cleanup.minAgeDays.'temp-entry')-day floor): agent/user must judge, never auto-cleaned" -Risk 'medium: may belong to a running process'
+                }
+                continue
+            }
             if (-not (Test-RgOwnedByCurrentUser $e.FullName)) {
                 # không nằm trong tempTop: mục không xoá được không được chiếm chỗ của mục xoá được
                 # chỉ gắn needsAdmin khi tiến trình elevated cũng sẽ chấp nhận mục này (cùng bộ kiểm tra độc lập)
@@ -582,6 +702,7 @@ function Get-RgCandidates {
         }
     }
     $items += @($temp | Sort-Object { $_.sizeBytes } -Descending | Select-Object -First ([int]$cfg.cleanup.tempTop))
+    $items += @($tempYoung | Sort-Object { $_.sizeBytes } -Descending | Select-Object -First 15)
 
     # 3) Cache dùng chung: chỉ file không hoạt động >= N ngày (cần duyệt)
     $cacheDays = [int]$cfg.cleanup.cacheMinInactiveDays
@@ -590,9 +711,19 @@ function Get-RgCandidates {
         if (-not (Test-Path -LiteralPath $p -PathType Container)) { continue }
         if (Test-RgReparse $p) { continue }
         $ag = Invoke-RgAgedFiles -Path $p -Days $cacheDays
-        if ($ag.bytes -lt ([long]$cfg.cleanup.minCacheMB * 1MB)) { continue }
-        $items += New-RgItem -Kind 'cache-aged' -Action 'delete' -Level 2 -Path $p -SizeBytes $ag.bytes -AgeDays $cacheDays `
-            -Reason "$($prop.Name): $($ag.count) files not written or accessed for >= $cacheDays days; re-downloaded on demand" -Risk 'medium: slow next restore, needs network'
+        if ($ag.bytes -ge ([long]$cfg.cleanup.minCacheMB * 1MB)) {
+            $items += New-RgItem -Kind 'cache-aged' -Action 'delete' -Level 2 -Path $p -SizeBytes $ag.bytes -AgeDays $cacheDays `
+                -Reason "$($prop.Name): $($ag.count) files not written or accessed for >= $cacheDays days; re-downloaded on demand" -Risk 'medium: slow next restore, needs network'
+        }
+        # Cả phần file mới dùng gần đây: tuổi thấp chưa chắc cần giữ (cache tải lại được). Mục young, ageDays=0 => xoá toàn bộ nội dung cache.
+        if ($youngMin -ge 0) {
+            $tot = Get-RgDirStats $p
+            if (($tot.bytes - $ag.bytes) -ge $youngMin) {
+                $items += New-RgItem -Kind 'cache-aged' -Action 'delete' -Level 2 -Path $p -SizeBytes $tot.bytes -AgeDays 0 -NewestUtc (ConvertTo-RgStamp $tot.newestUtc) -Young $true `
+                    -Reason "$($prop.Name): WHOLE cache incl. files used within $cacheDays days ($([math]::Round(($tot.bytes - $ag.bytes) / 1MB)) MB of it recent); re-downloaded on demand. Overlaps the aged-only item; agent/user must judge, never auto-cleaned" `
+                    -Risk 'medium-high: may be in use by a running build/restore; slow next restore, needs network'
+            }
+        }
     }
 
     # 4) VHDX của WSL/Docker: chỉ báo cáo, không bao giờ xoá
@@ -632,7 +763,9 @@ function Get-RgCandidates {
 
 function Get-RgItemsHash($Items) {
     $lines = @(foreach ($i in @($Items)) {
-            '{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}|{9}' -f $i.id, $i.kind, $i.action, $i.path, $i.pid, $i.start, $i.name, $i.sizeBytes, $i.ageDays, [bool]$i.archive
+            $l = '{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}|{9}' -f $i.id, $i.kind, $i.action, $i.path, $i.pid, $i.start, $i.name, $i.sizeBytes, $i.ageDays, [bool]$i.archive
+            if ([bool]$i.young) { $l += '|young' }   # chỉ thêm khi true: plan cũ (không có cờ) giữ nguyên hash
+            $l
         })
     return (Get-RgSha256 ($lines -join "`n"))
 }
@@ -732,7 +865,9 @@ function Get-RgDeleteBlocker($Item, $Cfg) {
     $isDir = Test-Path -LiteralPath $full -PathType Container
     $leaf = $segs[$segs.Count - 1]
     $parent = Split-Path $full -Parent
-    $roots = @($Cfg.cleanup.workspaceRoots | ForEach-Object { Expand-RgPath $_ })
+    $roots = @(Get-RgWorkspaceRoots $Cfg.cleanup)
+    # young = dưới sàn tuổi nhưng đã được đưa vào danh sách để người duyệt cân nhắc: chỉ bỏ sàn TUỔI cho 4 kind sinh lại được; mọi kiểm tra khác giữ nguyên.
+    $young = [bool]$Item.young -and (@('dotnet-artifact', 'node_modules', 'temp-entry', 'cache-aged') -contains [string]$Item.kind)
 
     switch ([string]$Item.kind) {
         'dotnet-artifact' {
@@ -753,7 +888,7 @@ function Get-RgDeleteBlocker($Item, $Cfg) {
         'cache-aged' {
             $known = @($Cfg.cleanup.cacheDirs.PSObject.Properties | ForEach-Object { (Expand-RgPath ([string]$_.Value)).TrimEnd('\') })
             if (-not $isDir -or -not ($known -contains $full)) { return 'not a configured cache directory' }
-            if ([int]$Item.ageDays -lt [int]$Cfg.cleanup.cacheMinInactiveDays) { return 'inactivity threshold is below the policy floor' }
+            if (-not $young -and [int]$Item.ageDays -lt [int]$Cfg.cleanup.cacheMinInactiveDays) { return 'inactivity threshold is below the policy floor' }
         }
         'stale-repo' {
             if (-not $isDir -or -not (Test-Path -LiteralPath (Join-Path $full '.git') -PathType Container)) { return 'not a git repo root' }
@@ -784,7 +919,7 @@ function Get-RgDeleteBlocker($Item, $Cfg) {
         default { return "kind '$($Item.kind)' is not deletable" }
     }
 
-    if ($Cfg.cleanup.minAgeDays.PSObject.Properties[[string]$Item.kind]) {
+    if (-not $young -and $Cfg.cleanup.minAgeDays.PSObject.Properties[[string]$Item.kind]) {
         $min = [int]$Cfg.cleanup.minAgeDays.([string]$Item.kind)
         if ($isDir) {
             $st = Get-RgDirStats $full
@@ -830,7 +965,11 @@ function Invoke-RgApply {
         $item = @($plan.items | Where-Object { $_.id -eq $id }) | Select-Object -First 1
         $r = [ordered]@{ id = $id; kind = $item.kind; action = $item.action; target = $(if ($item.action -eq 'kill') { "pid $($item.pid) $($item.name)" } else { $item.path }); outcome = ''; detail = '' }
         $blocker = $null
-        if ($item.action -eq 'delete') { $blocker = Get-RgDeleteBlocker $item $cfg }
+        if ($item.action -eq 'delete') {
+            $blocker = Get-RgDeleteBlocker $item $cfg
+            # lớp chặn thứ hai: mục dưới sàn tuổi không bao giờ chạy theo plan do policy tự duyệt
+            if (-not $blocker -and [bool]$item.young -and [string]$plan.approval.approvedBy -eq 'policy') { $blocker = 'below-age-floor item needs human approval (auto-clean refused)' }
+        }
         elseif ($item.action -eq 'kill') { $blocker = Get-RgKillBlocker $item $cfg }
         else { $blocker = 'report-only item' }
 

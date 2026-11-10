@@ -25,15 +25,15 @@
   var overview = RG.pages.overview = {
     title: 'Tổng quan',
     render: function (el) {
-      el.innerHTML = '<div id="ovBanner"></div><div class="grid g4" id="ovStats"></div>' +
+      el.innerHTML = '<div id="ovBanner"></div><div class="grid g4" id="ovStats" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr))"></div>' +
         '<div class="grid g2 mt">' +
         '<div class="card"><h2>RAM trống (GB)<span class="ro" id="roRam"></span></h2><svg id="cRam" class="chart" role="img" aria-label="Biểu đồ RAM trống"></svg></div>' +
-        '<div class="card"><h2>Ổ đĩa trống (GB)<span class="ro" id="roDisk"></span></h2><svg id="cDisk" class="chart" role="img" aria-label="Biểu đồ dung lượng ổ đĩa trống"></svg></div>' +
+        '<div id="ovDiskCharts" style="display:contents"></div>' +
         '<div class="card"><h2>Commit (%)<span class="ro" id="roCommit"></span></h2><svg id="cCommit" class="chart" role="img" aria-label="Biểu đồ commit"></svg></div>' +
         '<div class="card"><h2>CPU (%)<span class="ro" id="roCpu"></span></h2><svg id="cCpu" class="chart" role="img" aria-label="Biểu đồ CPU"></svg></div></div>' +
         '<div class="grid g2 mt"><div class="card"><h2>Tự dọn nền</h2><div id="ovAuto"></div></div>' +
         '<div class="card"><h2>Sự kiện gần đây</h2><div id="ovEvents" class="small"></div></div></div>';
-      overview.live(); overview.refresh();
+      overview._sig = null; overview.live(); overview.refresh();
     },
     refresh: function () {
       RG.api('/api/events').then(function (ev) {
@@ -45,14 +45,28 @@
     live: function () {
       var r = S.live; if (!r || !$('#ovStats')) return;
       var ramUsed = r.totalRamGB ? (1 - r.availRamGB / r.totalRamGB) * 100 : 0;
-      var dk = RG.diskState(r.diskFreeGB), rs = RG.ramState(r.availRamGB), cs = RG.commitState(r.commitPct);
+      var rs = RG.ramState(r.availRamGB), cs = RG.commitState(r.commitPct);
+      // Mỗi ổ một thẻ + một biểu đồ. Dữ liệu cũ (chưa có drives) quy về ổ chính.
+      var dl = RG.driveList();
+      if (!dl.length && r.diskDrive) dl = [{ drive: String(r.diskDrive).replace(/[:\\]/g, ''), freeGB: r.diskFreeGB, totalGB: null, state: RG.diskState(r.diskFreeGB) }];
+      var diskStats = dl.map(function (d) {
+        var used = d.totalGB ? (1 - d.freeGB / d.totalGB) * 100 : 0;
+        var sub = d.totalGB ? 'đã dùng ' + Math.round(used) + '% · tổng ' + d.totalGB + ' GB' : 'chưa rõ tổng dung lượng';
+        return stat('Ổ ' + esc(d.drive) + ': trống' + (d.label ? ' <small>' + esc(d.label) + '</small>' : ''), d.freeGB + ' <small>GB</small>', sub, d.state || RG.diskState(d.freeGB), used);
+      }).join('');
       var cpuSt = r.cpuPct >= 90 ? 'Critical' : (r.cpuPct >= 75 ? 'Caution' : 'Normal');
       $('#ovStats').innerHTML =
         stat('RAM trống', r.availRamGB + ' <small>/ ' + r.totalRamGB + ' GB</small>', 'đã dùng ' + Math.round(ramUsed) + '%', rs, ramUsed) +
         stat('CPU', (r.cpuPct == null ? '–' : r.cpuPct + '<small>%</small>'), r.procCount ? r.procCount + ' tiến trình · tác vụ nặng: ' + r.heavy : '&nbsp;', cpuSt, r.cpuPct) +
         stat('Commit', r.commitPct + '<small>%</small>', 'bộ nhớ ảo đã cấp phát', cs, r.commitPct) +
-        stat('Ổ ' + esc(r.diskDrive) + ': trống', r.diskFreeGB + ' <small>GB</small>', S.disk ? 'đã dùng ' + RG.fmtBytes(S.disk.usedBytes) + ' / ' + RG.fmtBytes(S.disk.totalBytes) : 'chưa quét chi tiết', dk,
-          S.disk ? S.disk.usedBytes / S.disk.totalBytes * 100 : 0);
+        diskStats;
+      var sig = dl.map(function (d) { return d.drive; }).join(',');
+      if (overview._sig !== sig) {
+        overview._sig = sig;
+        $('#ovDiskCharts').innerHTML = dl.map(function (d) {
+          return '<div class="card"><h2>Ổ ' + esc(d.drive) + ': trống (GB)<span class="ro" id="roDisk_' + esc(d.drive) + '"></span></h2><svg id="cDisk_' + esc(d.drive) + '" class="chart" role="img" aria-label="Biểu đồ dung lượng trống ổ ' + esc(d.drive) + '"></svg></div>';
+        }).join('');
+      }
       var bad = r.state === 'Critical' || r.state === 'Restricted';
       var mode = S.policy ? S.policy.mode : 'off';
       $('#ovBanner').innerHTML = (bad || (r.reasons && r.reasons.length)) ?
@@ -64,7 +78,15 @@
       var t = S.thr || { ramAvailGB: { cautionFrom: 3, restrictedFrom: 2 }, diskFreeGB: { cautionFrom: 10 }, commitPct: { restricted: 90, critical: 97 } };
       var c = RG.css('--caution'), o = RG.css('--restricted'), k = RG.css('--critical');
       RG.lineChart($('#cRam'), S.hist, { key: 'availRamGB', color: RG.css('--ram'), min: 0, max: r.totalRamGB, area: true, readout: 'roRam', unit: ' GB', lines: [{ v: t.ramAvailGB.cautionFrom, c: c }, { v: t.ramAvailGB.restrictedFrom, c: o }] });
-      RG.lineChart($('#cDisk'), S.hist, { key: 'diskFreeGB', color: RG.css('--disk'), min: 0, area: true, readout: 'roDisk', unit: ' GB', lines: [{ v: t.diskFreeGB.cautionFrom, c: k }] });
+      dl.forEach(function (d) {
+        var L = d.drive, thr = d.thresholds || t.diskFreeGB;
+        var fn = function (h) {
+          var x = (h.drives || []).filter(function (y) { return y.drive === L; })[0];
+          if (x) return x.freeGB;
+          return (!h.drives && String(h.diskDrive || '').replace(/[:\\]/g, '') === L) ? h.diskFreeGB : null;   // lịch sử cũ chỉ có ổ chính
+        };
+        RG.lineChart($('#cDisk_' + L), S.hist, { fn: fn, color: RG.css('--disk'), min: 0, area: true, readout: 'roDisk_' + L, unit: ' GB', lines: [{ v: thr.cautionFrom, c: k }] });
+      });
       RG.lineChart($('#cCommit'), S.hist, { key: 'commitPct', color: RG.css('--commit'), min: 0, max: 100, area: true, readout: 'roCommit', unit: '%', lines: [{ v: t.commitPct.restricted, c: o }, { v: t.commitPct.critical, c: k }] });
       RG.lineChart($('#cCpu'), S.hist, { key: 'cpuPct', color: RG.css('--cpu'), min: 0, max: 100, area: true, readout: 'roCpu', unit: '%' });
     }

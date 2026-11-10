@@ -20,8 +20,7 @@ try {
     $cf = Join-Path $statePath 'scan-candidates.json'
     if (-not (Test-Path -LiteralPath $cf)) { throw 'Chưa có danh sách ứng viên; hãy quét trước.' }
     $cd = ConvertFrom-Json (Read-RgFileShared $cf)
-    $age = ((Get-Date).ToUniversalTime() - [datetime]::Parse([string]$cd.finishedUtc, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind').ToUniversalTime()).TotalHours
-    if ($age -gt 12) { throw 'Dữ liệu quét đã cũ hơn 12 giờ; hãy quét lại trước khi dọn.' }
+    if (Test-RgScanStale ([string]$cd.finishedUtc)) { throw 'Dữ liệu quét đã cũ hơn 12 giờ; hãy quét lại trước khi dọn.' }
     $policy = Get-RgPolicy
     $items = @(); $refused = @()
     foreach ($k in $want) {
@@ -32,7 +31,7 @@ try {
         if ($prot) { $refused += [pscustomobject]@{ key = $k; reason = 'nằm trong vùng bảo vệ' }; continue }
         $items += New-RgItem -Kind ([string]$c.kind) -Action ([string]$c.action) -Level ([int]$c.level) -Path ([string]$c.path) -ProcId ([int]$c.pid) -Start ([string]$c.start) `
             -Name ([string]$c.name) -SizeBytes ([long]$c.sizeBytes) -NewestUtc ([string]$c.newestWriteUtc) -Reason ([string]$c.reason) -Risk ([string]$c.risk) -AgeDays ([int]$c.ageDays) `
-            -Archive ([bool]($Archive -and (Test-RgArchivable ([string]$c.kind))))
+            -Archive ([bool]($Archive -and (Test-RgArchivable ([string]$c.kind)))) -Young ([bool]$c.young)
     }
     $results = @(); $freed = 0L; $planId = $null
     if ($items.Count -gt 0) {

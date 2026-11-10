@@ -288,6 +288,7 @@ function Invoke-RgWatchTick {
         ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); state = $eff.state; rawState = $budget.state
         availRamGB = $snap.availRamGB; totalRamGB = $snap.totalRamGB; commitPct = $snap.commitPct; cpuPct = $cpuPct
         diskDrive = $snap.diskDrive; diskFreeGB = $snap.diskFreeGB
+        drives = @($snap.drives | ForEach-Object { [pscustomobject]@{ drive = $_.drive; label = $_.label; freeGB = $_.freeGB; totalGB = $_.totalGB; state = $_.state; isSystem = $_.isSystem } })
         heavy = $budget.heavyRunning; ledgerOrphans = $orph.Count; top = $top
         cores = $cores; topCpu = $topCpu; procCount = $procs.Count; uptimeSec = (Get-RgUptimeSec)
     }

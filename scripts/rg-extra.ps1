@@ -98,7 +98,7 @@ function Get-RgStaleRepoCandidates($Cfg) {
     if (-not $c.staleRepo) { return $items }
     $days = [int]$c.staleRepo.minInactiveDays; $minBytes = [long]$c.staleRepo.minMB * 1MB
     $now = (Get-Date).ToUniversalTime(); $cutoff = $now.AddDays(-$days)
-    $roots = @($c.workspaceRoots | ForEach-Object { Expand-RgPath $_ })
+    $roots = @(Get-RgWorkspaceRoots $c)
     foreach ($repo in (Find-RgGitRepos $roots ([int]$c.maxDepth))) {
         if (Test-RgContainsScripts $repo) { continue }
         $act = Get-RgRepoActivity $repo $cutoff
@@ -201,7 +201,7 @@ function Get-RgArchivesPath { return (Join-Path (Initialize-RgHome) 'state\archi
 function Read-RgArchives {
     $p = Get-RgArchivesPath
     if (-not (Test-Path -LiteralPath $p)) { return @() }
-    try { return @(ConvertFrom-Json (Read-RgFileShared $p)) } catch { return @() }
+    try { return @(ConvertFrom-Json (Read-RgFileShared $p) | ForEach-Object { $_ }) } catch { return @() }   # ForEach-Object: PS 5.1 không tự bung mảng JSON
 }
 
 function Add-RgArchiveRecord($Rec) {

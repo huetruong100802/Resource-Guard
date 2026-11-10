@@ -36,7 +36,7 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 | 🥧 **Phân tích ổ đĩa** | Biểu đồ tròn theo nhóm (chương trình, AppData, repo, Windows, cache dev, temp…) và liệt kê đầy đủ từng nhân tố chiếm dung lượng. |
 | 🧹 **Dọn dẹp có kiểm soát** | File tạm, `bin/obj`, `node_modules`, cache dev, repo cũ đã đồng bộ remote, mục lớn lâu không đụng, tiến trình mồ côi của agent. |
 | 🤖 **Tự động hoá theo chính sách** | Chế độ Tắt / Chạy thử / Bật; ngưỡng kích hoạt, cooldown, giới hạn GB mỗi lượt, thứ tự ưu tiên, vùng bảo vệ. |
-| 🧠 **Agent đánh giá (tuỳ chọn)** | `claude -p --model haiku --effort high` đọc **metadata** và gợi ý nên dọn/giữ gì; gợi ý chỉ chọn sẵn ô, con người xác nhận. |
+| 🧠 **Agent đánh giá (tuỳ chọn)** | `claude -p --model haiku --effort high` đọc **metadata** và gợi ý nên dọn/giữ gì; “nên dọn” chỉ chọn sẵn ô, con người xác nhận; “nên giữ” (tin cậy cao) tự bảo vệ có thời hạn. |
 | 🗜️ **Nén trước khi xoá** | Repo cũ và mục lớn có thể được nén zip, xác minh từng file rồi mới xoá bản gốc; có nút giải nén về chỗ cũ. |
 | 🔒 **Bảo mật theo thiết kế** | Chỉ nghe `localhost`, chống DNS-rebinding/CSRF, PIN dạng PBKDF2, xoá bằng quyền admin chỉ qua UAC và tự kiểm lại độc lập. |
 | 📦 **Không phụ thuộc** | Chỉ PowerShell + HTML/JS thuần (SVG), không cần cài module, không cần mạng, không gọi LLM khi chạy lõi. |
@@ -65,18 +65,22 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 git clone https://github.com/huetruong100802/Resource-Guard.git
 cd Resource-Guard
 
-$rm = ".\scripts\resource-manager.ps1"
-& $rm serve          # in URL http://localhost:8765/ và mở trình duyệt; Ctrl+C để dừng
+.\rg start           # chạy ngầm (nếu chưa chạy) và mở giao diện http://localhost:8765/
+.\rg status          # đang chạy hay dừng, URL, tự dọn, tự chạy cùng Windows
+.\rg stop            # dừng êm (hoặc bấm "Thoát Resource Guard" ở góc dưới thanh bên của giao diện)
 ```
 
-Chạy ngầm, tự khởi động cùng Windows:
+Dùng hằng ngày, một lần cho mỗi máy:
 
 ```powershell
-& $rm serve -Detach              # chạy ẩn, in URL rồi trả terminal
-& $rm serve stop                 # dừng bản chạy ngầm
-& $rm serve setpin               # đặt PIN (chỉ ở console tương tác) cho chế độ tự dọn "Bật"
-.\scripts\Install-Watcher.ps1    # tự chạy ngầm mỗi lần đăng nhập; thêm -Uninstall để gỡ
+.\rg shortcut        # lối tắt "Resource Guard" ở Start Menu: bấm là chạy ngầm + mở giao diện (thêm -Desktop để có ở màn hình nền)
+.\rg autostart on    # tự chạy ngầm mỗi lần đăng nhập Windows (off để tắt)
+.\rg path            # thêm thư mục này vào PATH người dùng để gõ "rg ..." ở bất kỳ đâu (mở terminal mới sau khi thêm)
+.\rg pin             # đặt PIN (chỉ ở console tương tác) cho chế độ tự dọn "Bật"
+.\rg run             # chạy ngay trong cửa sổ này (Ctrl+C để dừng), không chạy ngầm
 ```
+
+`rg stop` dừng êm: đóng cổng, nhả khoá, huỷ lượt quét ổ/agent đang chạy. Nếu đang có lượt **dọn/khôi phục/tự dọn** chưa xong, app từ chối thoát để không bỏ dở thao tác xoá (`rg stop -Force` mới buộc dừng). Lưu ý **tự dọn nền chỉ hoạt động khi app đang chạy**. Các lệnh cũ `resource-manager.ps1 serve ...` vẫn dùng được.
 
 Trạng thái được lưu tại `%AGENT_RESOURCE_HOME%` (mặc định `~/.agent-resource`).
 
@@ -99,18 +103,18 @@ Thêm `-Json` vào lệnh để lấy đầu ra máy-đọc. Các script lẻ (`
 
 | Tab | Chức năng |
 |---|---|
-| **Tổng quan** | Thẻ RAM/CPU/commit/ổ đĩa theo ngưỡng, 4 biểu đồ realtime, trạng thái tự dọn, sự kiện gần đây. |
+| **Tổng quan** | Thẻ RAM/CPU/commit và **mỗi ổ đĩa một thẻ + một biểu đồ** theo ngưỡng, biểu đồ realtime, trạng thái tự dọn, sự kiện gần đây. |
 | **CPU & Tiến trình** | Kiểu Task Manager: đồ thị CPU, từng nhân logic, bảng tiến trình (gộp theo tên/từng PID, sắp xếp, lọc) và nút khiên để bảo vệ tiến trình khỏi tự dọn. |
-| **Ổ đĩa** | Biểu đồ tròn theo nhóm + liệt kê đầy đủ nhân tố (hoặc top 80). Quét ~1–2 phút ở process riêng, chỉ đọc. |
+| **Ổ đĩa** | Chọn ổ ở thanh tab (khi có từ 2 ổ), biểu đồ tròn theo nhóm + liệt kê đầy đủ nhân tố (hoặc top 80). Quét từng ổ ~1–2 phút ở process riêng, chỉ đọc; mỗi lần quét một ổ. |
 | **Dọn dẹp** | Ứng viên dọn → tick chọn → xác nhận → `plan → approve → apply`. UI chỉ gửi *key*, không bao giờ gửi đường dẫn. |
-| **Chính sách tự động** | Tắt / Chạy thử / Bật; mỗi nhóm *Tự động / Hỏi tay / Luôn giữ*; thứ tự ưu tiên; vùng bảo vệ (thư mục + tên tiến trình). |
+| **Chính sách tự động** | Tắt / Chạy thử / Bật; ghi đè ngưỡng kích hoạt và mức trống mục tiêu **theo từng ổ**; mỗi nhóm *Tự động / Hỏi tay / Luôn giữ*; thứ tự ưu tiên; vùng bảo vệ (thư mục + tên tiến trình). |
 | **Agent đánh giá** | Xem trước chính xác dữ liệu sẽ gửi, nhận tóm tắt, phát hiện, gợi ý theo ưu tiên và gợi ý chính sách. |
 | **Cài đặt** | Chu kỳ lấy mẫu (2–300 giây), ngưỡng, giao diện sáng/tối/theo hệ thống. |
 
 <details>
 <summary><b>Các loại ứng viên dọn dẹp</b></summary>
 
-- **File tạm / `bin/obj` / `node_modules` / cache dev** (NuGet, npm, pnpm, Yarn, pip): chỉ mục đủ tuổi và không còn được dùng.
+- **File tạm / `bin/obj` / `node_modules` / cache dev** (NuGet, npm, pnpm, Yarn, pip): mục đủ tuổi và không còn được dùng là ứng viên thường. Mục **chưa đủ tuổi** nhưng đủ lớn (`cleanup.youngMinMB`, mặc định 100 MB; số âm = tắt) vẫn được đưa vào danh sách với nhãn *chưa đủ tuổi* (kèm tuổi thật) để agent đánh giá: tuổi chỉ là một tín hiệu. Mục này **không bao giờ tự dọn** (auto-clean bỏ qua, apply chặn nếu plan do policy tự duyệt); chỉ xoá khi người dùng duyệt. Với cache có thêm mục "toàn bộ cache" (gồm cả file mới dùng). `stale-repo`/`large-item` không có chế độ này.
 - **Repo cũ** (`stale-repo`): repo git không sửa file nguồn ≥ 90 ngày. Chỉ đề xuất **xoá** khi mọi thứ đã có trên remote (không thay đổi chưa commit, không stash, không commit chưa push); ngược lại chỉ báo cáo kèm lý do. Không bao giờ đề xuất repo chứa chính công cụ này.
 - **Mục lớn** (`large-item`): file/thư mục ≥ 500 MB trong `Downloads`, `Videos` không đụng ≥ 60 ngày (đổi ở `cleanup.largeItem`).
 - **Ứng dụng** (`app`): thư mục cài đặt lớn, lâu không ghi file. **Chỉ báo cáo**; gỡ bằng *Cài đặt > Ứng dụng*.
@@ -138,12 +142,22 @@ Mặc định chế độ tự động là **Tắt**. Khi `serve` đang chạy v
 
 Các tham số: ngưỡng kích hoạt (ổ đĩa → dọn file, RAM → kết thúc tiến trình agent), thời gian nghỉ giữa hai lượt, tối đa GB mỗi lượt, ngưỡng dừng, số tiến trình tối đa mỗi lượt. Chính sách nằm ở `state\policy.json`, kết quả lượt gần nhất ở `state\auto-last.json`.
 
+### Nhiều ổ đĩa
+
+Tool giám sát mọi ổ **cố định** (Fixed) đã sẵn sàng; ổ USB/mạng/ổ CD bị bỏ qua. Mỗi ổ có trạng thái riêng, trạng thái chung của máy là mức xấu nhất. Tự dọn đánh giá **từng ổ**: ổ nào chạm ngưỡng thì chỉ chọn mục nằm trên ổ đó, dừng khi ổ đó đủ `targetFreeGB`, và giới hạn `maxGBPerRun` tính riêng cho từng ổ.
+
+- Chính sách: `drives` trong `policy.json`, ví dụ `{ "D": { "diskTrigger": "Caution", "targetFreeGB": 60 } }`. Thiếu khoá nào thì dùng giá trị chung. Nới lỏng ghi đè theo ổ cũng cần PIN khi chế độ là *Bật*.
+- Ngưỡng cảnh báo: `disk.drives.<X>` trong `config` (ghi đè `normalAboveGB`/`cautionFromGB` cho riêng ổ); `disk.exclude` loại ổ khỏi giám sát.
+- Thư mục mã nguồn: ngoài `cleanup.workspaceRoots`, tool tự nhận các thư mục tên `Work`, `Repositories`, `Repos`, `Source`, `Src`, `Projects`, `Dev`, `Code`, `Workspace` ở gốc các ổ không phải ổ hệ thống (`cleanup.autoRootNames` đổi danh sách tên, `cleanup.autoRoots: false` tắt hẳn).
+- Kết quả quét ổ lưu ở `state\scan-breakdown-<X>.json`.
+
 ## Agent đánh giá
 
 - Gọi `claude -p --model haiku --effort high`, chi phí thực tế khoảng **$0.006 / lần**.
 - Agent chỉ nhận **metadata**: tên thư mục, kích thước, số ngày không dùng, số liệu RAM/CPU/ổ đĩa, tên tiến trình, tóm tắt chính sách. **Không gửi nội dung file**; đường dẫn đã thay tên tài khoản bằng `~`.
 - Có nút *Xem trước dữ liệu sẽ gửi* để kiểm tra chính xác payload.
-- Kết quả là JSON có cấu trúc; key do agent bịa ra bị loại. Gợi ý chỉ **chọn sẵn ô**, con người quyết định.
+- Kết quả là JSON có cấu trúc; key do agent bịa ra bị loại. Verdict **nên dọn** chỉ **chọn sẵn ô**, con người xác nhận mới xoá.
+- Verdict **nên giữ** với độ tin cậy cao được **tự bảo vệ 30 ngày** (chỉ áp cho thư mục/file, không áp cho tiến trình): mục đó ẩn khỏi danh sách dọn và không bao giờ bị tự dọn. Khối “Agent đang giữ” ở tab Dọn dẹp cho xem lý do, ngày hết hạn và bỏ giữ từng mục. Agent chỉ thêm được bảo vệ, không gỡ được; dữ liệu ở `state\agent-keep.json`.
 
 ## Kiến trúc
 
