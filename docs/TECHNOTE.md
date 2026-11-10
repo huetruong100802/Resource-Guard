@@ -100,7 +100,10 @@ Luồng một lượt tự động: `Get-RgStressInfo` → `Select-RgAutoItems` 
 
 UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-cleanup.ps1` đọc lại `scan-candidates.json` và:
 - từ chối mục `report` (chỉ báo cáo), mục nằm trong vùng bảo vệ, mục không còn trong danh sách;
-- từ chối nếu dữ liệu quét cũ hơn **12 giờ**;
+- từ chối nếu dữ liệu quét cũ hơn **12 giờ** (ngưỡng: `Get-RgScanMaxAgeHours` trong `rg-common.ps1`; không đọc được thời điểm quét thì coi là cũ);
+- UI biết trước: quá ngưỡng thì tab Dọn dẹp hiện banner, khoá ô chọn và nút “Dọn”, nút “Quét lại ứng viên” ở đầu bảng. Ngưỡng lấy từ `maxAgeHours` của `/api/candidates`. Server vẫn kiểm lại (chốt cuối);
+- Bảng và hộp xác nhận nói rõ **việc sẽ làm với từng mục** (cột “Hành động”): Xoá vĩnh viễn / Xoá (có thể nén zip) / Nén zip rồi xoá / Kết thúc tiến trình / Chỉ báo cáo / Cần quyền admin / Được bảo vệ. Hộp xác nhận liệt kê đủ mục theo nhóm hành động, có tổng ước tính; đổi tuỳ chọn nén zip cập nhật ngay. Thanh chọn tóm tắt số xoá và số kết thúc tiến trình. Dung lượng tiến trình không cộng vào ước tính đĩa.
+- Cột “Chính sách” (tự động/hỏi tay/giữ) không còn ở bảng dọn vì không phản ánh việc sẽ làm; cài đặt đó xem ở tab Chính sách. Mục bị từ chối trong kết quả hiện tên mục thay vì key 12 ký tự.
 - đi qua plan → approve → `Invoke-RgApply` (có allowlist + revalidate);
 - xoá mục đã xong khỏi danh sách ứng viên để UI không hiện lại.
 
@@ -110,9 +113,15 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
 - Payload **chỉ metadata** (tên, kích thước, tuổi, nhóm). Không gửi nội dung file; đường dẫn user profile thay bằng `~`. Có nút xem trước đúng payload sẽ gửi.
 - Hậu xử lý:
   - bỏ mọi recommendation có key không nằm trong ứng viên (chống bịa);
-  - mục thuộc vùng bảo vệ bị ép thành `keep`;
+  - mục thuộc vùng bảo vệ (của người dùng hoặc agent còn hạn) bị ép thành `keep`;
+  - verdict `keep` + `confidence = high` cho **đường dẫn** loại `delete` được ghi vào `state\agent-keep.json` (xem dưới);
   - gợi ý chính sách trùng cài đặt hiện tại bị lọc.
-- Gợi ý chỉ **chọn sẵn ô** ở trang Dọn dẹp; người dùng vẫn phải xác nhận.
+- Verdict `clean` chỉ **chọn sẵn ô** ở trang Dọn dẹp; người dùng vẫn phải xác nhận, xoá vẫn qua plan → approve → apply.
+- **Agent giữ** (`rg-policy.ps1`, `Add-RgAgentKeep` / `Get-RgAgentKeepMatch`): bảo vệ có thời hạn (30 ngày, tối đa 200 mục), tách khỏi `protectPaths` của người dùng.
+  - `Test-RgPathProtected` (danh sách ứng viên, dọn tay, tự dọn) kiểm cả hai nguồn, cùng quy tắc tiền tố hai chiều; mục agent giữ bị ẩn khỏi danh sách dọn và hiện ở khối “Agent đang giữ”.
+  - Chỉ làm chặt hơn nên không cần PIN. Đã giữ thì không gia hạn; hết hạn thì được đánh giá lại ở lượt sau.
+  - Bỏ giữ từng mục: `POST /api/agent/keep/release {key}` (chỉ nhận key; không cần PIN vì chỉ trả mục về trạng thái policy người dùng đã đặt).
+  - Không áp cho tiến trình: bảo vệ theo tên sẽ chặn cả nhóm tiến trình cùng tên; verdict `keep` của tiến trình vẫn chỉ là gợi ý.
 - Đo thực tế: 1 lượt ≈ 37 giây, ≈ **$0.006**, payload ≈ 12 KB.
 
 ## 7. An toàn (các chốt chặn)
@@ -120,7 +129,7 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
 1. Tự động dọn **mặc định tắt**.
 2. File cá nhân (Documents, Desktop, Downloads…) không bao giờ bị tự xoá; chỉ gợi ý.
 3. Mọi lần xoá đi qua `Invoke-RgApply`; không có đường xoá khác.
-4. Vùng bảo vệ luôn thắng — kể cả khi người dùng tick tay hoặc agent đề xuất.
+4. Vùng bảo vệ luôn thắng — kể cả khi người dùng tick tay hoặc agent đề xuất. Agent chỉ được **thêm** bảo vệ có thời hạn (không bao giờ gỡ bảo vệ hay nới policy).
 5. Server chỉ nghe localhost, kiểm tra header `Host`; POST bắt buộc `X-RG-Client: ui`.
 6. Static chỉ phục vụ whitelist đuôi css/js/svg.
 7. **PIN** (PBKDF2, 120k vòng) bắt buộc khi chuyển sang mode `on` hoặc *nới lỏng* chính sách khi đang `on`; siết thêm bảo vệ thì không cần. Sai 5 lần → khoá 5 phút. Đặt PIN chỉ ở console.

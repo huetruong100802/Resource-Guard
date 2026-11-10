@@ -34,11 +34,14 @@
     "tempExclude": ["claude*"],
     "tempTop": 30,
     "minCacheMB": 100,
+    "youngMinMB": 100,
     "cacheDirs": {
       "nuget-packages":   "%USERPROFILE%\\.nuget\\packages",
       "nuget-http-cache": "%LOCALAPPDATA%\\NuGet\\v3-cache",
       "npm-cache":        "%LOCALAPPDATA%\\npm-cache",
       "pnpm-store":       "%LOCALAPPDATA%\\pnpm\\store",
+      "pnpm-cache":       "%LOCALAPPDATA%\\pnpm-cache",
+      "cursor-cache":     "%APPDATA%\\Cursor\\Cache",
       "yarn-cache":       "%LOCALAPPDATA%\\Yarn\\Cache",
       "pip-cache":        "%LOCALAPPDATA%\\pip\\Cache"
     },

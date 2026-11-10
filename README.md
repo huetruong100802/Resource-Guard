@@ -36,7 +36,7 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 | 🥧 **Phân tích ổ đĩa** | Biểu đồ tròn theo nhóm (chương trình, AppData, repo, Windows, cache dev, temp…) và liệt kê đầy đủ từng nhân tố chiếm dung lượng. |
 | 🧹 **Dọn dẹp có kiểm soát** | File tạm, `bin/obj`, `node_modules`, cache dev, repo cũ đã đồng bộ remote, mục lớn lâu không đụng, tiến trình mồ côi của agent. |
 | 🤖 **Tự động hoá theo chính sách** | Chế độ Tắt / Chạy thử / Bật; ngưỡng kích hoạt, cooldown, giới hạn GB mỗi lượt, thứ tự ưu tiên, vùng bảo vệ. |
-| 🧠 **Agent đánh giá (tuỳ chọn)** | `claude -p --model haiku --effort high` đọc **metadata** và gợi ý nên dọn/giữ gì; gợi ý chỉ chọn sẵn ô, con người xác nhận. |
+| 🧠 **Agent đánh giá (tuỳ chọn)** | `claude -p --model haiku --effort high` đọc **metadata** và gợi ý nên dọn/giữ gì; “nên dọn” chỉ chọn sẵn ô, con người xác nhận; “nên giữ” (tin cậy cao) tự bảo vệ có thời hạn. |
 | 🗜️ **Nén trước khi xoá** | Repo cũ và mục lớn có thể được nén zip, xác minh từng file rồi mới xoá bản gốc; có nút giải nén về chỗ cũ. |
 | 🔒 **Bảo mật theo thiết kế** | Chỉ nghe `localhost`, chống DNS-rebinding/CSRF, PIN dạng PBKDF2, xoá bằng quyền admin chỉ qua UAC và tự kiểm lại độc lập. |
 | 📦 **Không phụ thuộc** | Chỉ PowerShell + HTML/JS thuần (SVG), không cần cài module, không cần mạng, không gọi LLM khi chạy lõi. |
@@ -114,7 +114,7 @@ Thêm `-Json` vào lệnh để lấy đầu ra máy-đọc. Các script lẻ (`
 <details>
 <summary><b>Các loại ứng viên dọn dẹp</b></summary>
 
-- **File tạm / `bin/obj` / `node_modules` / cache dev** (NuGet, npm, pnpm, Yarn, pip): chỉ mục đủ tuổi và không còn được dùng.
+- **File tạm / `bin/obj` / `node_modules` / cache dev** (NuGet, npm, pnpm, Yarn, pip): mục đủ tuổi và không còn được dùng là ứng viên thường. Mục **chưa đủ tuổi** nhưng đủ lớn (`cleanup.youngMinMB`, mặc định 100 MB; số âm = tắt) vẫn được đưa vào danh sách với nhãn *chưa đủ tuổi* (kèm tuổi thật) để agent đánh giá: tuổi chỉ là một tín hiệu. Mục này **không bao giờ tự dọn** (auto-clean bỏ qua, apply chặn nếu plan do policy tự duyệt); chỉ xoá khi người dùng duyệt. Với cache có thêm mục "toàn bộ cache" (gồm cả file mới dùng). `stale-repo`/`large-item` không có chế độ này.
 - **Repo cũ** (`stale-repo`): repo git không sửa file nguồn ≥ 90 ngày. Chỉ đề xuất **xoá** khi mọi thứ đã có trên remote (không thay đổi chưa commit, không stash, không commit chưa push); ngược lại chỉ báo cáo kèm lý do. Không bao giờ đề xuất repo chứa chính công cụ này.
 - **Mục lớn** (`large-item`): file/thư mục ≥ 500 MB trong `Downloads`, `Videos` không đụng ≥ 60 ngày (đổi ở `cleanup.largeItem`).
 - **Ứng dụng** (`app`): thư mục cài đặt lớn, lâu không ghi file. **Chỉ báo cáo**; gỡ bằng *Cài đặt > Ứng dụng*.
@@ -156,7 +156,8 @@ Tool giám sát mọi ổ **cố định** (Fixed) đã sẵn sàng; ổ USB/m�
 - Gọi `claude -p --model haiku --effort high`, chi phí thực tế khoảng **$0.006 / lần**.
 - Agent chỉ nhận **metadata**: tên thư mục, kích thước, số ngày không dùng, số liệu RAM/CPU/ổ đĩa, tên tiến trình, tóm tắt chính sách. **Không gửi nội dung file**; đường dẫn đã thay tên tài khoản bằng `~`.
 - Có nút *Xem trước dữ liệu sẽ gửi* để kiểm tra chính xác payload.
-- Kết quả là JSON có cấu trúc; key do agent bịa ra bị loại. Gợi ý chỉ **chọn sẵn ô**, con người quyết định.
+- Kết quả là JSON có cấu trúc; key do agent bịa ra bị loại. Verdict **nên dọn** chỉ **chọn sẵn ô**, con người xác nhận mới xoá.
+- Verdict **nên giữ** với độ tin cậy cao được **tự bảo vệ 30 ngày** (chỉ áp cho thư mục/file, không áp cho tiến trình): mục đó ẩn khỏi danh sách dọn và không bao giờ bị tự dọn. Khối “Agent đang giữ” ở tab Dọn dẹp cho xem lý do, ngày hết hạn và bỏ giữ từng mục. Agent chỉ thêm được bảo vệ, không gỡ được; dữ liệu ở `state\agent-keep.json`.
 
 ## Kiến trúc
 

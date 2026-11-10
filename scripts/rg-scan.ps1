@@ -29,9 +29,9 @@ try {
         $items = @(Get-RgCandidates)
         $out = foreach ($i in $items) {
             [pscustomobject]@{
-                key = (Get-RgSha256 ("{0}|{1}|{2}|{3}" -f $i.kind, $i.path, $i.pid, $i.start)).Substring(0, 12)
+                key = (Get-RgSha256 (("{0}|{1}|{2}|{3}" -f $i.kind, $i.path, $i.pid, $i.start) + $(if ([bool]$i.young) { '|young' } else { '' }))).Substring(0, 12)
                 kind = $i.kind; action = $i.action; level = $i.level; path = $i.path; drive = (Get-RgPathDrive ([string]$i.path)); pid = $i.pid; start = $i.start; name = $i.name
-                sizeBytes = $i.sizeBytes; ageDays = $i.ageDays; newestWriteUtc = $i.newestWriteUtc; reason = $i.reason; risk = $i.risk; needsAdmin = [bool]$i.needsAdmin
+                sizeBytes = $i.sizeBytes; ageDays = $i.ageDays; newestWriteUtc = $i.newestWriteUtc; reason = $i.reason; risk = $i.risk; needsAdmin = [bool]$i.needsAdmin; young = [bool]$i.young
             }
         }
         Save-Json ([ordered]@{ finishedUtc = (Get-Date).ToUniversalTime().ToString('o'); seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1); items = @($out) }) $outPath

@@ -24,6 +24,7 @@
       var r = l.result, sev = SEV[r.severity] || SEV.watch;
       h += '<div class="card mt"><h2>Kết quả <span class="sev ' + sev[0] + '">' + sev[1] + '</span><span class="ro">' + RG.timeAgo(l.finishedUtc) + ' · ' + Math.round((l.durationMs || 0) / 1000) + 's · $' + (+l.costUsd || 0).toFixed(4) + ' · gửi ' + RG.fmtBytes(l.payloadBytes) + '</span></h2>' +
         '<p style="margin:0;font-size:15px">' + esc(r.summary) + '</p></div>';
+      if (r.keptApplied) h += '<div class="alert ok mt"><div><b>Đã bảo vệ ' + r.keptApplied + ' mục</b> agent đánh giá “nên giữ” (độ tin cậy cao) trong 30 ngày: các mục này không hiện trong danh sách dọn và không bị tự dọn. Xem hoặc bỏ giữ ở tab Dọn dẹp, mục “Agent đang giữ”.</div></div>';
       if ((r.findings || []).length) h += '<div class="card mt"><h2>Phát hiện</h2>' + r.findings.map(function (f) { return '<div style="padding:6px 0;border-bottom:1px solid var(--line)"><span class="pill">' + esc(AREA[f.area] || f.area) + '</span> <b>' + esc(f.title) + '</b><div class="small mut">' + esc(f.detail) + '</div></div>'; }).join('') + '</div>';
       var recs = (r.recommendations || []).slice().sort(function (a, b) { return a.priority - b.priority; });
       if (recs.length) {
@@ -32,7 +33,7 @@
           var can = c && c.action !== 'report' && !c.protected && x.verdict === 'clean';
           return '<tr class="row"><td class="chk"><input type="checkbox" data-rk="' + esc(x.key) + '"' + (can ? '' : ' disabled') + ' aria-label="Chọn ' + esc(tgt) + '"' + (S.selected[x.key] ? ' checked' : '') + '></td><td><span class="pill">P' + x.priority + '</span></td>' +
             '<td><span class="ellipsis mono" title="' + esc(tgt) + '">' + esc(tgt) + '</span><div class="small mut">' + esc(x.reason) + '</div></td><td class="r num">' + (c ? RG.fmtBytes(c.sizeBytes) : '–') + '</td>' +
-            '<td><span class="pill ' + v[0] + '">' + v[1] + '</span> <span class="small mut">' + esc(x.confidence) + '</span></td></tr>';
+            '<td><span class="pill ' + v[0] + '">' + v[1] + '</span> <span class="small mut">' + esc(x.confidence) + '</span>' + (x.autoKept || (c && c.protectedBy === 'agent') ? ' <span class="pill keep" title="Đã được bảo vệ có thời hạn: ẩn khỏi danh sách dọn, không tự dọn">đã bảo vệ</span>' : '') + '</td></tr>';
         }).join('');
         h += '<div class="card mt"><h2>Gợi ý theo thứ tự ưu tiên <span class="sp"></span><button class="btn sm" id="agSel">Chọn các mục “nên dọn” và mở tab Dọn dẹp</button></h2><div class="tbl-wrap" style="max-height:none"><table><thead><tr><th></th><th>Ưu tiên</th><th>Mục & lý do</th><th class="r">Dung lượng</th><th>Đánh giá</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
           (r.droppedUnknownKeys ? '<p class="hint">Đã loại ' + r.droppedUnknownKeys + ' gợi ý có key không tồn tại trong danh sách ứng viên (tool không tin nội dung agent bịa ra).</p>' : '') + '<p class="hint">Ô chỉ chọn được với mục tool cho phép xoá và không nằm trong vùng bảo vệ.</p></div>';

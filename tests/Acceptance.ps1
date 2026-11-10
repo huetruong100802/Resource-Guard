@@ -152,6 +152,17 @@ try {
     [void](Set-RgPlanApproval -PlanId $lowFloor.planId -ItemIds @(1) -By 'test-human')
     Assert ((Invoke-RgApply -PlanId $lowFloor.planId).results[0].detail -match 'policy floor') 'ageDays thấp hơn sàn chính sách (14): bị chặn'
 
+    Write-Host "`n[Young] Mục dưới sàn tuổi: người duyệt được xoá, auto-clean thì không"
+    $youngItem = { New-RgItem -Kind 'cache-aged' -Action 'delete' -Level 2 -Path $cache -AgeDays 0 -Young $true -Reason 'young test' }
+    $yHuman = New-RgPlan -Items @(& $youngItem)
+    [void](Set-RgPlanApproval -PlanId $yHuman.planId -ItemIds @(1) -By 'test-human')
+    Assert ((Invoke-RgApply -PlanId $yHuman.planId -DryRun).results[0].outcome -eq 'would-run') 'young + người duyệt: bỏ sàn tuổi, được phép chạy'
+    $yAuto = New-RgPlan -Items @(& $youngItem)
+    [void](Set-RgPlanApproval -PlanId $yAuto.planId -ItemIds @(1) -By 'policy')
+    $yr = Invoke-RgApply -PlanId $yAuto.planId -DryRun
+    Assert ($yr.results[0].outcome -eq 'skipped' -and $yr.results[0].detail -match 'human approval') 'young + plan do policy tự duyệt: bị chặn'
+    Assert ((Get-RgItemsHash @((& $youngItem))) -ne (Get-RgItemsHash @((New-RgItem -Kind 'cache-aged' -Action 'delete' -Level 2 -Path $cache -AgeDays 0 -Reason 'young test')))) 'cờ young nằm trong hash của plan (không sửa được sau khi duyệt)'
+
     $outside = Join-Path $sandbox 'outside'; NewFile (Join-Path $outside 'x\bin\f.dll') 1KB; NewFile (Join-Path $outside 'x\x.csproj') 1
     Age (Join-Path $outside 'x\bin') 30
     $junc = Join-Path $ws 'proj\obj'; NewFile (Join-Path $outside 'real\k.txt') 1KB
@@ -206,6 +217,10 @@ try {
     Assert ((Read-RgFileShared (Join-Path $home_ 'state\rwtest.json')).Length -eq 5) 'Read-RgFileShared đọc được file (đối số -bor trong ngoặc)'
     $p0 = Get-RgPolicy
     Assert ($p0.mode -eq 'off' -and $p0.categories['cache-aged'] -eq 'ask' -and $p0.categories['temp-entry'] -eq 'auto') 'policy: mặc định mode off, nhóm rủi ro cao không auto'
+    $yPol = Get-RgPolicy; $yPol.categories['cache-aged'] = 'auto'
+    $yStress = [pscustomobject]@{ diskStress = $true; ramStress = $false; drives = @(); diskFreeGB = 1; diskDrive = 'C' }
+    $yPick = Select-RgAutoItems @((New-RgItem -Kind 'cache-aged' -Action 'delete' -Level 2 -Path $cache -AgeDays 0 -Young $true -Reason 'young test')) $yPol $yStress
+    Assert (@($yPick.selected).Count -eq 0 -and (@($yPick.skipped)[0].reason -match 'ngưỡng tuổi')) 'young không bao giờ vào danh sách auto-clean dù policy = auto'
     $bad = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'nuke'; maxGBPerRun = 99999; categories = [pscustomobject]@{ 'cache-aged' = 'bogus'; 'evil' = 'auto' }; protectPaths = @('relative\x', 'C:\ok\path'); protectProcesses = @('SqlServr', "bad`nname") })
     Assert ($bad.mode -eq 'off' -and $bad.maxGBPerRun -eq 500) 'policy: mode lạ -> off, số vượt kẹp về giới hạn'
     Assert ($bad.categories['cache-aged'] -eq 'ask' -and -not $bad.categories.Contains('evil')) 'policy: giá trị nhóm lạ bị bỏ, nhóm lạ bị loại'
@@ -215,7 +230,25 @@ try {
     Assert ((Test-RgPathProtected "$keepDir\obj" $pp) -and (Test-RgPathProtected $keepDir $pp)) 'protect: mục nằm trong/bằng thư mục bảo vệ'
     Assert ((Test-RgPathProtected $ws $pp) -and -not (Test-RgPathProtected "${keepDir}x" $pp) -and -not (Test-RgPathProtected (Join-Path $ws 'other') $pp)) 'protect: cha của vùng bảo vệ bị chặn, thư mục anh em tên gần giống thì không'
     Assert ((Test-RgProcessProtected 'nodemon' $pp) -and (Test-RgProcessProtected 'DevEnv' $pp) -and -not (Test-RgProcessProtected 'devenv2' $pp)) 'protect: tiến trình khớp wildcard, không phân biệt hoa thường'
-    $off = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'off' }); $on = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; protectProcesses = @('a') })
+    # agent giữ: bảo vệ có thời hạn, tách khỏi protectPaths của người dùng
+    $akDir = Join-Path $ws 'agentkept'
+    $akPol = Get-RgPolicy; $akPol.categories['temp-entry'] = 'auto'
+    $akItem = New-RgItem -Kind 'temp-entry' -Action 'delete' -Level 1 -Path "$akDir\obj" -AgeDays 99 -Reason 'ak test'
+    Assert (@((Select-RgAutoItems @($akItem) $akPol $yStress).selected).Count -eq 1) 'agent-keep: trước khi giữ, mục auto vào danh sách tự dọn'
+    Assert (Add-RgAgentKeep $akDir 'dự án đang làm' 'high') 'agent-keep: thêm mục mới thành công'
+    Assert (-not (Add-RgAgentKeep $akDir 'trùng' 'high')) 'agent-keep: đã giữ thì không thêm/gia hạn lần nữa'
+    Assert ((Test-RgPathProtected "$akDir\obj" $akPol) -and (Test-RgPathProtected $akDir $akPol) -and (Test-RgPathProtected $ws $akPol) -and -not (Test-RgPathProtected "${akDir}x" $akPol)) 'agent-keep: con/chính nó/cha bị bảo vệ, thư mục anh em tên gần giống thì không'
+    Assert (-not (Test-RgPathUserProtected "$akDir\obj" $akPol)) 'agent-keep: không lẫn vào protectPaths của người dùng'
+    $akPick = Select-RgAutoItems @($akItem) $akPol $yStress
+    Assert (@($akPick.selected).Count -eq 0 -and (@($akPick.skipped)[0].reason -match 'vùng bảo vệ')) 'agent-keep: auto-clean bỏ qua mục agent giữ'
+    Assert (-not (Add-RgAgentKeep 'relative\x' 'x' 'high') -and -not (Add-RgAgentKeep "C:\bad`tpath" 'x' 'high')) 'agent-keep: đường dẫn tương đối/ký tự điều khiển bị từ chối'
+    $akM = Get-RgAgentKeepMatch "$akDir\obj"
+    Assert ($akM -and $akM.reason -eq 'dự án đang làm' -and (Remove-RgAgentKeep $akM.target)) 'agent-keep: bỏ giữ đúng mục khớp'
+    Assert (-not (Test-RgPathProtected "$akDir\obj" $akPol) -and @((Select-RgAutoItems @($akItem) $akPol $yStress).selected).Count -eq 1) 'agent-keep: bỏ giữ xong thì lại dọn được'
+    $akExp = (Get-Date).ToUniversalTime().AddDays(-1).ToString('o')
+    Write-RgFileAtomic (Get-RgAgentKeepPath) (ConvertTo-Json -InputObject ([ordered]@{ version = 1; items = @([ordered]@{ target = $akDir; reason = 'cũ'; confidence = 'high'; createdUtc = $akExp; expiresUtc = $akExp }) }) -Depth 4)
+    Assert (-not (Test-RgPathProtected "$akDir\obj" $akPol)) 'agent-keep: mục hết hạn không còn bảo vệ'
+    $off = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'off' }); $on =ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; protectProcesses = @('a') })
     $on2 = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; protectProcesses = @('a', 'b') })
     $onLoose = ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'on'; protectProcesses = @('a'); categories = [pscustomobject]@{ 'node_modules' = 'auto' } })
     Assert (Test-RgPolicyNeedsPin $off $on) 'pin: bật mode on từ off cần PIN'

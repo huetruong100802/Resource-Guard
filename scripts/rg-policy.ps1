@@ -153,15 +153,84 @@ function Test-RgPolicyNeedsPin($Old, $New) {
 
 # ---------- Vùng bảo vệ ----------
 
-function Test-RgPathProtected([string]$Path, $Policy) {
+function Test-RgPathInList([string]$Path, $List) {
     $t = $Path.TrimEnd('\')
-    foreach ($pp in @($Policy.protectPaths)) {
+    foreach ($pp in @($List)) {
         $q = ([string]$pp).TrimEnd('\')
         if ($t -ieq $q) { return $true }
         if ($t.StartsWith($q + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }   # mục nằm trong vùng bảo vệ
         if ($q.StartsWith($t + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }   # xoá mục sẽ kéo theo vùng bảo vệ bên trong
     }
     return $false
+}
+# Chỉ vùng bảo vệ do NGƯỜI DÙNG đặt (policy.protectPaths); dùng để phân biệt nguồn bảo vệ với "agent giữ".
+function Test-RgPathUserProtected([string]$Path, $Policy) { return (Test-RgPathInList $Path $Policy.protectPaths) }
+# Được bảo vệ bởi người dùng HOẶC bởi agent (còn hạn). Mọi đường dọn (danh sách, tay, tự dọn) đều hỏi hàm này.
+function Test-RgPathProtected([string]$Path, $Policy) {
+    if (Test-RgPathInList $Path $Policy.protectPaths) { return $true }
+    return [bool](Get-RgAgentKeepMatch $Path)
+}
+
+# ---------- Agent giữ: bảo vệ CÓ THỜI HẠN do verdict "keep" (độ tin cậy cao) của agent đánh giá ----------
+# Chỉ làm chặt hơn (ít bị xoá hơn) nên không cần PIN; tách khỏi protectPaths của người dùng, tự hết hạn, bỏ giữ được từng mục.
+# Chỉ áp cho ĐƯỜNG DẪN (mục xoá). Tiến trình không có: bảo vệ theo tên sẽ chặn cả nhóm tiến trình cùng tên.
+$script:RgAgentKeepDays = 30
+$script:RgAgentKeepMax = 200
+$script:RgAgentKeepCache = $null
+function Get-RgAgentKeepPath { return (Join-Path (Initialize-RgHome) 'state\agent-keep.json') }
+# Toàn bộ mục trong file (kể cả đã hết hạn), cache theo mtime+size để hàm kiểm tra gọi theo từng ứng viên không đọc đĩa lại.
+function Read-RgAgentKeepRaw {
+    $f = Get-RgAgentKeepPath
+    if (-not (Test-Path -LiteralPath $f)) { $script:RgAgentKeepCache = $null; return @() }
+    $fi = Get-Item -LiteralPath $f
+    $sig = "$($fi.LastWriteTimeUtc.Ticks)/$($fi.Length)"
+    if ($script:RgAgentKeepCache -and $script:RgAgentKeepCache.sig -eq $sig) { return $script:RgAgentKeepCache.items }
+    $items = New-Object System.Collections.ArrayList
+    try {
+        foreach ($e in @((ConvertFrom-Json (Read-RgFileShared $f)).items)) {
+            $t = ([string]$e.target).TrimEnd('\')
+            if (-not $t -or -not [IO.Path]::IsPathRooted($t)) { continue }
+            try { $exp = [datetime]::Parse([string]$e.expiresUtc, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind').ToUniversalTime() } catch { continue }
+            [void]$items.Add([pscustomobject]@{ target = $t; reason = [string]$e.reason; confidence = [string]$e.confidence; createdUtc = [string]$e.createdUtc; expiresUtc = $exp.ToString('o'); exp = $exp })
+        }
+    } catch { Write-RgLog 'agent-keep-read-error' ([string]$_) }
+    $script:RgAgentKeepCache = @{ sig = $sig; items = $items.ToArray() }
+    return $script:RgAgentKeepCache.items
+}
+function Get-RgAgentKeep {
+    $now = (Get-Date).ToUniversalTime()
+    return @(Read-RgAgentKeepRaw | Where-Object { $_.exp -gt $now })
+}
+function Write-RgAgentKeep($Items) {
+    $out = @($Items | ForEach-Object { [ordered]@{ target = $_.target; reason = $_.reason; confidence = $_.confidence; createdUtc = $_.createdUtc; expiresUtc = $_.expiresUtc } })
+    Write-RgFileAtomic (Get-RgAgentKeepPath) (ConvertTo-Json -InputObject ([ordered]@{ version = 1; items = $out }) -Depth 4)
+    $script:RgAgentKeepCache = $null
+}
+# Mục agent-giữ còn hạn khớp đường dẫn (cùng quy tắc hai chiều với protectPaths), hoặc $null.
+function Get-RgAgentKeepMatch([string]$Path) {
+    foreach ($e in @(Get-RgAgentKeep)) { if (Test-RgPathInList $Path @($e.target)) { return $e } }
+    return $null
+}
+# Trả $true nếu vừa thêm. Đã giữ thì KHÔNG gia hạn (hết hạn tự được đánh giá lại); đầu vào lạ bị bỏ.
+function Add-RgAgentKeep([string]$Path, [string]$Reason, [string]$Confidence) {
+    $p = $Path.TrimEnd('\')
+    if (-not $p -or $p.Length -gt 260 -or $p -match '[\x00-\x1f]' -or -not [IO.Path]::IsPathRooted($p)) { return $false }
+    $live = @(Get-RgAgentKeep)
+    if (@($live | Where-Object { $_.target -ieq $p }).Count -gt 0 -or $live.Count -ge $script:RgAgentKeepMax) { return $false }
+    $now = (Get-Date).ToUniversalTime()
+    $r = ([string]$Reason -replace '[\x00-\x1f]', ' ').Trim(); if ($r.Length -gt 200) { $r = $r.Substring(0, 200) }
+    $live += [pscustomobject]@{ target = $p; reason = $r; confidence = $Confidence; createdUtc = $now.ToString('o'); expiresUtc = $now.AddDays($script:RgAgentKeepDays).ToString('o') }
+    Write-RgAgentKeep $live
+    return $true
+}
+# Bỏ mục agent-giữ có target đúng bằng $Target (lấy từ Get-RgAgentKeepMatch).
+function Remove-RgAgentKeep([string]$Target) {
+    $t = $Target.TrimEnd('\')
+    $live = @(Get-RgAgentKeep)
+    $rest = @($live | Where-Object { $_.target -ine $t })
+    if ($rest.Count -eq $live.Count) { return $false }
+    Write-RgAgentKeep $rest
+    return $true
 }
 
 function Test-RgProcessProtected([string]$Name, $Policy) {
@@ -287,6 +356,7 @@ function Select-RgAutoItems($Candidates, $Policy, $Stress) {
             }
         }
         if ($c.action -eq 'report') { $why = 'chỉ báo cáo' }
+        elseif ([bool]$c.young) { $why = 'mục dưới ngưỡng tuổi: chỉ người duyệt mới được xoá' }
         elseif ($stressWhy) { $why = $stressWhy }
         elseif ($c.action -eq 'kill' -and -not $Stress.ramStress) { $why = 'RAM chưa tới ngưỡng kích hoạt' }
         elseif ([string]$Policy.categories[[string]$c.kind] -ne 'auto') { $why = "nhóm '$($c.kind)' đặt ở chế độ $($Policy.categories[[string]$c.kind])" }

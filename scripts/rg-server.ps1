@@ -315,13 +315,16 @@ try {
                     $items = @()
                     if ($cd) {
                         $items = @($cd.items | ForEach-Object {
-                                $prot = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $pol } else { Test-RgPathProtected ([string]$_.path) $pol }
+                                $userProt = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $pol } else { Test-RgPathUserProtected ([string]$_.path) $pol }
+                                $ak = if ($_.kind -eq 'process' -or $userProt) { $null } else { Get-RgAgentKeepMatch ([string]$_.path) }
+                                $prot = $userProt -or $ak
                                 [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; level = $_.level; path = $_.path; drive = (Get-RgPathDrive ([string]$_.path)); pid = $_.pid; name = $_.name; sizeBytes = $_.sizeBytes
-                                    ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; canArchive = (Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
+                                    protectedBy = $(if ($userProt) { 'user' } elseif ($ak) { 'agent' } else { $null }); keepReason = $(if ($ak) { $ak.reason } else { $null }); keepUntilUtc = $(if ($ak) { $ak.expiresUtc } else { $null })
+                                    ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; young = [bool]$_.young; canArchive =(Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
                                     setting = $(if ($pol.categories.Contains([string]$_.kind)) { $pol.categories[[string]$_.kind] } else { 'keep' }) }
                             })
                     }
-                    Send-Json $ctx ([ordered]@{ finishedUtc = $(if ($cd) { $cd.finishedUtc } else { $null }); seconds = $(if ($cd) { $cd.seconds } else { $null }); items = $items; progress = (Get-RgJobState 'scan-candidates.progress.json') })
+                    Send-Json $ctx ([ordered]@{ finishedUtc = $(if ($cd) { $cd.finishedUtc } else { $null }); seconds = $(if ($cd) { $cd.seconds } else { $null }); maxAgeHours = (Get-RgScanMaxAgeHours); items = $items; progress = (Get-RgJobState 'scan-candidates.progress.json') })
                 }
                 elseif ($path -eq '/api/candidates/scan' -and $req.HttpMethod -eq 'POST') {
                     if (Test-RgJobRunning 'scan-candidates.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
@@ -422,6 +425,23 @@ try {
                 elseif ($path -eq '/api/agent/run' -and $req.HttpMethod -eq 'POST') {
                     if (Test-RgJobRunning 'agent.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
                     else { Start-RgJob 'rg-agent.ps1'; Send-Json $ctx ([ordered]@{ ok = $true }) }
+                }
+                elseif ($path -eq '/api/agent/keep/release' -and $req.HttpMethod -eq 'POST') {
+                    # Bỏ giữ một mục do agent bảo vệ. Chỉ nhận key (không nhận đường dẫn từ client). Không cần PIN: chỉ đưa mục về trạng thái
+                    # trước khi agent đánh giá, không cấp thêm quyền xoá nào so với policy người dùng đã đặt.
+                    try {
+                        $b = Read-RgBody $req
+                        $t = Read-RgStateText 'scan-candidates.json'
+                        $cd = $null; if ($t) { try { $cd = ConvertFrom-Json $t } catch { } }
+                        $c = if ($cd) { @($cd.items | Where-Object { $_.key -eq [string]$b.key }) | Select-Object -First 1 } else { $null }
+                        $m = if ($c -and $c.kind -ne 'process') { Get-RgAgentKeepMatch ([string]$c.path) } else { $null }
+                        if (-not $m) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Mục này không do agent giữ (hoặc đã hết hạn).' }) 404 }
+                        else {
+                            [void](Remove-RgAgentKeep ([string]$m.target))
+                            Write-RgLog 'agent-keep-release' ([ordered]@{ key = [string]$b.key })
+                            Send-Json $ctx ([ordered]@{ ok = $true })
+                        }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
                 }
                 elseif ($path -eq '/api/agent/last') {
                     $t = Read-RgStateText 'agent-last.json'; if (-not $t) { $t = 'null' }

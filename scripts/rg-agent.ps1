@@ -64,9 +64,10 @@ function New-RgAgentPayload {
         $sorted = @($cd.items | Sort-Object { [long]$_.sizeBytes } -Descending | Select-Object -First 50)
         $cands = @($sorted | ForEach-Object {
                 $tgt = if ($_.kind -eq 'process') { "$($_.name) (pid $($_.pid))" } else { (ConvertTo-RgSafeText ([string]$_.path)) }
-                $prot = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $policy } else { Test-RgPathProtected ([string]$_.path) $policy }
-                [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; target = $tgt; sizeMB = [math]::Round([double]$_.sizeBytes / 1MB, 0); idleDays = $_.ageDays
-                    toolRisk = $_.risk; toolReason = $_.reason; userProtected = [bool]$prot }
+                $prot = if ($_.kind -eq 'process') { Test-RgProcessProtected ([string]$_.name) $policy } else { Test-RgPathUserProtected ([string]$_.path) $policy }
+                $ak = if ($_.kind -eq 'process') { $null } else { Get-RgAgentKeepMatch ([string]$_.path) }
+                [ordered]@{ key = $_.key; kind = $_.kind; action = $_.action; target = $tgt; sizeMB = [math]::Round([double]$_.sizeBytes / 1MB, 0); idleDays = $_.ageDays; belowAgeFloor = [bool]$_.young
+                    toolRisk = $_.risk; toolReason = $_.reason; userProtected = [bool]$prot; agentKept = [bool]$ak }
             })
     }
     return [ordered]@{
@@ -91,8 +92,10 @@ Bạn là trợ lý đánh giá tài nguyên máy Windows cho công cụ Resourc
 
 Quy tắc bắt buộc:
 - Chỉ dùng dữ liệu JSON bên dưới. Không bịa số liệu, không suy đoán nội dung file (bạn chỉ thấy tên, kích thước, số ngày không dùng).
-- "recommendations[].key" CHỈ được lấy từ "cleanupCandidates[].key". Mục có userProtected=true thì verdict phải là "keep".
+- "recommendations[].key" CHỈ được lấy từ "cleanupCandidates[].key". Mục có userProtected=true hoặc agentKept=true thì verdict phải là "keep".
+- Verdict "keep" kèm confidence "high" sẽ được công cụ GHI NHẬN thành bảo vệ có thời hạn 30 ngày: mục đó bị ẩn khỏi danh sách dọn và không bao giờ tự dọn (chỉ áp cho đường dẫn, không áp cho tiến trình). Chỉ dùng "keep"+"high" khi có tín hiệu rõ là nên giữ: dự án đang làm (số ngày không dùng thấp, node_modules/bin/obj của repo gần đây), dữ liệu khó hoặc đắt để sinh lại, hoặc rủi ro mất dữ liệu cao. Chưa chắc thì dùng confidence "medium"/"low" hoặc verdict "review". Mục thật sự rác, sinh lại dễ thì "clean", đừng "keep" cho an toàn.
 - Chỉ đề xuất verdict "clean" cho mục có action là delete hoặc kill. Mục action=report chỉ được "keep" hoặc "review".
+- Số ngày không dùng chỉ là MỘT tín hiệu, không phải điều kiện quyết định. Mục có belowAgeFloor=true chưa đủ tuổi theo policy nhưng vẫn được đưa vào để bạn cân nhắc: có thể "clean" nếu loại mục sinh lại được dễ (build output, cache tải lại được), dung lượng đáng kể và disk đang thiếu; nên "keep"/"review" nếu có dấu hiệu đang dùng (tiến trình build/dev đang chạy, node_modules của dự án đang làm, rủi ro cao). Với mục belowAgeFloor, "reason" phải nêu lý do vì sao tuổi thấp vẫn xoá được (hoặc không). Người dùng luôn là người duyệt cuối cùng; mục này không bao giờ tự xoá.
 - Ưu tiên (priority 1 = làm trước, 5 = sau cùng) theo dung lượng thu hồi, mức rủi ro và số ngày không dùng.
 - "findings": các nhân tố chiếm ổ đĩa lớn/bất thường (disks[].categories, mỗi phần tử là một ổ; so sánh giữa các ổ khi có nhiều ổ), tiến trình ngốn CPU/RAM bất thường, dữ liệu quét đã cũ hoặc thiếu. Mỗi finding nêu rõ con số.
 - "policySuggestions": mỗi phần tử là MỘT THAY ĐỔI so với policySummary.categories hiện tại cho kind (temp-entry, dotnet-artifact, cache-aged, node_modules, process); "setting" là chế độ MỚI (auto = tự dọn khi có áp lực, ask = chỉ hỏi tay, keep = không bao giờ đụng). Chỉ đưa khi setting KHÁC chế độ hiện tại và có lý do từ dữ liệu; thường để trống. "reason" giải thích vì sao đổi, không nhắc lại chế độ cũ.
@@ -133,21 +136,28 @@ function Invoke-RgAgentEval {
 
     $so = $res.structured_output
     $keys = @{}; foreach ($c in @($payload.cleanupCandidates)) { $keys[[string]$c.key] = $c }
-    $kept = @(); $dropped = 0
+    $kept = @(); $dropped = 0; $keptApplied = 0
+    $rawByKey = @{}   # đường dẫn thật (payload đã thay tên tài khoản bằng ~); chỉ lấy từ file quét của tool, không từ agent
+    foreach ($ri in @((Read-RgJsonState 'scan-candidates.json').items)) { $rawByKey[[string]$ri.key] = $ri }
     foreach ($r in @($so.recommendations)) {
         $c = $keys[[string]$r.key]
         if (-not $c) { $dropped++; continue }
         $verdict = [string]$r.verdict
-        if ($c.userProtected) { $verdict = 'keep' }
+        $autoKept = $false
+        if ($c.userProtected -or $c.agentKept) { $verdict = 'keep' }
         elseif ($verdict -eq 'clean' -and $c.action -eq 'report') { $verdict = 'review' }
-        $kept += [pscustomobject]@{ key = $r.key; verdict = $verdict; priority = [int][math]::Min(5, [math]::Max(1, [int]$r.priority)); confidence = $r.confidence; reason = $r.reason }
+        elseif ($verdict -eq 'keep' -and [string]$r.confidence -eq 'high' -and $c.kind -ne 'process' -and $c.action -eq 'delete') {
+            $ri = $rawByKey[[string]$r.key]
+            if ($ri -and (Add-RgAgentKeep ([string]$ri.path) ([string]$r.reason) 'high')) { $autoKept = $true; $keptApplied++ }
+        }
+        $kept += [pscustomobject]@{ key = $r.key; verdict = $verdict; priority = [int][math]::Min(5, [math]::Max(1, [int]$r.priority)); confidence = $r.confidence; reason = $r.reason; autoKept = $autoKept }
     }
     $curCats = (Get-RgPolicy).categories
     $pol = @($so.policySuggestions | Where-Object { ($script:RgPolicyKinds -contains [string]$_.kind) -and ([string]$curCats[[string]$_.kind] -ne [string]$_.setting) })
     return [ordered]@{
         ok = $true; finishedUtc = (Get-Date).ToUniversalTime().ToString('o'); model = $Model; effort = $Effort
         costUsd = $res.total_cost_usd; durationMs = $res.duration_ms; payloadBytes = $bytes.Length
-        result = [ordered]@{ summary = $so.summary; severity = $so.severity; findings = @($so.findings); recommendations = $kept; policySuggestions = $pol; droppedUnknownKeys = $dropped }
+        result = [ordered]@{ summary = $so.summary; severity = $so.severity; findings = @($so.findings); recommendations = $kept; policySuggestions = $pol; droppedUnknownKeys = $dropped; keptApplied = $keptApplied }
     }
 }
 
@@ -163,7 +173,7 @@ try {
     Set-Job 'running' 'đang gọi claude (haiku, high)'
     $r = Invoke-RgAgentEval -TimeoutSec $TimeoutSec -MaxBudgetUsd $MaxBudgetUsd -Model $Model -Effort $Effort
     Write-RgFileAtomic (Join-Path (Initialize-RgHome) 'state\agent-last.json') (ConvertTo-Json -InputObject $r -Depth 8 -Compress)
-    Write-RgLog 'agent-eval' ([ordered]@{ ok = $true; costUsd = $r.costUsd; durationMs = $r.durationMs; payloadBytes = $r.payloadBytes })
+    Write-RgLog 'agent-eval' ([ordered]@{ ok = $true; costUsd = $r.costUsd; durationMs = $r.durationMs; payloadBytes = $r.payloadBytes; keptApplied = $r.result.keptApplied })
     Set-Job 'done' ('xong, chi phí $' + $r.costUsd)
 }
 catch {
