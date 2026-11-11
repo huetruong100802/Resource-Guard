@@ -12,19 +12,36 @@
   RG.$$ = function (s, el) { return Array.prototype.slice.call((el || document).querySelectorAll(s)); };
   RG.esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
   RG.clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+  /* Số có dấu phẩy thập phân kiểu Việt Nam, đúng d chữ số lẻ. Mọi chỗ in số cho người dùng đi qua đây. */
+  RG.fmtNum = function (v, d) {
+    if (v == null || isNaN(v)) return '–';
+    d = d == null ? 1 : d;
+    var k = Math.pow(10, d), r = Math.round(Math.abs(+v) * k), s = String(Math.floor(r / k)), f = String(r % k);
+    while (f.length < d) f = '0' + f;
+    return (v < 0 && r ? '-' : '') + s + (d ? ',' + f : '');
+  };
+  /* Số cho thuộc tính SVG: dấu chấm, làm tròn 1 chữ số lẻ. */
+  RG.n1 = function (x) { return String(Math.round(+x * 10) / 10); };
   RG.fmtBytes = function (b) {
     if (b == null || isNaN(b)) return '–';
     var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0, v = +b;
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-    return String(i >= 2 ? v.toFixed(v >= 100 ? 0 : 1) : Math.round(v)).replace('.', ',') + ' ' + u[i];
+    return (i >= 2 ? RG.fmtNum(v, v >= (i === 2 ? 10 : 100) ? 0 : 1) : String(Math.round(v))) + ' ' + u[i];
   };
-  RG.fmtGB = function (g) { if (g == null || isNaN(g)) return '–'; return String(Math.round(g * 10) / 10).replace('.', ',') + ' GB'; };
+  /* Gigabyte; dưới 0,05 GB đổi sang MB để không bao giờ in "0 GB" cho số khác 0. */
+  RG.fmtGB = function (g) {
+    if (g == null || isNaN(g)) return '–';
+    if (g === 0) return '0 GB';
+    if (Math.abs(g) < 0.05) return RG.fmtBytes(g * 1073741824);
+    return RG.fmtNum(g, 1) + ' GB';
+  };
+  RG.fmtPct = function (n) { if (n == null || isNaN(n)) return '–'; return (n > 0 && n < 10 ? RG.fmtNum(n, 1) : String(Math.round(n))) + '%'; };
   RG.pad2 = function (n) { return (n < 10 ? '0' : '') + n; };
   /* Mốc thời gian -> ms. Chuỗi "yyyy-MM-dd HH:mm:ss" (metrics) là giờ địa phương; chuỗi ISO có Z là UTC. */
   RG.tsMs = function (ts) { if (ts == null) return NaN; if (typeof ts === 'number') return ts; var s = String(ts); return Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d/.test(s) ? s.replace(' ', 'T') : s); };
   /* Giờ địa phương dd/MM HH:mm cho mọi kiểu mốc thời gian. */
   RG.fmtLocal = function (ts) { var t = RG.tsMs(ts); if (isNaN(t)) return '–'; var d = new Date(t); return RG.pad2(d.getDate()) + '/' + RG.pad2(d.getMonth() + 1) + ' ' + RG.pad2(d.getHours()) + ':' + RG.pad2(d.getMinutes()); };
-  RG.fmtAge = function (d) { if (d == null) return '–'; if (d < 1) return 'hôm nay'; if (d < 60) return d + ' ngày'; if (d < 730) return Math.round(d / 30) + ' tháng'; return (d / 365).toFixed(1) + ' năm'; };
+  RG.fmtAge = function (d) { if (d == null) return '–'; if (d < 1) return 'hôm nay'; if (d < 60) return d + ' ngày'; if (d < 730) return Math.round(d / 30) + ' tháng'; return RG.fmtNum(d / 365, 1) + ' năm'; };
   RG.daysSince = function (iso) { if (!iso) return null; var t = Date.parse(iso); return isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 864e5)); };
   RG.hhmm = function (ts) { return (ts || '').slice(11, 19); };
   RG.fmtDur = function (sec) { sec = Math.max(0, Math.round(sec || 0)); var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60); return d ? d + ' ngày ' + h + ' giờ' : (h ? h + ' giờ ' + m + ' phút' : m + ' phút'); };
@@ -126,14 +143,34 @@
     regen: function (r) { return RG.human.regens[r] || r || '–'; },
     risks: { low: 'Rủi ro thấp', medium: 'Rủi ro vừa', high: 'Rủi ro cao' },
     risk: function (r) { return RG.human.risks[r] || r || '–'; },
-    // Câu cho người dùng dựng từ số liệu có cấu trúc của `live` (không phân tích chuỗi reasons tiếng Anh).
-    reasons: function (l) {
+    // Vai trò tiến trình (identity.role, hợp đồng P2) và nhóm cũ (group) bằng tiếng Việt; không in giá trị thô.
+    roles: { build: 'Build', test: 'Kiểm thử', devserver: 'Máy chủ dev', compiler: 'Trình biên dịch', langserver: 'Dịch vụ ngôn ngữ', packagemgr: 'Trình quản lý gói',
+      'runtime-app': 'Ứng dụng đang chạy', browser: 'Trình duyệt', editor: 'Trình soạn thảo', agent: 'Trợ lý AI', infra: 'Hạ tầng', system: 'Hệ thống Windows',
+      security: 'Bảo mật', app: 'Ứng dụng', unknown: 'Chưa nhận diện' },
+    role: function (r) { return RG.human.roles[r] || 'Khác'; },
+    groups: { agent: 'Trợ lý AI', infra: 'Hạ tầng', test: 'Kiểm thử', build: 'Build', dev: 'Công cụ lập trình', other: 'Khác', app: 'Ứng dụng', system: 'Hệ thống' },
+    group: function (g) { return RG.human.groups[g] || 'Khác'; },
+    // Lý do trạng thái kèm màn liên quan: [{ text, go }]. `go` là tên trang để badge dẫn tới.
+    reasonItems: function (l) {
       var out = []; if (!l) return out;
-      if (RG.ramState(l.availRamGB) !== 'Normal') out.push('RAM còn ' + RG.fmtGB(l.availRamGB) + ' trong tổng ' + RG.fmtGB(l.totalRamGB));
-      RG.driveList().forEach(function (d) { if (d.state && d.state !== 'Normal') out.push('Ổ ' + d.drive + ' còn ' + RG.fmtGB(d.freeGB)); });
-      if (RG.commitState(l.commitPct) !== 'Normal') out.push('Bộ nhớ cam kết đã dùng ' + Math.round(l.commitPct) + '%');
+      if (RG.ramState(l.availRamGB) !== 'Normal') out.push({ text: 'RAM còn ' + RG.fmtGB(l.availRamGB) + ' trong tổng ' + RG.fmtGB(l.totalRamGB), go: 'mem' });
+      RG.driveList().forEach(function (d) { if (d.state && d.state !== 'Normal') out.push({ text: 'Ổ ' + d.drive + ' còn ' + RG.fmtGB(d.freeGB), go: 'disk' }); });
+      if (RG.commitState(l.commitPct) !== 'Normal') out.push({ text: 'Bộ nhớ cam kết đã dùng ' + RG.fmtPct(l.commitPct), go: 'mem' });
       return out;
-    }
+    },
+    // Câu cho người dùng dựng từ số liệu có cấu trúc của `live` (không phân tích chuỗi reasons tiếng Anh).
+    reasons: function (l) { return RG.human.reasonItems(l).map(function (x) { return x.text; }); }
+  };
+
+  /* Biểu tượng "?" có giải thích dài (title + aria-label); thay cho đoạn hướng dẫn trên màn hình. */
+  RG.help = function (text) { var t = RG.esc(text); return '<span class="help" tabindex="0" role="img" title="' + t + '" aria-label="' + t + '">?</span>'; };
+  /* Trạng thái trống thống nhất. o = { icon, title, action:{ label, onClick }, compact }. */
+  RG.empty = function (el, o) {
+    o = o || {};
+    el.innerHTML = '<div class="empty-state' + (o.compact ? ' compact' : '') + '">' + (o.icon && !o.compact ? RG.icon(o.icon) : '') + '<div class="et">' + RG.esc(o.title || '') + '</div>' +
+      (o.action ? '<button class="btn sm">' + RG.esc(o.action.label) + '</button>' : '') + '</div>';
+    if (o.action) { var b = RG.$('button', el); if (b) b.onclick = o.action.onClick; }
+    return el;
   };
 
   /* ---------- Trạng thái theo ngưỡng ---------- */
@@ -152,16 +189,33 @@
     var get = o.fn || function (r) { return r[o.key]; };
     var pts = data.filter(function (r) { return get(r) != null; });
     if (o.n && pts.length > o.n) pts = pts.slice(-o.n);
-    if (pts.length < 2) { svg.innerHTML = axes ? '<text x="' + pl + '" y="' + (H / 2) + '">Đang thu thập dữ liệu…</text>' : ''; svg.__ctx = null; return; }
+    // Ít điểm hơn minPoints (mặc định 12): thay biểu đồ bằng một dòng trạng thái thu thập (L5), không vẽ đường phẳng chiếm chỗ.
+    var minPts = Math.max(2, o.minPoints == null ? (axes ? 12 : 2) : o.minPoints), holder = svg.parentNode;
+    var note = holder && holder.querySelector ? holder.querySelector('.chart-empty[data-for="' + (svg.id || '') + '"]') : null;
+    if (pts.length < minPts) {
+      svg.__ctx = null; svg.innerHTML = '';
+      if (axes && holder) {
+        if (!note) { note = document.createElement('div'); note.className = 'chart-empty'; note.setAttribute('data-for', svg.id || ''); holder.insertBefore(note, svg); }
+        RG.empty(note, { title: 'Đang thu thập dữ liệu (' + pts.length + '/' + minPts + ' mẫu)', compact: true });
+        svg.style.display = 'none';
+      }
+      return;
+    }
+    svg.style.display = '';
+    if (note && note.parentNode) note.parentNode.removeChild(note);
     var min = o.min || 0, hi = o.max;
+    if (o.fit && o.min == null && o.max == null) {   // trục Y co quanh dữ liệu để dao động nhỏ vẫn nhìn thấy
+      var lo2 = Infinity, hi2 = -Infinity; pts.forEach(function (r) { var v = +get(r); if (v < lo2) lo2 = v; if (v > hi2) hi2 = v; });
+      var pad = Math.max((hi2 - lo2) * 0.15, Math.abs(hi2) * 0.02, 0.1); min = Math.max(0, lo2 - pad); hi = hi2 + pad;
+    }
     if (hi == null) { hi = 0; pts.forEach(function (r) { hi = Math.max(hi, +get(r)); }); (o.lines || []).forEach(function (l) { hi = Math.max(hi, l.v); }); if (o.dragLine) hi = Math.max(hi, o.dragLine.v); hi = hi * 1.1 || 1; }
     var X = function (i) { return pl + i * (W - pl - pr) / (pts.length - 1); };
     var Y = function (v) { return pt + (H - pt - pb) * (1 - (Math.min(Math.max(v, min), hi) - min) / (hi - min)); };
     var s = '';
-    if (axes) [0, 0.5, 1].forEach(function (f) { var v = min + (hi - min) * f; s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="' + RG.css('--line') + '"/><text x="2" y="' + (Y(v) + 3) + '">' + (Math.round(v * 10) / 10) + '</text>'; });
+    if (axes) [0, 0.5, 1].forEach(function (f) { var v = min + (hi - min) * f; s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="' + RG.css('--line') + '"/><text x="2" y="' + (Y(v) + 3) + '">' + RG.fmtNum(v, Math.abs(v) >= 10 ? 0 : 1) + (o.unit === '%' ? '%' : '') + '</text>'; });
     (o.lines || []).forEach(function (l) { s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(l.v) + '" y2="' + Y(l.v) + '" stroke="' + l.c + '" stroke-dasharray="4 3"/>'; });
-    var p = pts.map(function (r, i) { return X(i).toFixed(1) + ',' + Y(+get(r)).toFixed(1); }).join(' ');
-    if (o.area) s += '<polygon points="' + pl + ',' + (H - pb) + ' ' + p + ' ' + X(pts.length - 1).toFixed(1) + ',' + (H - pb) + '" fill="' + o.color + '" opacity=".16"/>';
+    var p = pts.map(function (r, i) { return RG.n1(X(i)) + ',' + RG.n1(Y(+get(r))); }).join(' ');
+    if (o.area) s += '<polygon points="' + pl + ',' + (H - pb) + ' ' + p + ' ' + RG.n1(X(pts.length - 1)) + ',' + (H - pb) + '" fill="' + o.color + '" opacity=".16"/>';
     s += '<polyline fill="none" stroke="' + o.color + '" stroke-width="' + (axes ? 2 : 1.4) + '" stroke-linejoin="round" points="' + p + '"/>';
     var xf = o.xfmt || RG.hhmm;
     if (axes) s += '<text x="' + pl + '" y="' + (H - 2) + '">' + xf(pts[0].ts) + '</text><text x="' + (W - pr) + '" y="' + (H - 2) + '" text-anchor="end">' + xf(pts[pts.length - 1].ts) + '</text>';
@@ -173,7 +227,7 @@
       o.markers.forEach(function (m, mi) {
         var t = RG.tsMs(m.ts); if (isNaN(t) || t < tms[0] - step || t > tms[tms.length - 1] + step) return;
         var bi = 0, bd = Infinity; for (var q = 0; q < tms.length; q++) { var dd = Math.abs(tms[q] - t); if (dd < bd) { bd = dd; bi = q; } }
-        var mx = X(bi).toFixed(1), c = RG.css(mcol[m.type] || '--mut') || RG.css('--mut');
+        var mx = RG.n1(X(bi)), c = RG.css(mcol[m.type] || '--mut') || RG.css('--mut');
         s += '<g class="mk" data-mi="' + mi + '" tabindex="0" role="button" aria-label="' + RG.esc(m.label || m.type) + '" style="cursor:pointer"><title>' + RG.esc(m.label || m.type) + '</title>' +
           '<line x1="' + mx + '" x2="' + mx + '" y1="' + (pt + 8) + '" y2="' + (H - pb) + '" stroke="' + c + '" stroke-dasharray="2 3" opacity=".7"/>' +
           '<circle cx="' + mx + '" cy="' + (pt + 6) + '" r="5.5" fill="' + c + '" stroke="var(--panel)" stroke-width="1.5"/><rect x="' + (mx - 9) + '" y="' + pt + '" width="18" height="' + (H - pt - pb) + '" fill="transparent"/></g>';
@@ -365,6 +419,7 @@
       case 'auto-run': return (d.mode === 'dry-run' ? 'Chạy thử tự dọn: sẽ dọn ' : 'Tự dọn: ') + d.items + ' mục' + (d.mode === 'dry-run' ? '' : ', giải phóng ' + RG.fmtBytes(d.freedBytes));
       case 'manual-cleanup': return 'Dọn tay: ' + d.items + ' mục, giải phóng ' + RG.fmtBytes(d.freedBytes);
       case 'policy-change': return 'Đổi chính sách (chế độ ' + (H.modes[d.mode] || d.mode) + ')';
+      case 'thresholds-change': return 'Đổi ngưỡng trạng thái (RAM, ổ đĩa, bộ nhớ cam kết)';
       case 'proc-priority': return (String(d.to) === 'Normal' ? 'Trả ưu tiên bình thường: ' : 'Hạ ưu tiên: ') + d.name;
       case 'agent-eval': return 'Trợ lý AI đánh giá xong';
       default: return e.event;
@@ -383,7 +438,7 @@
   RG.loadAgent = function () { return RG.api('/api/agent/last').then(function (j) { S.agent = j.last; if (j.progress) S.jobs.agent = j.progress; }); };
 
   RG.updateNavBadges = function () {
-    var el = RG.$('#navCleanCnt'); if (!el) return;
+    var el = RG.$('#navDiskCnt'); if (!el) return;
     var n = S.cands ? S.cands.items.filter(function (i) { return i.action !== 'report' && !i.protected; }).length : 0;
     el.textContent = n; el.hidden = n === 0;
   };

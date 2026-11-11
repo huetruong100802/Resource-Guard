@@ -154,7 +154,7 @@ function Get-RgRecentEvents([int]$Max = 30) {
     $dir = Join-Path (Initialize-RgHome) 'logs'
     $out = @()
     foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'rg-*.jsonl' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 3)) {
-        foreach ($l in @(Get-Content -LiteralPath $f.FullName -Tail 400 -Encoding UTF8 | Where-Object { $_ -match '"event":"(state-change|would-kill-orphans|settings-change|watcher-start|server-start|auto-run|manual-cleanup|policy-change|agent-eval|proc-priority)"' })) {
+        foreach ($l in @(Get-Content -LiteralPath $f.FullName -Tail 400 -Encoding UTF8 | Where-Object { $_ -match '"event":"(state-change|would-kill-orphans|settings-change|watcher-start|server-start|auto-run|manual-cleanup|policy-change|thresholds-change|agent-eval|proc-priority)"' })) {
             try { $out += ConvertFrom-Json $l } catch { }
         }
         if ($out.Count -ge $Max) { break }
@@ -269,7 +269,9 @@ try {
                 }
                 elseif ($path -eq '/api/advice' -and $req.HttpMethod -eq 'GET') {
                     $dr = if ($live -and $live.drives) { @($live.drives) } else { $null }
-                    Send-Json $ctx (Get-RgAdvice -Drives $dr)
+                    $ramIn = $(if ($live -and $null -ne $live.availRamGB) { [pscustomobject]@{ availGB = [double]$live.availRamGB; totalGB = [double]$live.totalRamGB } } else { $null })
+                    $wlIn = @(); try { $wlIn = @(Get-RgLiveWorkloads) } catch { }
+                    Send-Json $ctx (Get-RgAdvice -Drives $dr -Ram $ramIn -Workloads $wlIn)
                 }
                 elseif ($path -eq '/api/process/history' -and $req.HttpMethod -eq 'GET') {
                     $pn = ([string]$req.QueryString['name']).ToLowerInvariant()
@@ -283,12 +285,45 @@ try {
                 }
                 elseif ($path -eq '/api/settings' -and $req.HttpMethod -eq 'POST') {
                     $body = (New-Object IO.StreamReader($req.InputStream, [Text.Encoding]::UTF8)).ReadToEnd()
+                    $replied = $false
                     try {
-                        $v = [int](ConvertFrom-Json $body).intervalSec
-                        $s = Set-RgSettings $v
-                        $nextSample = (Get-Date).AddSeconds($s.intervalSec)
-                        Send-Json $ctx ([ordered]@{ ok = $true; intervalSec = $s.intervalSec })
-                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                        $sb = ConvertFrom-Json $body
+                        $res = [ordered]@{ ok = $true }
+                        # Ngưỡng trạng thái (P4): kiểm tra thứ tự/khoảng; nới lỏng khi tự động hoá đang Bật thì cần PIN như chính sách.
+                        if ($sb.PSObject.Properties['thresholds'] -and $null -ne $sb.thresholds) {
+                            $cfgNow = Get-RgConfig
+                            $chk = Test-RgThresholdInput $sb.thresholds $cfgNow
+                            if (-not $chk.ok) { Send-Json $ctx ([ordered]@{ ok = $false; error = $chk.error }) 400; $replied = $true }
+                            else {
+                                $oldT = (Test-RgThresholdInput ([pscustomobject]@{}) $cfgNow).merged
+                                if ([string](Get-RgPolicy).mode -eq 'on' -and (Test-RgThresholdsLoosened $oldT $chk.merged)) {
+                                    $pinB = $(if ($sb.PSObject.Properties['pin']) { [string]$sb.pin } else { '' })
+                                    if (-not (Test-RgPinConfigured)) { Send-Json $ctx ([ordered]@{ ok = $false; code = 'pin-not-set'; error = 'Chưa đặt PIN. Đặt ở terminal: resource-manager.ps1 serve setpin' }) 403; $replied = $true }
+                                    elseif ([string]::IsNullOrEmpty($pinB)) { Send-Json $ctx ([ordered]@{ ok = $false; code = 'pin-required'; error = 'Cần PIN để nới lỏng ngưỡng khi tự động hoá đang Bật.' }) 403; $replied = $true }
+                                    else {
+                                        $pr = Test-RgPin $pinB
+                                        if (-not $pr.ok) {
+                                            $code = if ($pr.locked) { 'pin-locked' } else { 'pin-wrong' }
+                                            Send-Json $ctx ([ordered]@{ ok = $false; code = $code; retryAfterSec = $pr.retryAfterSec; error = $(if ($pr.locked) { "Sai PIN quá nhiều lần, thử lại sau $($pr.retryAfterSec) giây." } else { 'PIN không đúng.' }) }) 403; $replied = $true
+                                        }
+                                    }
+                                }
+                                if (-not $replied) {
+                                    Save-RgThresholds $chk.merged
+                                    Write-RgLog 'thresholds-change' ([ordered]@{ ramAvailGB = $chk.merged.ramAvailGB; diskFreeGB = $chk.merged.diskFreeGB; commitPct = $chk.merged.commitPct })
+                                    $res['thresholds'] = (Get-RgThresholds)
+                                }
+                            }
+                        }
+                        if (-not $replied) {
+                            if ($sb.PSObject.Properties['intervalSec'] -and $null -ne $sb.intervalSec) {
+                                $s = Set-RgSettings ([int]$sb.intervalSec)
+                                $nextSample = (Get-Date).AddSeconds($s.intervalSec)
+                                $res['intervalSec'] = $s.intervalSec
+                            } elseif (-not $sb.PSObject.Properties['thresholds']) { throw 'Thiếu intervalSec hoặc thresholds.' }
+                            Send-Json $ctx $res
+                        }
+                    } catch { if (-not $replied) { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 } }
                 }
                 elseif ($path -match '^/static/([a-z0-9._-]+\.(css|js|svg))$' -and $req.HttpMethod -eq 'GET') {
                     $f = Join-Path $script:UiDir $Matches[1]
@@ -299,8 +334,16 @@ try {
                     $pol = Get-RgPolicy
                     $pctx = New-RgProcContext -Policy $pol
                     $tbl = @{}; foreach ($t in @($script:RgTableCache)) { if ($t) { $tbl[[int]$t.Pid] = $t } }
+                    $idCfg = Get-RgConfig
+                    $idRoots = @(Get-RgWorkspaceRoots $idCfg.cleanup)
+                    $idSvc = Get-RgServiceMap
                     $rows = @($script:RgLastProcs | ForEach-Object {
                             $tr = $tbl[[int]$_.pid]
+                            $idRow = $(if ($tr) { $tr } else { [pscustomobject]@{ Pid = [int]$_.pid; ParentPid = 0; Name = [string]$_.name; Start = ''; Cmd = ''; Group = [string]$_.group } })
+                            $ident = $null
+                            try { $ident = Get-RgProcIdentity $idRow $tbl $idCfg $idSvc $idRoots } catch { }
+                            $cmdShown = Hide-RgCmdSecret $(if ($tr) { [string]$tr.Cmd } else { '' })
+                            if ($cmdShown.Length -gt 600) { $cmdShown = $cmdShown.Substring(0, 600) + '…' }
                             $st = if ($tr) { [string]$tr.Start } else { '' }
                             $low = ($st -ne '') -and $pctx.lowered.ContainsKey("$([int]$_.pid)|$st")
                             $why = ''
@@ -308,9 +351,10 @@ try {
                             elseif ($low) { $why = 'Đã hạ ưu tiên rồi; có thể trả về bình thường.' }
                             else { $why = Get-RgProcLowerVerdict ([int]$_.pid) ([string]$_.name) ([string]$_.group) $(if ($tr) { [string]$tr.Cmd } else { '' }) $_.session $pctx }
                             [ordered]@{ pid = $_.pid; name = $_.name; cpu = $_.cpu; ramMB = $_.ramMB; group = $_.group; agent = $_.agent; protected = (Test-RgProcessProtected ([string]$_.name) $pol)
-                                start = $st; lowered = $low; canLower = ($why -eq ''); whyNot = $why }
+                                start = $st; lowered = $low; canLower = ($why -eq ''); whyNot = $why; cmd = $cmdShown; identity = $ident }
                         })
-                    Send-Json $ctx ([ordered]@{ ts = $(if ($live) { $live.ts } else { $null }); logical = (Get-RgCpuInfo).logical; procs = $rows })
+                    $wl = @(Get-RgWorkloads $rows)
+                    Send-Json $ctx ([ordered]@{ ts = $(if ($live) { $live.ts } else { $null }); logical = (Get-RgCpuInfo).logical; procs = $rows; workloads = $wl })
                 }
                 elseif ($path -eq '/api/process/priority' -and $req.HttpMethod -eq 'POST') {
                     # Chỉ nhận pid + start + level (không đường dẫn, không tên). Mọi kiểm tra nằm trong Set-RgProcPriority.

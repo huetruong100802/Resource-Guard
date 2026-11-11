@@ -1,5 +1,5 @@
-/* p-agent.js - "Hỏi trợ lý": ngăn kéo (mở từ Trang chủ và trang Dọn dẹp). Xem trước dữ liệu gửi đi, chạy claude (haiku, high), hiện tóm tắt + phát hiện.
-   Đánh giá từng mục hiện ngay ở trang Dọn dẹp dưới nhãn "Trợ lý AI". Không có trang riêng. */
+/* p-agent.js - "Hỏi trợ lý": ngăn kéo (mở từ nhóm Cần bạn xem lại ở trang Ổ đĩa). Xem trước dữ liệu gửi đi, chạy claude (haiku, high), hiện tóm tắt + phát hiện.
+   Đánh giá từng mục hiện ngay ở trang Ổ đĩa dưới nhãn "Trợ lý AI". Không có trang riêng. */
 (function () {
   'use strict';
   var RG = window.RG, S = RG.S, esc = RG.esc, $ = RG.$;
@@ -26,7 +26,7 @@
       if ((r.findings || []).length) h += '<h4 class="dh">Phát hiện</h4>' + r.findings.map(function (f) { return '<div style="padding:6px 0;border-bottom:1px solid var(--line)"><span class="pill">' + esc(AREA[f.area] || f.area) + '</span> <b>' + esc(f.title) + '</b><div class="small mut">' + esc(f.detail) + '</div></div>'; }).join('');
       var recs = (r.recommendations || []).slice().sort(function (a, b) { return a.priority - b.priority; });
       if (recs.length) {
-        h += '<h4 class="dh">Đánh giá từng mục <span class="small mut">(hiện cả ở trang Dọn dẹp)</span></h4>' + recs.map(function (x) {
+        h += '<h4 class="dh">Đánh giá từng mục <span class="small mut">(hiện cả ở trang Ổ đĩa)</span></h4>' + recs.map(function (x) {
           var c = candByKey(x.key), v = VERD[x.verdict] || VERD.review, tgt = c ? (c.kind === 'process' ? c.name + ' (pid ' + c.pid + ')' : c.path) : x.key;
           return '<div style="padding:6px 0;border-bottom:1px solid var(--line)"><span class="pill">P' + x.priority + '</span> <span class="pill ' + v[0] + '">' + v[1] + '</span> <span class="small mut">' + esc(x.confidence) + '</span>' + (x.autoKept || (c && c.protectedBy === 'agent') ? ' <span class="pill keep">đã bảo vệ</span>' : '') +
             '<div class="mono small ellipsis" style="max-width:100%" title="' + esc(tgt) + '">' + esc(tgt) + '</div><div class="small mut">' + esc(x.reason) + (c ? ' · ' + RG.fmtBytes(c.sizeBytes) : '') + '</div></div>';
@@ -37,7 +37,7 @@
           var cur = S.policy && S.policy.categories[p.kind];
           return '<div style="display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)"><div style="flex:1"><b>' + esc(RG.human.kind(p.kind).l) + '</b> → <span class="pill ' + p.setting + '">' + ({ auto: 'Tự động', ask: 'Hỏi tôi', keep: 'Luôn giữ' }[p.setting]) + '</span> <span class="small mut">(hiện: ' + esc(({ auto: 'Tự động', ask: 'Hỏi tôi', keep: 'Luôn giữ' }[cur]) || '–') + ')</span><div class="small mut">' + esc(p.reason) + '</div></div>' +
             '<button class="btn sm" data-ps="' + i + '"' + (cur === p.setting ? ' disabled' : '') + '>Áp vào bản nháp</button></div>';
-        }).join('') + '<p class="hint">Chỉ thay đổi bản nháp ở trang Tự động hoá; bạn phải bấm Lưu (và nhập PIN nếu nới lỏng chế độ “Bật”).</p>';
+        }).join('') + '<p class="hint">Chỉ thay đổi bản nháp ở Cài đặt; bạn phải bấm Lưu (và nhập PIN nếu nới lỏng chế độ “Bật”).</p>';
       }
     } else if (!run && !(l && l.ok === false)) h += '<div class="empty" style="padding:20px 0">' + RG.icon('spark') + '<h3>Chưa có đánh giá nào</h3><div>Bấm “Hỏi trợ lý” để gửi bản tóm tắt cho Claude.</div></div>';
     return h;
@@ -54,7 +54,7 @@
     };
     RG.$$('.drawer [data-ps]').forEach(function (x) { x.onclick = function () {
       var p = S.agent.result.policySuggestions[+x.dataset.ps]; if (!S.draft) return; S.draft.categories[p.kind] = p.setting; S.dirty = JSON.stringify(S.draft) !== JSON.stringify(S.policy);
-      RG.toast('Đã áp vào bản nháp. Sang trang Tự động hoá để lưu.', 'ok'); x.disabled = true;
+      RG.toast('Đã áp vào bản nháp. Sang Cài đặt để lưu.', 'ok'); x.disabled = true;
     }; });
   }
   function run_() {
@@ -66,7 +66,7 @@
   /* Mở ngăn kéo. Không có `claude` trong PATH thì không mở: kế hoạch tất định vẫn đầy đủ. */
   RG.askAgent = function () {
     if (S.settings && S.settings.agentAvailable === false) { RG.toast('Không tìm thấy lệnh claude trong PATH nên không dùng được Trợ lý AI. Kế hoạch dọn của máy vẫn đầy đủ.', 'err', 8000); return; }
-    A.dr = RG.drawer({ title: 'Hỏi trợ lý', html: '', actions: [{ label: 'Đóng' }], onClose: function () { if (A.timer) { clearInterval(A.timer); A.timer = null; } } });
+    A.dr = RG.drawer({ title: 'Hỏi trợ lý AI', html: '', actions: [{ label: 'Đóng' }], onClose: function () { if (A.timer) { clearInterval(A.timer); A.timer = null; } } });
     A.dr.el.classList.add('wide');
     draw();
     Promise.all([RG.loadAgent(), RG.loadCands().catch(function () { }), RG.loadPolicy().catch(function () { }), RG.loadDisk().catch(function () { })]).then(draw).catch(function () { });

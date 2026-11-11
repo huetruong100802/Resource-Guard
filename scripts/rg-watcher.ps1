@@ -10,6 +10,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rg-common.ps1')
+. (Join-Path $PSScriptRoot 'rg-proc.ps1')   # danh tính tiến trình (workload cho procTop); chỉ định nghĩa hàm
 
 $script:ToastCooldownMin = 10    # không toast lặp lại cùng một trạng thái trong khoảng này
 $script:LowerHoldSec = 45        # hạ trạng thái chỉ khi thấp hơn liên tục ngần này giây (hysteresis, tính theo thời gian)
@@ -203,15 +204,21 @@ function Read-RgMetricsTail([int]$Max = 240) {
 
 # Gộp bảng tiến trình theo TÊN: top 12 theo RAM hợp với top 8 theo CPU -> [{ name, n, cpu, ramMB }].
 # Ghi vào mỗi bản ghi metrics (trường procTop) để dựng lịch sử theo tiến trình mà không phải lấy mẫu thêm.
-function Get-RgProcTop($Procs, [int]$TopRam = 12, [int]$TopCpu = 8) {
+# $WorkloadOf (tuỳ chọn): hashtable PID -> khoá workload (Get-RgWorkloadMap); mỗi nhóm lấy workload của tiến trình nặng RAM nhất trong nhóm.
+# Bản ghi cũ không có trường workload: người đọc rơi về name.
+function Get-RgProcTop($Procs, [int]$TopRam = 12, [int]$TopCpu = 8, $WorkloadOf = $null) {
     $g = @{}
     foreach ($p in @($Procs)) {
         $n = [string]$p.name
         if (-not $n) { continue }
-        if (-not $g.ContainsKey($n)) { $g[$n] = @{ name = $n; n = 0; cpu = 0.0; ramMB = 0.0 } }
+        if (-not $g.ContainsKey($n)) { $g[$n] = @{ name = $n; n = 0; cpu = 0.0; ramMB = 0.0; wl = $null; wlRam = -1.0 } }
         $e = $g[$n]; $e.n++; $e.cpu += [double]$p.cpu; $e.ramMB += [double]$p.ramMB
+        if ($WorkloadOf -and $p.PSObject.Properties['pid'] -and $WorkloadOf.ContainsKey([int]$p.pid) -and [double]$p.ramMB -gt $e.wlRam) { $e.wl = [string]$WorkloadOf[[int]$p.pid]; $e.wlRam = [double]$p.ramMB }
     }
-    $all = @($g.Values | ForEach-Object { [pscustomobject]@{ name = $_.name; n = [int]$_.n; cpu = [math]::Round($_.cpu, 1); ramMB = [int][math]::Round($_.ramMB) } })
+    $all = @($g.Values | ForEach-Object {
+            $o = [ordered]@{ name = $_.name; n = [int]$_.n; cpu = [math]::Round($_.cpu, 1); ramMB = [int][math]::Round($_.ramMB) }
+            if ($_.wl) { $o['workload'] = $_.wl }
+            [pscustomobject]$o })
     $byRam = @($all | Sort-Object ramMB -Descending | Select-Object -First $TopRam)
     $byCpu = @($all | Where-Object { $_.cpu -gt 0 } | Sort-Object cpu -Descending | Select-Object -First $TopCpu)
     $seen = @{}; $out = @()
@@ -410,6 +417,8 @@ function Invoke-RgWatchTick {
     if ($null -eq $script:RgTableCache -or ((Get-Date) - $script:RgTableAt).TotalSeconds -ge $script:TableRefreshSec) {
         $script:RgTableCache = Get-RgProcessTable
         $script:RgTableAt = Get-Date
+        $script:RgWorkloadOf = $null
+        try { $script:RgWorkloadOf = Get-RgWorkloadMap $script:RgTableCache } catch { }
     }
     $table = $script:RgTableCache
     $budget = Get-RgBudget -Task 'session' -Snapshot $snap -Table $table
@@ -437,7 +446,7 @@ function Invoke-RgWatchTick {
         drives = @($snap.drives | ForEach-Object { [pscustomobject]@{ drive = $_.drive; label = $_.label; freeGB = $_.freeGB; totalGB = $_.totalGB; state = $_.state; isSystem = $_.isSystem } })
         heavy = $budget.heavyRunning; ledgerOrphans = $orph.Count; top = $top
         cores = $cores; topCpu = $topCpu; procCount = $procs.Count; uptimeSec = (Get-RgUptimeSec)
-        procTop = @(Get-RgProcTop $procs)
+        procTop = @(Get-RgProcTop $procs 12 8 $script:RgWorkloadOf)
     }
     $mf = Join-Path $home_ ('state\metrics-{0}.jsonl' -f (Get-Date -Format 'yyyyMMdd'))
     Add-Content -LiteralPath $mf -Value (ConvertTo-Json -InputObject $rec -Depth 4 -Compress) -Encoding UTF8

@@ -37,12 +37,12 @@
     }
     function body() {
       var dots = '<div class="su-dots" aria-label="Bước ' + (step + 1) + '/3">' + [0, 1, 2].map(function (i) { return '<i class="' + (i === step ? 'on' : '') + '"></i>'; }).join('') + '</div>';
-      if (step === 0) return dots + '<h4 class="dh">Resource Guard làm gì cho bạn</h4><p><b>Theo dõi:</b> luôn biết máy còn bao nhiêu RAM, ổ đĩa và CPU, và cảnh báo trước khi cạn.</p><p><b>Lập kế hoạch:</b> chỉ ra việc nên làm trước (dọn gì, được bao nhiêu, hậu quả gì) bằng hình, không đổ cả danh sách.</p><p><b>Tự động, an toàn:</b> chỉ dọn loại tự tạo lại được, tránh vùng bạn bảo vệ, không bao giờ kết thúc ứng dụng của bạn. Mọi thứ bạn duyệt trước.</p>';
+      if (step === 0) return dots + '<h4 class="dh">Resource Guard làm gì cho bạn</h4><p><b>Tổng quan:</b> cho biết máy đang ổn hay thiếu gì (RAM, ổ đĩa), và việc nên làm trước.</p><p><b>Ổ đĩa:</b> dọn gì, được bao nhiêu, hậu quả gì, bằng hình thay vì danh sách dài.</p><p><b>Bộ nhớ &amp; tiến trình:</b> ứng dụng nào đang ăn RAM, của ai, thuộc dự án nào.</p><p><b>Tự động, an toàn:</b> chỉ dọn loại tự tạo lại được, tránh vùng bạn bảo vệ, không bao giờ kết thúc ứng dụng của bạn. Mọi thứ bạn duyệt trước.</p>';
       if (step === 1) return dots + '<h4 class="dh">Khởi động</h4><div id="suTog"></div>';
-      return dots + '<h4 class="dh">Chế độ tự động</h4><p class="small mut">Chọn cách Resource Guard tự dọn khi máy thiếu chỗ. Đổi bất cứ lúc nào ở trang Tự động hoá.</p>' +
-        [['dry-run', 'Chạy thử (khuyên dùng)', 'Một tuần nữa tôi sẽ cho bạn xem tôi sẽ dọn được gì. Chưa xoá gì cả.'], ['off', 'Tắt', 'Không làm gì tự động. Bạn dọn tay ở trang Dọn dẹp.'], ['on', 'Bật', 'Tự dọn thật khi cần. Cần đặt PIN trước.']].map(function (o) {
+      return dots + '<h4 class="dh">Chế độ tự động</h4><p class="small mut">Chọn cách Resource Guard tự dọn khi máy thiếu chỗ. Đổi bất cứ lúc nào ở trang Ổ đĩa.</p>' +
+        [['dry-run', 'Chạy thử (khuyên dùng)', 'Một tuần nữa tôi sẽ cho bạn xem tôi sẽ dọn được gì. Chưa xoá gì cả.'], ['off', 'Tắt', 'Không làm gì tự động. Bạn dọn tay ở trang Ổ đĩa.'], ['on', 'Bật', 'Tự dọn thật khi cần. Cần đặt PIN trước.']].map(function (o) {
           return '<label class="su-opt"><input type="radio" name="suMode" value="' + o[0] + '"' + (mode === o[0] ? ' checked' : '') + '><span><b>' + o[1] + '</b><span class="small mut" style="display:block">' + o[2] + '</span></span></label>';
-        }).join('') + (mode === 'on' ? '<div class="alert info" style="margin-top:8px"><div class="small">PIN chỉ đặt được ở terminal, không qua trình duyệt: chạy <span class="mono">rg pin</span>, rồi vào trang Tự động hoá và chọn Bật. Tạm thời tôi để ở chế độ Chạy thử.</div></div>' : '');
+        }).join('') + (mode === 'on' ? '<div class="alert info" style="margin-top:8px"><div class="small">PIN chỉ đặt được ở terminal, không qua trình duyệt: chạy <span class="mono">rg pin</span>, rồi vào trang Ổ đĩa và chọn Bật. Tạm thời tôi để ở chế độ Chạy thử.</div></div>' : '');
     }
     function render() {
       var b = RG.$('.body', m.el); b.innerHTML = body();

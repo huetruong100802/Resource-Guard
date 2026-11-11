@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Resource Guard — bản mẫu thiết kế (dữ liệu giả)</title>
+<style>
+:root{
+  --bg:#f3f5f9;--panel:#fff;--panel2:#f8f9fc;--fg:#18202e;--mut:#667085;--line:#e2e6ee;--accent:#2f6fdb;--accent-fg:#fff;--accent-soft:#e8f0fd;
+  --normal:#1f9d55;--caution:#c99700;--restricted:#d97706;--critical:#d92d20;
+  --normal-soft:#e6f5ec;--caution-soft:#fbf3d6;--restricted-soft:#fdeedb;--critical-soft:#fde8e6;
+  --free:#d3d9e4;--shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
+  --r-browser:#2f6fdb;--r-build:#d9822b;--r-vscode:#7c5cd6;--r-windows:#7b8698;--r-ai:#14938f;--r-other:#b3bbc9;
+  --d-mine:#2f6fdb;--d-review:#c99700;--d-system:#7b8698;
+  --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--radius:12px;
+}
+:root[data-theme="dark"]{
+  --bg:#0e1218;--panel:#171c25;--panel2:#1c222d;--fg:#e8ecf3;--mut:#9aa4b5;--line:#2a313e;--accent:#5b95f0;--accent-fg:#0b1220;--accent-soft:#1d2a42;
+  --normal:#3ecb7e;--caution:#e6b422;--restricted:#f09a35;--critical:#f26b60;
+  --normal-soft:#14291d;--caution-soft:#2e2711;--restricted-soft:#2f2111;--critical-soft:#33191a;
+  --free:#323a49;--shadow:none;
+  --r-browser:#5b95f0;--r-build:#f0a057;--r-vscode:#a68bf0;--r-windows:#8c97aa;--r-ai:#4fd1c5;--r-other:#4a5466;
+  --d-mine:#5b95f0;--d-review:#e6b422;--d-system:#8c97aa;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0e1218;--panel:#171c25;--panel2:#1c222d;--fg:#e8ecf3;--mut:#9aa4b5;--line:#2a313e;--accent:#5b95f0;--accent-fg:#0b1220;--accent-soft:#1d2a42;
+  --normal:#3ecb7e;--caution:#e6b422;--restricted:#f09a35;--critical:#f26b60;
+  --normal-soft:#14291d;--caution-soft:#2e2711;--restricted-soft:#2f2111;--critical-soft:#33191a;
+  --free:#323a49;--shadow:none;
+  --r-browser:#5b95f0;--r-build:#f0a057;--r-vscode:#a68bf0;--r-windows:#8c97aa;--r-ai:#4fd1c5;--r-other:#4a5466;
+  --d-mine:#5b95f0;--d-review:#e6b422;--d-system:#8c97aa;
+}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+button{font:inherit;color:inherit;cursor:pointer}
+.proto{background:#fff3c4;color:#5c4400;font-size:12px;text-align:center;padding:4px 8px;border-bottom:1px solid #e6cf7a}
+:root[data-theme="dark"] .proto{background:#3a2f0b;color:#f0d98a;border-color:#5a4a15}
+.top{display:flex;align-items:center;gap:var(--space-4);padding:10px var(--space-5);background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30}
+.brand{font-weight:700;letter-spacing:.2px}
+.nav{display:flex;gap:4px;flex:1}
+.nav a{padding:7px 14px;border-radius:8px;color:var(--mut);text-decoration:none;font-weight:600;position:relative}
+.nav a.on{background:var(--accent-soft);color:var(--accent)}
+.nav .nb{background:var(--critical);color:#fff;border-radius:10px;font-size:11px;padding:1px 6px;margin-left:6px}
+.ghost{background:transparent;border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.ghost:hover{background:var(--panel2)}
+.badge{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:2px 10px;font-weight:600;font-size:12.5px;white-space:nowrap}
+.b-normal{background:var(--normal-soft);color:var(--normal)}.b-caution{background:var(--caution-soft);color:var(--caution)}
+.b-restricted{background:var(--restricted-soft);color:var(--restricted)}.b-critical{background:var(--critical-soft);color:var(--critical)}
+main{max-width:1280px;margin:0 auto;padding:var(--space-4) var(--space-5) 96px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.card h3{margin:0;font-size:13px;color:var(--mut);font-weight:600;text-transform:none}
+.ph{display:flex;align-items:center;gap:var(--space-3);padding:10px var(--space-4);border-bottom:1px solid var(--line)}
+.ph .sp{flex:1}
+.pb{padding:var(--space-4)}
+.mut{color:var(--mut)}.sm{font-size:12.5px}.num{font-variant-numeric:tabular-nums}
+.help{display:inline-grid;place-items:center;width:16px;height:16px;border-radius:50%;border:1px solid var(--mut);color:var(--mut);font-size:11px;cursor:help;margin-left:4px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:var(--panel);padding:4px 10px;font-size:12.5px;border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--accent);color:var(--accent-fg);font-weight:600}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:7px 14px;font-weight:600}
+.btn.pri{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.hatch{background-image:repeating-linear-gradient(45deg,transparent 0 4px,var(--panel) 4px 7px)}
+/* sticky before→after */
+.ws-sticky{position:sticky;top:53px;z-index:20;margin-bottom:var(--space-4)}
+.rbar{display:flex;height:26px;border-radius:7px;overflow:hidden;background:var(--free);position:relative}
+.rbar>div{height:100%;transition:width .25s}
+.rbar>div[data-k]{cursor:pointer;border-right:2px solid var(--panel)}
+.bar-lbl{display:flex;justify-content:space-between;gap:12px;margin-top:6px;font-size:13px;flex-wrap:wrap}
+.bar-lbl b{font-variant-numeric:tabular-nums}
+.marks{position:relative;height:30px;margin-top:2px}
+.mark{position:absolute;top:0;transform:translateX(-50%);text-align:center;font-size:11.5px;color:var(--mut);white-space:nowrap}
+.mark:before{content:"";display:block;width:1px;height:8px;background:var(--mut);margin:0 auto 2px}
+/* free ruler */
+.ruler{position:relative;margin:20px 8px 34px;height:22px;border-radius:6px;overflow:visible}
+.ruler .z{position:absolute;top:0;bottom:0;font-size:11px;display:flex;align-items:center;justify-content:center;color:var(--fg);overflow:hidden;white-space:nowrap}
+.ruler .z:first-child{border-radius:6px 0 0 6px}.ruler .z:last-of-type{border-radius:0 6px 6px 0}
+.pin{position:absolute;top:-17px;font-size:12px;font-weight:600;white-space:nowrap;transform:translateX(-50%)}
+.pin.l{transform:translateX(-100%)}.pin.r{transform:translateX(0)}
+.pin:after{content:"";position:absolute;left:50%;top:15px;width:2px;height:20px;background:currentColor;opacity:.9}
+.pin.l:after{left:100%}.pin.r:after{left:0}
+.handle{position:absolute;top:0;bottom:-6px;width:20px;margin-left:-10px;cursor:ew-resize;touch-action:none;outline:none}
+.handle:before{content:"";position:absolute;left:9px;top:-2px;bottom:6px;border-left:2px dashed var(--accent)}
+.handle i{position:absolute;left:3px;bottom:-6px;width:14px;height:14px;border-radius:50%;background:var(--accent);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--accent)}
+.handle:focus-visible i{box-shadow:0 0 0 3px var(--accent-soft),0 0 0 4px var(--accent)}
+.handle span{position:absolute;top:30px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--accent);font-weight:600;white-space:nowrap}
+/* workspace */
+.ws{display:grid;grid-template-columns:55fr 45fr;gap:var(--space-4);align-items:start}
+@media(max-width:980px){.ws{grid-template-columns:1fr}.top{flex-wrap:wrap}main{padding:var(--space-3) var(--space-3) 96px}}
+.mapTop{display:flex;gap:var(--space-4);align-items:center;margin-bottom:var(--space-3)}
+.donut{position:relative;flex:none}
+.donut svg{display:block}
+.donut .dseg{transition:opacity .15s,stroke-width .15s;cursor:pointer;fill:none}
+.donut .ctr{position:absolute;inset:0;display:grid;place-content:center;text-align:center;pointer-events:none;line-height:1.2}
+.donut .ctr b{font-size:17px;font-variant-numeric:tabular-nums}.donut .ctr span{font-size:11px;color:var(--mut)}
+.donut.mini .ctr b{font-size:13px}.donut.mini .ctr span{display:none}
+.legend{display:grid;gap:3px;font-size:12.5px;min-width:0;flex:1}
+.legend div{display:flex;align-items:center;gap:7px;padding:2px 6px;border-radius:6px;cursor:pointer;min-width:0}
+.legend div:hover,.legend div.hl{background:var(--panel2)}
+.legend i{width:11px;height:11px;border-radius:3px;flex:none}
+.legend .n{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.legend .v{font-variant-numeric:tabular-nums;color:var(--mut)}
+.hlon .viz [data-k]:not(.hl){opacity:.38}
+.hlon .donut .dseg.hl{stroke-width:30}
+/* treemap */
+.tm{position:relative;height:300px;border-radius:8px;background:var(--panel2);overflow:hidden}
+.tm .p{position:absolute;border:1px solid var(--line);border-radius:5px;background:var(--panel2);overflow:hidden}
+.tm .p>em{position:absolute;left:5px;top:1px;right:4px;font-style:normal;font-size:11px;font-weight:600;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm .c{position:absolute;border-radius:3px;background:var(--d-mine);opacity:.55;color:#fff;font-size:11px;padding:2px 4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border:1px solid var(--panel);cursor:default}
+.tm .c.k{opacity:1;background-color:var(--normal);background-image:repeating-linear-gradient(45deg,transparent 0 5px,rgba(255,255,255,.35) 5px 9px);cursor:pointer;font-weight:600}
+.tm .c.rv{background:var(--d-review);opacity:.9;color:#1b1500;cursor:pointer;font-weight:600}
+.tm .c.sel{outline:2px solid var(--fg);outline-offset:-2px;z-index:3}
+.tm .c.k.off{background-color:var(--normal);opacity:.55}
+.fixedStrip{margin-top:8px;border-radius:6px;padding:6px 10px;font-size:12.5px;color:var(--mut);background:repeating-linear-gradient(135deg,var(--panel2) 0 6px,var(--line) 6px 7px);border:1px solid var(--line)}
+/* action rows */
+.grow{border-bottom:1px solid var(--line);padding:10px var(--space-4);transition:background .15s}
+.grow.hl{background:var(--accent-soft)}
+.grow.flash{animation:fl 1s}
+@keyframes fl{0%,60%{background:var(--accent-soft)}100%{background:transparent}}
+.gtop{display:flex;align-items:center;gap:10px}
+.gtop input{width:17px;height:17px;accent-color:var(--accent)}
+.gname{font-weight:600;flex:1;min-width:0}
+.gsz{font-variant-numeric:tabular-nums;font-weight:600}
+.risk{font-size:12px;white-space:nowrap}.risk.low{color:var(--normal)}.risk.mid{color:var(--restricted)}.risk.high{color:var(--critical)}
+.gsub{margin:2px 0 0 27px;color:var(--mut);font-size:12.5px}
+.gctl{display:flex;align-items:center;gap:10px;margin:7px 0 0 27px;flex-wrap:wrap}
+.exp{border:0;background:transparent;color:var(--accent);font-weight:600;padding:2px 4px}
+.items{margin:8px 0 0 27px;max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.items .it{display:grid;grid-template-columns:1fr auto auto 26px;gap:10px;padding:5px 10px;font-size:12.5px;border-bottom:1px solid var(--line);align-items:center}
+.items .it:last-child{border:0}
+.items .it .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.items .it small{color:var(--mut)}
+.shield{border:0;background:transparent;opacity:.5;padding:0}.shield.on{opacity:1}
+.sec{padding:8px var(--space-4);background:var(--panel2);color:var(--mut);font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+.sec .sp{flex:1}
+.savebar{position:fixed;left:0;right:0;bottom:0;z-index:40;background:var(--panel);border-top:2px solid var(--accent);padding:10px var(--space-5);display:flex;gap:12px;align-items:center;transform:translateY(110%);transition:transform .2s}
+.savebar.show{transform:none}
+.savebar .sp{flex:1}
+.autoRow{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px var(--space-4);border-bottom:1px solid var(--line);font-size:13px}
+/* mem */
+.plist .pr{display:grid;grid-template-columns:18px 1fr auto auto;gap:10px;padding:8px var(--space-4);border-bottom:1px solid var(--line);align-items:center;cursor:pointer}
+.plist .pr.hl{background:var(--accent-soft)}
+.plist .pr.sel{box-shadow:inset 3px 0 0 var(--accent);background:var(--accent-soft)}
+.plist .dot{width:12px;height:12px;border-radius:3px}
+.plist .ch{padding:5px var(--space-4) 5px 44px;font-size:12.5px;color:var(--mut);border-bottom:1px dashed var(--line);display:flex;gap:8px}
+.plist .ch b{color:var(--fg);font-weight:600}
+.kv{display:grid;grid-template-columns:78px 1fr;gap:6px 10px;font-size:13.5px}
+.kv dt{color:var(--mut)}.kv dd{margin:0;min-width:0;word-break:break-word}
+code{background:var(--panel2);border:1px solid var(--line);padding:1px 6px;border-radius:5px;font-size:12px;word-break:break-all}
+.empty{height:56px;border:1px dashed var(--line);border-radius:8px;display:grid;place-items:center;color:var(--mut);font-size:12.5px}
+.gain{padding:8px 12px;border-radius:8px;background:var(--normal-soft);color:var(--normal);font-weight:600;margin:12px 0}
+/* home */
+.alert{display:flex;align-items:center;gap:var(--space-4);padding:var(--space-4) var(--space-5);border-radius:var(--radius);margin-bottom:var(--space-4);border:1px solid}
+.alert h2{margin:0;font-size:19px}
+.alert.b-critical{border-color:var(--critical)}.alert.b-normal{border-color:var(--normal)}
+.alert .sp{flex:1}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.chip{padding:3px 10px;border-radius:999px;font-size:12.5px;font-weight:600;background:var(--panel);border:1px solid var(--line);color:var(--fg)}
+.chip.no{color:var(--critical)}.chip.ok{color:var(--normal)}
+.res{display:grid;grid-template-columns:76px 1fr auto;gap:var(--space-4);align-items:center;padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line);cursor:pointer}
+.res:hover{background:var(--panel2)}
+.res .t{font-weight:700;font-size:15px}
+.step{display:grid;grid-template-columns:22px 1fr auto auto auto;gap:12px;align-items:center;padding:10px var(--space-4);border-bottom:1px solid var(--line)}
+.step input{width:17px;height:17px;accent-color:var(--accent)}
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-3)}
+@media(max-width:700px){.tiles{grid-template-columns:1fr}.step{grid-template-columns:22px 1fr auto}}
+.tile{padding:var(--space-3) var(--space-4);border-radius:10px;background:var(--panel2);border:1px solid var(--line)}
+.tile b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+.tl{margin-top:var(--space-3);font-size:13px}
+.tl div{display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--line)}
+.tl time{color:var(--mut);width:84px;flex:none}
+.tl .x{color:var(--mut)}
+.toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:8px;z-index:60;opacity:0;pointer-events:none;transition:opacity .2s}
+.toast.show{opacity:1}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;place-items:center;z-index:70}
+.modal.show{display:grid}
+.modal .box{background:var(--panel);border-radius:12px;max-width:460px;width:92%;padding:var(--space-5)}
+.modal h3{font-size:17px;color:var(--fg);margin:0 0 8px}
+.hint{font-size:12.5px;color:var(--mut)}
+.pop{position:absolute;right:0;top:100%;margin-top:6px;width:300px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:12px;z-index:50;display:none;font-size:13px;text-align:left}
+.pop.show{display:block}
+
+/* v2: một thanh duy nhất có mốc tự dọn kéo được; dải trạng thái dán sát thanh; bản đồ tô theo 6 nhóm */
+#sum{overflow:visible}
+.barwrap{position:relative;padding-top:24px;margin-bottom:12px}
+.zstrip{position:relative;height:5px;margin-top:3px;border-radius:3px;overflow:hidden;opacity:.85}
+.zstrip i{position:absolute;top:0;bottom:0}
+.autoz{position:absolute;bottom:-4px;height:3px;border-radius:2px;background:var(--accent);opacity:.9}
+.autoz.off{background:var(--mut);opacity:.4}
+.thr{position:absolute;top:0;bottom:-6px;width:22px;margin-left:-11px;cursor:ew-resize;touch-action:none;outline:none;z-index:5}
+.thr:before{content:"";position:absolute;left:10px;top:30px;bottom:0;border-left:2px solid var(--fg)}
+.thr i{position:absolute;left:4px;top:19px;width:14px;height:14px;border-radius:50%;background:var(--accent);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--fg)}
+.thr.off i{background:var(--mut)}
+.thr:focus-visible i{box-shadow:0 0 0 3px var(--accent-soft),0 0 0 4px var(--accent)}
+.thr .thl{position:absolute;top:0;left:50%;transform:translateX(-50%);font-size:12px;font-weight:600;white-space:nowrap;color:var(--fg)}
+.thr.r .thl{left:auto;right:-4px;transform:none}
+.thr .tp{display:none;position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);width:max-content;max-width:330px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 24px rgba(16,24,40,.18);padding:9px 12px;font-size:12.5px;line-height:1.5;cursor:default}
+.thr.r .tp{left:auto;right:-6px;transform:none}
+.thr:hover .tp,.thr.drag .tp,.thr:focus-visible .tp{display:block}
+.thr:hover .thl,.thr.drag .thl{visibility:hidden}
+.seg button:disabled{opacity:.5;cursor:not-allowed}
+.tm{height:340px}
+.tm .c small{display:block;font-weight:400;opacity:.9}
+.tm .c.cs-mine{background:var(--d-mine);opacity:.55}
+.tm .c.cs-clean{background:var(--normal);opacity:.9;cursor:pointer;font-weight:600}
+.tm .c.cs-sel{background-color:var(--normal);background-image:repeating-linear-gradient(45deg,transparent 0 5px,rgba(255,255,255,.35) 5px 9px);opacity:1;cursor:pointer;font-weight:600}
+.tm .c.cs-review{background:var(--d-review);opacity:.92;color:#1b1500;cursor:pointer;font-weight:600}
+.tm .c.cs-sys{background:var(--d-system);opacity:.85;color:#fff}
+.tm .c.cs-free{background:transparent;border:1px dashed var(--mut);color:var(--mut);opacity:1}
+.vd{display:inline-block;font-size:11.5px;font-weight:700;padding:1px 8px;border-radius:999px;margin-right:4px}
+.vd-del{background:var(--restricted-soft);color:var(--restricted)}.vd-keep{background:var(--accent-soft);color:var(--accent)}.vd-ask{background:var(--caution-soft);color:var(--caution)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="hatchP" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="3" height="8" fill="#fff" opacity=".55"/></pattern>
+</defs></svg>
+<div class="proto">BẢN MẪU TĨNH — dữ liệu giả, không gọi API. Dùng để duyệt bố cục trước khi code (P1 của plan-ux-clarity). Hai ca xấu có sẵn: máy thiếu RAM và ổ C ở mức Nguy cấp.</div>
+<header class="top">
+  <span class="brand">🛡 Resource Guard</span>
+  <nav class="nav" id="nav"></nav>
+  <span style="position:relative"><button class="badge b-critical" id="stBadge" style="border:0">● Nguy cấp</button>
+    <div class="pop" id="stPop"><b>Vì sao Nguy cấp?</b><div style="margin:6px 0">• RAM trống 2,4 GB (dưới 2,5 GB)<br>• Ổ C còn 8,6 GB (dưới 10 GB)</div>
+      <a href="#mem">Xem RAM</a> · <a href="#disk">Xem ổ C</a></div></span>
+  <button class="ghost" id="themeBtn" title="Đổi giao diện sáng / tối">◐ Giao diện</button>
+</header>
+<main id="view"></main>
+<div class="savebar" id="savebar"><b>Chính sách đã đổi</b><span class="mut sm" id="saveTxt"></span><span class="sp"></span><button class="btn" id="saveCancel">Huỷ</button><button class="btn pri" id="saveOk">Lưu</button></div>
+<div class="toast" id="toast"></div>
+<div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
+
+<script>
+(function(){
+"use strict";
+/* ---------- tiện ích ---------- */
+function $(s,r){return (r||document).querySelector(s)}
+function $$(s,r){return [].slice.call((r||document).querySelectorAll(s))}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function fmtGB(n){ if(n>0&&n<0.05)return Math.max(1,Math.round(n*1024))+" MB"; var d=n>=100?0:1; return n.toFixed(d).replace(".",",")+" GB"; }
+function stDisk(f){return f<10?["critical","Nguy cấp"]:f<15?["restricted","Hạn chế"]:f<20?["caution","Cần chú ý"]:["normal","Ổn"]}
+function stRam(f){return f<2.5?["critical","Nguy cấp"]:f<3.5?["restricted","Hạn chế"]:f<5?["caution","Cần chú ý"]:["normal","Ổn"]}
+function badge(st){return '<span class="badge b-'+st[0]+'">● '+st[1]+'</span>'}
+function help(t){return '<span class="help" title="'+esc(t)+'" aria-label="'+esc(t)+'" tabindex="0">?</span>'}
+var toastT;function toast(t){var e=$("#toast");e.textContent=t;e.classList.add("show");clearTimeout(toastT);toastT=setTimeout(function(){e.classList.remove("show")},2600)}
+function modal(html,onOk){var m=$("#modal");$("#modalBox").innerHTML=html;m.classList.add("show");
+  $("#mCancel").onclick=function(){m.classList.remove("show")};
+  $("#mOk").onclick=function(){m.classList.remove("show");onOk&&onOk()}}
+/* ---------- liên kết hover/chọn: mọi thành phần dùng chung một kênh ---------- */
+var hlKeys=[];
+function setHL(keys){hlKeys=keys||[];var v=$("#view");v.classList.toggle("hlon",hlKeys.length>0);
+  $$("[data-k]",v).forEach(function(e){var ks=(e.getAttribute("data-k")||"").split(" ");
+    var on=hlKeys.length&&ks.some(function(k){return k&&hlKeys.indexOf(k)>=0});e.classList.toggle("hl",!!on)})}
+function wireHL(root,getKeys){ /* rê chuột vào phần tử có data-k → sáng */
+  root.addEventListener("mouseover",function(e){var t=e.target.closest("[data-k]");if(t&&t.getAttribute("data-k"))setHL((getKeys?getKeys(t):t.getAttribute("data-k").split(" ")))});
+  root.addEventListener("mouseleave",function(){setHL(pinned())},true);
+}
+var pinnedKeys=[];function pinned(){return pinnedKeys}
+
+/* ---------- biểu đồ tròn (donut) ---------- */
+/* segs: [{k, name, v, color, hatch}], total, center:{big, small} */
+function donut(el,segs,total,center,size,thick){
+  size=size||132;thick=thick||24;var R=(size-thick)/2-2,C=2*Math.PI*R,off=0,cx=size/2;
+  var s='<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" role="img" aria-label="'+esc(center.small||"")+'">';
+  s+='<circle cx="'+cx+'" cy="'+cx+'" r="'+R+'" fill="none" stroke="var(--free)" stroke-width="'+thick+'"/>';
+  segs.forEach(function(g){ if(g.v<=0)return; var len=Math.max(0.6,g.v/total*C);
+    var a='cx="'+cx+'" cy="'+cx+'" r="'+R+'" stroke-width="'+thick+'" stroke-dasharray="'+len+" "+(C-len)+'" stroke-dashoffset="'+(-off)+'" transform="rotate(-90 '+cx+" "+cx+')"';
+    s+='<circle class="dseg" data-k="'+esc(g.k||"")+'" '+a+' stroke="'+g.color+'"><title>'+esc(g.name)+": "+fmtGB(g.v)+'</title></circle>';
+    if(g.hatch)s+='<circle class="dseg" data-k="'+esc(g.k||"")+'" '+a+' stroke="url(#hatchP)" style="pointer-events:none"/>';
+    off+=len});
+  s+='</svg><div class="ctr"><b>'+center.big+'</b><span>'+center.small+'</span></div>';
+  el.innerHTML=s;el.classList.add("donut","viz");el.classList.toggle("mini",size<90);
+}
+function legend(el,rows){ /* rows: [{k,name,v,color,hatch}] */
+  el.className="legend viz";
+  el.innerHTML=rows.map(function(r){return '<div data-k="'+esc(r.k||"")+'"><i class="'+(r.hatch?"hatch":"")+'" style="background-color:'+r.color+'"></i><span class="n">'+esc(r.name)+'</span><span class="v num">'+fmtGB(r.v)+'</span></div>'}).join("");
+}
+
+/* ---------- treemap 2 cấp (squarify) ---------- */
+function worst(row,sum,side){var mx=0,mn=1e18;row.forEach(function(a){mx=Math.max(mx,a.a);mn=Math.min(mn,a.a)});return Math.max(side*side*mx/(sum*sum),sum*sum/(side*side*mn))}
+function layout(items,x,y,w,h){
+  var tot=0;items.forEach(function(i){tot+=i.v});var k=w*h/tot,res=[];
+  var arr=items.map(function(i){return {it:i,a:i.v*k}}).sort(function(a,b){return b.a-a.a});
+  while(arr.length){var side=Math.min(w,h),row=[arr[0]],s=arr[0].a,i=1;
+    while(i<arr.length){var s2=s+arr[i].a;if(worst(row.concat([arr[i]]),s2,side)<=worst(row,s,side)){row.push(arr[i]);s=s2;i++}else break}
+    var th=s/side,off=0;
+    row.forEach(function(r){var len=r.a/th;
+      if(w>=h)res.push({it:r.it,x:x,y:y+off,w:th,h:len});else res.push({it:r.it,x:x+off,y:y,w:len,h:th});off+=len});
+    if(w>=h){x+=th;w-=th}else{y+=th;h-=th}arr.splice(0,row.length)}
+  return res}
+/* treemap theo thư mục, MỌI ô tô màu theo cùng 6 nhóm với hình tròn: tổng diện tích mỗi màu = đúng phần tương ứng của hình tròn */
+function treemap(el,tree,clsOf){
+  var W=el.clientWidth||520,H=el.clientHeight||300,h='';
+  function tile(m,x,y,w,hh,big){var c=clsOf(m),k=c+(m.k?" "+m.k:"");
+    return '<div class="c cs-'+c+'" data-k="'+esc(k)+'" data-tm="'+esc(m.k||"")+'" style="left:'+x+'px;top:'+y+'px;width:'+w+'px;height:'+hh+'px" title="'+esc(m.n)+": "+fmtGB(m.v)+'">'+(w>62&&hh>(big?34:22)?esc(m.n)+(hh>40?'<small>'+fmtGB(m.v)+'</small>':''):"")+'</div>'}
+  layout(tree,0,0,W,H).forEach(function(p){var n=p.it;
+    if(!n.c){h+=tile(n,p.x,p.y,p.w,p.h,1);return}
+    h+='<div class="p" style="left:'+p.x+'px;top:'+p.y+'px;width:'+p.w+'px;height:'+p.h+'px"><em>'+esc(n.n)+" · "+fmtGB(n.v)+'</em>';
+    if(p.w>46&&p.h>40){layout(n.c,3,17,p.w-8,p.h-21).forEach(function(c){h+=tile(c.it,c.x,c.y,c.w,c.h,0)})}
+    h+='</div>'});
+  el.innerHTML=h;el.classList.add("viz")}
+/* dải màu trạng thái dán sát dưới thanh (không nhãn, rê chuột ra giải thích); thr = ngưỡng "trống dưới" [nguy cấp, hạn chế, cần chú ý]; vẽ trên trục ĐÃ DÙNG */
+function zstrip(total,thr){
+  var z=[[0,total-thr[2],"normal","Ổn: trống từ "+fmtGB(thr[2])],[total-thr[2],total-thr[1],"caution","Cần chú ý: trống dưới "+fmtGB(thr[2])],[total-thr[1],total-thr[0],"restricted","Hạn chế: trống dưới "+fmtGB(thr[1])],[total-thr[0],total,"critical","Nguy cấp: trống dưới "+fmtGB(thr[0])]];
+  return z.map(function(s){return '<i style="left:'+s[0]/total*100+'%;width:'+(s[1]-s[0])/total*100+'%;background:var(--'+s[2]+')" title="'+esc(s[3])+'"></i>'}).join("")}
+
+/* ====================================================================== */
+/*                               DỮ LIỆU MẪU                                */
+/* ====================================================================== */
+function mkItems(proj,suffix,total,count,age){ /* sinh mục, tên dài, kích thước lệch để có cả MB lẫn GB */
+  var w=[],s=0,i;for(i=0;i<count;i++){var x=Math.pow(1.17,count-i)+0.15;w.push(x);s+=x}
+  return w.map(function(x,i){var p=proj[i%proj.length];return {n:suffix+" · "+p,p:"…\\source\\repos\\"+p+"\\"+suffix,s:total*x/s,age:age+((i*7)%120)}})}
+var PROJ=["Customer-Warehouse-Management-Legacy-Integration-Gateway","dxwms","wms-api","wms-mobile-handheld","reporting-service","label-printing","barcode-sdk-samples","inventory-sync-worker","angular-admin-portal","ops-dashboard"];
+var DR={
+ C:{name:"C:",total:182,free:8.6,fixed:52,
+  groups:[
+   {k:"nuget",name:"Gói NuGet không dùng 14 ngày",size:7.3,risk:"low",mode:"auto",ev:"9 lượt chạy thử: 41 mục, 5,2 GB",items:mkItems(["~\\.nuget\\packages"],"microsoft.*, newtonsoft.*",7.3,3,40)},
+   {k:"temp",name:"Tệp tạm & cache (không tiến trình nào đang dùng)",size:5.8,risk:"low",mode:"auto",ev:"Gom từ 4 nơi · bỏ qua cache Edge 8,0 GB vì Edge đang chạy",items:[
+     {n:"Windows\\Temp",p:"C:\\Windows\\Temp",s:1.8,age:12},{n:"%TEMP% của bạn",p:"C:\\Users\\hue\\AppData\\Local\\Temp",s:1.2,age:9},
+     {n:"Cache npm · pip · gradle",p:"C:\\Users\\hue\\AppData\\Local\\{npm-cache,pip,gradle}",s:2.0,age:30},{n:"Windows Update đã tải",p:"C:\\Windows\\SoftwareDistribution\\Download",s:0.8,age:21}]},
+   {k:"binobj",name:"bin/obj cũ (không build 30 ngày)",size:4.1,risk:"low",mode:"auto",ev:"Chạy thử 4 lượt: 22 mục, 3,8 GB",items:mkItems(PROJ,"bin+obj",4.1,11,45)},
+   {k:"nodemod",name:"node_modules của dự án cũ",size:2.0,risk:"mid",mode:"ask",ev:"Chưa chạy thử lượt nào",items:mkItems(PROJ,"node_modules",2.0,40,90)}],
+  review:[
+   {n:"Downloads\\setup-vs2022-enterprise-preview-17.12.exe",s:3.1,age:"210 ngày",ev:"Bộ cài · không tiến trình nào dùng · bản này đã được cài",ai:{v:"del",c:94,why:"Bộ cài đã dùng xong, tải lại được từ trang chủ."}},
+   {n:"Downloads\\backup-2023-06-wms-db.zip",s:1.7,age:"380 ngày",ev:"Tệp nén sao lưu CSDL · không có bản nào khác cùng tên",ai:{v:"keep",c:71,why:"Có thể là bản sao lưu duy nhất; chép sang ổ D trước khi xoá."}},
+   {n:"AppData\\Local\\Temp\\dump_9f3a.dmp",s:0.7,age:"60 ngày",ev:"Crash dump · chương trình sinh ra nó đã được gỡ",ai:{v:"del",c:88,why:"Tệp báo lỗi của chương trình không còn cài trên máy."}},
+   {n:"Dữ liệu SQL\\wms_dev_2022.mdf (+ .ldf)",s:4.2,age:"14 tháng không truy cập",ev:"Tệp CSDL · không có dịch vụ SQL nào đang gắn tệp này",ai2:{v:"ask",c:62,why:"Không còn được gắn vào SQL Server, nhưng tên giống CSDL dự án đang làm: nên xem lại."}},
+   {n:"Chương trình: Android Studio (2021)",s:5.6,age:"mở lần cuối 11 tháng trước",ev:"Chương trình cài đặt · không chạy · dự án Android cuối sửa 2022",ai2:{v:"del",c:83,why:"Không dùng 11 tháng, không dự án nào hiện còn tham chiếu. Gỡ bằng Cài đặt Windows."}}],
+  prot:[{n:"source\\repos\\dxwms\\.git (dự án đang mở)",s:1.0}],
+  tree:[
+   {n:"Hệ thống & chương trình (không quét chi tiết)",v:52,sys:1},
+   {n:"Users\\hue\\source",v:48,c:[{n:"dxwms",v:14},{n:"wms-api",v:11},{n:"Customer-Warehouse-Management-Legacy-Integration-Gateway",v:9.5},{n:"bin/obj cũ",v:4.1,k:"binobj"},{n:"node_modules cũ",v:2.0,k:"nodemod"},{n:"Khác",v:7.4}]},
+   {n:"Tệp tạm & cache (gom từ 4 nơi)",v:5.8,c:[{n:"Windows\\Temp",v:1.8,k:"temp"},{n:"%TEMP%",v:1.2,k:"temp"},{n:"npm · pip · gradle",v:2.0,k:"temp"},{n:"Windows Update",v:0.8,k:"temp"}]},
+   {n:"AppData",v:22,c:[{n:"Edge cache (Edge đang chạy)",v:8},{n:"dump_9f3a.dmp",v:0.7,rv:1},{n:"Khác",v:13.3}]},
+   {n:".nuget",v:7.3,c:[{n:"packages",v:7.3,k:"nuget"}]},
+   {n:"Downloads",v:9,c:[{n:"Cài đặt .exe",v:3.1,rv:1},{n:"Nén .zip",v:1.7,rv:1},{n:"Khác",v:4.2}]},
+   {n:"Chương trình ít dùng",v:5.6,c:[{n:"Android Studio",v:5.6,rv:1}]},
+   {n:"Dữ liệu SQL",v:4.2,c:[{n:"wms_dev_2022.mdf",v:4.2,rv:1}]},
+   {n:"Documents",v:8,c:[{n:"Tài liệu",v:8}]},
+   {n:"Khác trong hồ sơ",v:11.5,c:[{n:"Ảnh, video, nhạc",v:11.5}]},
+   {n:"Trống",v:8.6,free:1}]},
+ D:{name:"D:",total:300,free:216,fixed:12,
+  groups:[
+   {k:"docker",name:"Ảnh Docker không dùng",size:6.0,risk:"mid",mode:"ask",ev:"Chưa chạy thử lượt nào",items:mkItems(["wms-api","wms-web","mssql-dev"],"image",6.0,3,50)},
+   {k:"oldbak",name:"Bản sao lưu cũ hơn 90 ngày",size:3.2,risk:"low",mode:"keep",ev:"Đang đặt «Luôn giữ»",items:mkItems(["db-nightly"],"bak",3.2,2,120)}],
+  review:[],prot:[],
+  tree:[{n:"Hệ thống & chương trình",v:12,sys:1},{n:"D:\\Backups",v:20,c:[{n:"Bản cũ",v:3.2,k:"oldbak"},{n:"Gần đây",v:16.8}]},{n:"D:\\Docker",v:18,c:[{n:"Ảnh dùng",v:12},{n:"Ảnh không dùng",v:6,k:"docker"}]},{n:"D:\\Data",v:34,c:[{n:"Dữ liệu",v:34}]},{n:"Trống",v:216,free:1}]}
+};
+var RAM={total:7.8,free:2.4,
+ groups:[
+  {k:"browser",name:"Trình duyệt Edge (23 tiến trình)",short:"Trình duyệt",v:1.3,cpu:2,color:"var(--r-browser)",closable:true,
+   what:"Các tab trình duyệt đang mở, trong đó một tab Azure DevOps chiếm nhiều nhất.",who:"Bạn mở (Edge)",cmd:"msedge.exe --type=renderer --lang=vi --enable-features=…",hint:"Muốn đóng: đóng bớt tab trong Edge.",
+   procs:[["msedge · tab «Azure DevOps — Boards»","0,32 GB"],["msedge · tab «Stack Overflow»","0,21 GB"],["msedge · GPU process","0,18 GB"],["…còn 20 tiến trình nhỏ","0,59 GB"]],series:null},
+  {k:"build",name:"Build .NET · dự án dxwms",short:"Build .NET",v:1.4,cpu:38,color:"var(--r-build)",closable:true,
+   what:"Đang build dự án dxwms (dotnet build) và trình biên dịch C# chạy nền.",who:"VS Code → pwsh → dotnet (chạy 4 phút)",cmd:"dotnet build src\\Dxwms.Api\\Dxwms.Api.csproj --configuration Debug --token ****",hint:"Muốn đóng: nhấn Ctrl+C ở terminal trong VS Code.",
+   procs:[["dotnet build · do VS Code mở","0,85 GB"],["VBCSCompiler · trình biên dịch C# chạy nền","0,41 GB"],["MSBuild node · nút build phụ","0,14 GB"]],series:[3,3,4,5,5,6,8,9,8,7,9,11,12,13,12,14,13,12,14,14,13,14,14,14]},
+  {k:"vscode",name:"VS Code (12 tiến trình)",short:"VS Code",v:0.8,cpu:4,color:"var(--r-vscode)",closable:true,
+   what:"Trình soạn thảo cùng các tiện ích mở rộng (C#, Angular).",who:"Bạn mở",cmd:"Code.exe --type=extensionHost …",hint:"Muốn đóng: tắt cửa sổ VS Code.",
+   procs:[["Code · extension host","0,31 GB"],["Code · C# language server","0,28 GB"],["…còn 10 tiến trình nhỏ","0,21 GB"]],series:null},
+  {k:"windows",name:"Windows (dịch vụ hệ thống)",short:"Windows",v:1.2,cpu:3,color:"var(--r-windows)",closable:false,
+   what:"Dịch vụ nền của hệ điều hành: svchost (2 dịch vụ lớn nhất: Windows Update, SysMain).",who:"Hệ thống",cmd:"(không đọc được dòng lệnh — thiếu quyền)",hint:"Không nên đóng — là phần của Windows.",
+   procs:[["svchost · Windows Update, SysMain","0,52 GB"],["MsMpEng · Windows Defender","0,38 GB"],["…còn 40 dịch vụ nhỏ","0,30 GB"]],series:null},
+  {k:"ai",name:"Trợ lý AI: claude (được bảo vệ)",short:"Trợ lý AI",v:0.4,cpu:1,color:"var(--r-ai)",closable:false,
+   what:"Trợ lý lập trình đang chạy trong terminal.",who:"Bạn mở (pwsh)",cmd:"node claude.js --resume",hint:"Được bảo vệ — Resource Guard không đề xuất đóng.",
+   procs:[["node · claude","0,40 GB"]],series:null},
+  {k:"other",name:"Khác (31 tiến trình nhỏ)",short:"Khác",v:0.3,cpu:1,color:"var(--r-other)",closable:true,
+   what:"Nhiều tiến trình nhỏ, mỗi cái dưới 50 MB.",who:"Nhiều nguồn",cmd:"—",hint:"Không đáng đóng — mỗi cái quá nhỏ.",
+   procs:[["31 tiến trình < 50 MB","0,30 GB"]],series:null}]};
+RAM.used=RAM.total-RAM.free;
+var USEDSUM=0;RAM.groups.forEach(function(g){USEDSUM+=g.v});
+
+/* ====================================================================== */
+/*                               ĐIỀU HƯỚNG                                 */
+/* ====================================================================== */
+var NAV=[["home","Tổng quan"],["disk","Ổ đĩa"],["mem","Bộ nhớ & tiến trình"],["settings","Cài đặt"]];
+function renderNav(cur){$("#nav").innerHTML=NAV.map(function(n){return '<a href="#'+n[0]+'" class="'+(n[0]===cur?"on":"")+'">'+n[1]+(n[0]==="disk"?'<span class="nb" title="Mục dọn được">3</span>':"")+'</a>'}).join("")}
+var cleanup=null;
+function route(){
+  var h=(location.hash||"#home").slice(1);if(!/^(home|disk|mem|settings)$/.test(h))h="home";
+  if(cleanup){cleanup();cleanup=null}
+  pinnedKeys=[];$("#savebar").classList.remove("show");renderNav(h);
+  var old=$("#view"),v=old.cloneNode(false);old.parentNode.replaceChild(v,old);v.className="";
+  ({home:pgHome,disk:pgDisk,mem:pgMem,settings:pgSettings})[h](v);window.scrollTo(0,0)}
+window.addEventListener("hashchange",route);
+$("#stBadge").onclick=function(e){e.stopPropagation();$("#stPop").classList.toggle("show")};
+document.addEventListener("click",function(){$("#stPop").classList.remove("show")});
+$("#themeBtn").onclick=function(){var r=document.documentElement,d=r.getAttribute("data-theme");
+  var cur=d||(matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");r.setAttribute("data-theme",cur==="dark"?"light":"dark");setTimeout(route,0)};
+
+/* ====================================================================== */
+/*                               MÀN Ổ ĐĨA                                  */
+/* ====================================================================== */
+var DS={};/* trạng thái từng ổ */
+function initDS(d){if(DS[d])return;var D=DR[d];DS[d]={sel:{},mode:{},thr:10,auto:"dry",open:{},view:"map",prot:{}};
+  D.groups.forEach(function(g,i){DS[d].sel[g.k]=g.mode!=="keep"&&g.risk==="low";DS[d].mode[g.k]=g.mode});
+  DS[d].init=JSON.stringify([DS[d].mode,DS[d].thr,DS[d].auto])}
+var curDrive="C";
+function pgDisk(view){
+  var d=curDrive;initDS(d);var D=DR[d],S=DS[d],TH=[10,15,20];
+  /* 6 nhóm dùng chung cho thanh, hình tròn, bản đồ, chú giải: [khoá, tên, màu, gạch chéo] */
+  var CLS=[["sys","Hệ thống & chương trình","var(--d-system)"],["mine","Dự án & tệp của bạn","var(--d-mine)"],["review","Cần bạn xem lại","var(--d-review)"],["clean","Dọn được, chưa chọn","var(--normal)"],["sel","Sẽ dọn (đã chọn)","var(--normal)",1],["free","Trống","var(--free)"]];
+  view.innerHTML=
+   '<div class="ph card" style="border-radius:var(--radius);margin-bottom:var(--space-3)">'+
+   ["C","D"].map(function(x){var f=DR[x].free,st=stDisk(f);return '<button class="btn '+(x===d?"pri":"")+'" data-drive="'+x+'">'+x+': còn '+fmtGB(f)+' &nbsp;'+(x===d?'':badge(st))+'</button>'}).join("")+
+   (function(){var st=stDisk(D.free);return badge(st)})()+
+   '<span class="sp"></span><span class="mut sm">quét 3 phút trước</span><button class="btn" id="rescan">Quét lại</button></div>'+
+   '<section class="card ws-sticky" id="sum"><div class="pb">'+
+     '<div class="barwrap" id="barwrap"><div class="rbar viz" id="bar"></div><div class="zstrip" id="zs"></div><div class="autoz" id="autoz"></div>'+
+       '<div class="thr" id="thr" tabindex="0" role="slider" aria-label="Mốc tự dọn: kéo để đổi"><i></i><span class="thl" id="tl"></span><div class="tp" id="tp"></div></div></div>'+
+     '<div class="bar-lbl" id="barLbl"></div>'+
+     '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px"><span id="sumTxt"></span><span style="flex:1"></span><button class="btn pri" id="doClean"></button></div>'+
+   '</div></section>'+
+   '<div class="ws"><section class="card"><div class="ph"><h3>Bản đồ ổ '+D.name+'</h3>'+help("Hình tròn, thanh trên và bản đồ chữ nhật cùng một bảng màu. Mỗi ô của bản đồ là một thư mục; tổng diện tích mỗi màu bằng đúng phần tương ứng của hình tròn.")+
+     '<span class="sp"></span><span class="seg" id="mapSeg"><button data-v="map" class="on">Bản đồ</button><button data-v="top">Danh sách lớn nhất</button></span></div>'+
+     '<div class="pb"><div class="mapTop"><div id="dn"></div><div id="lg"></div></div><div id="mapBody"></div></div></section>'+
+   '<section class="card"><div class="ph"><h3>Việc có thể làm</h3><span class="sp"></span></div>'+
+     '<div class="autoRow"><b>Tự động hoá</b><span class="seg" id="autoSeg"><button data-a="off">Tắt</button><button data-a="dry">Chạy thử</button><button data-a="on">Bật</button><button data-a="ai" disabled title="Sắp có: trợ lý AI xử lý các mục mơ hồ theo quy tắc của bạn">Bật + AI</button></span><span class="mut sm" id="autoTxt" style="flex:1;min-width:200px"></span></div>'+
+     '<div id="rows"></div></section></div>'+
+   '<details class="card" style="margin-top:var(--space-4)"><summary class="ph" style="cursor:pointer;border:0"><h3>▸ Lịch sử ổ '+D.name+'</h3></summary><div class="pb"><div class="empty">Đang thu thập dữ liệu (5/12 mẫu)</div></div></details>';
+
+  var saved=function(){return JSON.stringify([S.mode,S.thr,S.auto])};
+  function selGroups(){return D.groups.filter(function(g){return S.sel[g.k]})}
+  function gain(){var s=0;selGroups().forEach(function(g){s+=g.size});return s}
+  function count(){var c=0;selGroups().forEach(function(g){c+=g.items.length});return c}
+  function autoGroups(){return D.groups.filter(function(g){return S.mode[g.k]==="auto"})}
+  function sizes(){var clean=0,rv=0;D.groups.forEach(function(x){clean+=x.size});D.review.forEach(function(x){rv+=x.s});
+    var g=gain(),used=D.total-D.free;
+    return {sys:D.fixed,mine:Math.max(0,used-D.fixed-clean-rv),review:rv,clean:clean-g,sel:g,free:D.free}}
+  function keys(){var sk=selGroups().map(function(x){return x.k}).join(" "),uk=D.groups.filter(function(x){return !S.sel[x.k]}).map(function(x){return x.k}).join(" ");
+    return {sys:"sys",mine:"mine",review:"review",clean:("clean "+uk).trim(),sel:("sel "+sk).trim(),free:"free"}}
+  function clsOf(m){if(m.sys)return"sys";if(m.free)return"free";if(m.rv)return"review";if(m.k)return S.sel[m.k]?"sel":"clean";return"mine"}
+
+  function drawSummary(){
+    var z=sizes(),K=keys(),g=z.sel,used=D.total-D.free,fa=D.free+g,st0=stDisk(D.free),st1=stDisk(fa);
+    $("#bar").innerHTML=CLS.map(function(x){var v=z[x[0]];if(v<=0)return"";return '<div class="'+(x[3]?"hatch":"")+'" data-k="'+esc(K[x[0]])+'" style="width:'+v/D.total*100+'%;background-color:'+x[2]+'" title="'+esc(x[1])+": "+fmtGB(v)+'"></div>'}).join("");
+    $("#zs").innerHTML=zstrip(D.total,TH);
+    $("#barLbl").innerHTML='<span>Đã dùng <b>'+fmtGB(used)+'</b></span>'+(g>0?'<span style="color:var(--normal)">Sẽ giải phóng <b>'+fmtGB(g)+'</b></span>':'')+'<span>Trống <b>'+fmtGB(D.free)+'</b>'+(g>0?' → <b>'+fmtGB(fa)+'</b>':'')+' / '+fmtGB(D.total)+'</span>';
+    $("#sumTxt").innerHTML=(g>0?badge(st0)+' → '+badge(st1)+' · ':badge(st0)+' · ')+'đã chọn <b>'+count()+'</b> mục';
+    var b=$("#doClean");b.textContent=g>0?"Dọn "+count()+" mục đã chọn ("+fmtGB(g)+")":"Chưa chọn mục nào";b.disabled=g<=0;
+    drawDonut();drawAutoTxt();if(S.view==="map")drawTM();
+  }
+  function drawDonut(){
+    var z=sizes(),K=keys(),segs=CLS.slice(0,5).map(function(x){return {k:K[x[0]],name:x[1],v:z[x[0]],color:x[2],hatch:x[3]}});
+    donut($("#dn"),segs,D.total,{big:fmtGB(D.free),small:"trống"},132,24);
+    legend($("#lg"),CLS.map(function(x){return {k:K[x[0]],name:x[1],v:z[x[0]],color:x[2],hatch:x[3]}}).filter(function(s){return s.v>0}));
+    setHL(hlKeys);
+  }
+  /* mốc tự dọn nằm TRÊN thanh dung lượng; tính theo "đã dùng vượt …"; chỉ chi tiết khi rê/kéo/focus */
+  function drawThr(){
+    var T=D.total,ut=T-S.thr,x=ut/T*100,off=S.auto==="off",ag=autoGroups(),sz=0;ag.forEach(function(g){sz+=g.size});
+    var h=$("#thr");h.style.left=x+"%";h.classList.toggle("off",off);h.classList.toggle("r",x>58);
+    h.setAttribute("aria-valuenow",Math.round(ut));h.setAttribute("aria-valuetext","Tự dọn khi đã dùng quá "+fmtGB(ut));
+    $("#tl").textContent=off?"Tự dọn: tắt":"Tự dọn tại mốc này";
+    var hits=S.thr>=15?9:S.thr>=10?3:S.thr>=7?1:0;
+    $("#tp").innerHTML='<b>Tự dọn khi đã dùng quá '+fmtGB(ut)+'</b><br>(còn dưới '+fmtGB(S.thr)+' · '+stDisk(S.thr-0.01)[1]+')<br>'+
+      (off?'Đang tắt tự dọn.':(S.auto==="dry"?'Ghi lại những gì sẽ dọn':'Tự dọn')+' '+ag.length+' nhóm đặt «Tự động» (~'+fmtGB(sz)+')')+
+      '<br><span class="mut">14 ngày qua chạm mốc này '+hits+' lần</span><br><span class="mut">Kéo được tới sát vùng hệ thống ('+fmtGB(D.fixed)+', không dọn được).</span>';
+    var az=$("#autoz");az.style.left=x+"%";az.style.width=(100-x)+"%";az.classList.toggle("off",off);
+  }
+  function drawAutoTxt(){
+    $$("#autoSeg button").forEach(function(b){b.classList.toggle("on",b.getAttribute("data-a")===S.auto)});
+    var ag=autoGroups(),sz=0;ag.forEach(function(x){sz+=x.size});
+    var t=S.auto==="off"?"Không tự dọn. Bạn dọn bằng tay.":
+      "Khi ổ "+D.name+" đã dùng quá "+fmtGB(D.total-S.thr)+" (còn dưới "+fmtGB(S.thr)+"), "+(S.auto==="dry"?"ghi lại những gì SẼ dọn (chưa xoá)":"tự dọn")+" "+ag.length+" nhóm đặt «Tự động» (~"+fmtGB(sz)+").";
+    $("#autoTxt").textContent=t;drawThr();
+    var dirty=saved()!==S.init;$("#savebar").classList.toggle("show",dirty);$("#saveTxt").textContent=dirty?"Lưu sẽ hỏi PIN ở bản thật.":"";
+  }
+  var VD={del:["nên gỡ","vd-del"],keep:["nên giữ","vd-keep"],ask:["nên xem lại","vd-ask"]};
+  function pendingAI(){return S.aiAsked?0:D.review.filter(function(r){return !r.ai}).length}
+  function drawRows(){
+    var h=D.groups.map(function(g){var on=S.sel[g.k],open=S.open[g.k];
+      var items=open?'<div class="items">'+g.items.map(function(it,i){var pk=g.k+i,pr=S.prot[pk];return '<div class="it"><span class="n" title="'+esc(it.p)+'">'+esc(it.n)+'<br><small>'+esc(it.p)+'</small></span><span class="num">'+fmtGB(it.s)+'</span><small>'+it.age+' ngày</small><button class="shield '+(pr?"on":"")+'" data-sh="'+pk+'" title="Bảo vệ mục này khỏi dọn">🛡</button></div>'}).join("")+'</div>':"";
+      return '<div class="grow" data-k="'+g.k+'" data-row="'+g.k+'"><div class="gtop"><input type="checkbox" '+(on?"checked":"")+' data-ck="'+g.k+'" aria-label="Chọn '+esc(g.name)+'"><span class="gname">'+esc(g.name)+'</span><span class="gsz">'+fmtGB(g.size)+'</span><span class="risk '+g.risk+'">● '+(g.risk==="low"?"thấp":"vừa")+'</span></div>'+
+        '<div class="gsub">'+esc(g.ev)+'</div><div class="gctl"><span class="seg" data-ms="'+g.k+'"><button data-m="auto" class="'+(S.mode[g.k]==="auto"?"on":"")+'">Tự động</button><button data-m="ask" class="'+(S.mode[g.k]==="ask"?"on":"")+'">Hỏi tôi</button><button data-m="keep" class="'+(S.mode[g.k]==="keep"?"on":"")+'">Luôn giữ</button></span>'+
+        '<span class="mut sm">'+g.items.length+' mục</span><button class="exp" data-ex="'+g.k+'">'+(open?"▾ Thu gọn":"▸ Xem từng mục")+'</button></div>'+items+'</div>'}).join("");
+    var pend=pendingAI();
+    h+='<div class="sec">Cần bạn xem lại ('+D.review.length+')'+help("Mục lâu không dùng, tệp CSDL, chương trình ít chạy: không bao giờ tự xoá. Trợ lý AI chỉ đọc bản tóm tắt (tên, tuổi, dung lượng, chương trình sở hữu, có đang dùng không), không đọc nội dung tệp, và chỉ đưa gợi ý.")+'<span class="sp"></span>'+
+      (D.review.length?'<button class="btn" id="askAI"'+(pend?'':' disabled')+'>'+(pend?'Hỏi trợ lý AI ('+pend+' mục chưa đánh giá)':'Đã đánh giá hết')+'</button>':'')+'</div>';
+    if(!D.review.length)h+='<div class="grow"><span class="mut sm">Không có mục nào cần xem lại.</span></div>';
+    h+=D.review.map(function(r){var a=r.ai||(S.aiAsked&&r.ai2),line='';
+      if(a){var v=VD[a.v];line='<div class="gsub"><span class="vd '+v[1]+'">Trợ lý AI: '+v[0]+' · '+a.c+'%</span> '+esc(a.why)+'</div>'}
+      else line='<div class="gsub mut">Trợ lý AI: chưa đánh giá</div>';
+      return '<div class="grow" data-k="review"><div class="gtop"><span class="gname" style="font-weight:500">'+esc(r.n)+'</span><span class="gsz">'+fmtGB(r.s)+'</span></div><div class="gsub">'+esc(r.age)+' · '+esc(r.ev)+'</div>'+line+'</div>'}).join("");
+    h+='<div class="sec">Được bảo vệ / chỉ báo cáo ('+D.prot.length+')</div>';
+    h+=D.prot.map(function(r){return '<div class="grow"><div class="gtop"><span>🛡</span><span class="gname" style="font-weight:500">'+esc(r.n)+'</span><span class="gsz">'+fmtGB(r.s)+'</span></div></div>'}).join("");
+    $("#rows").innerHTML=h;$("#rows").classList.add("viz");
+    setHL(pinnedKeys);
+  }
+  function drawTM(){var el=$("#tm");if(el)treemap(el,D.tree,clsOf)}
+  function drawMap(){
+    var mb=$("#mapBody");
+    if(S.view==="map"){
+      mb.innerHTML='<div class="tm" id="tm"></div><div class="hint" style="margin-top:6px">Mỗi ô là một thư mục, màu theo nhóm như hình tròn. Rê vào hình tròn hoặc chú giải để làm sáng các ô cùng nhóm; bấm một ô để tới mục tương ứng bên phải.</div>';
+      drawTM();
+      $("#tm").addEventListener("click",function(e){var t=e.target.closest(".c");if(!t)return;var k=t.getAttribute("data-tm");
+        if(!k){return}pinnedKeys=[k];setHL(pinnedKeys);var row=$('[data-row="'+k+'"]');if(row){row.scrollIntoView({behavior:"smooth",block:"center"});row.classList.remove("flash");void row.offsetWidth;row.classList.add("flash")}});
+    }else{
+      var all=[];D.groups.forEach(function(g){all.push([g.name,g.size,g.k,S.sel[g.k]?"var(--normal)":"var(--normal)"])});D.review.forEach(function(r){all.push([r.n,r.s,"review","var(--d-review)"])});all.sort(function(a,b){return b[1]-a[1]});
+      var mx=all[0][1];
+      mb.innerHTML=all.map(function(a){return '<div data-k="'+a[2]+'" style="margin:0 0 8px"><div class="sm" style="display:flex;gap:8px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a[0])+'</span><b class="num">'+fmtGB(a[1])+'</b></div><div style="height:9px;border-radius:5px;background:'+a[3]+';width:'+a[1]/mx*100+'%"></div></div>'}).join("");
+      mb.classList.add("viz");
+    }
+  }
+  function wireThr(){
+    var h=$("#thr"),w=$("#barwrap");
+    function setUsed(ut){ut=Math.max(D.fixed+1,Math.min(D.total-1,ut));var f=Math.round((D.total-ut)*2)/2;f=Math.max(1,Math.min(D.total-D.fixed-1,f));if(f===S.thr)return;S.thr=f;drawAutoTxt()}
+    h.addEventListener("pointerdown",function(e){h.setPointerCapture(e.pointerId);h.classList.add("drag");e.preventDefault();
+      var mv=function(ev){var r=w.getBoundingClientRect();setUsed((ev.clientX-r.left)/r.width*D.total)};
+      var up=function(){h.classList.remove("drag");h.removeEventListener("pointermove",mv);h.removeEventListener("pointerup",up)};
+      h.addEventListener("pointermove",mv);h.addEventListener("pointerup",up)});
+    h.addEventListener("keydown",function(e){var st=e.shiftKey?5:1;
+      if(e.key==="ArrowLeft"||e.key==="ArrowDown"){setUsed(D.total-S.thr-st);e.preventDefault()}
+      if(e.key==="ArrowRight"||e.key==="ArrowUp"){setUsed(D.total-S.thr+st);e.preventDefault()}});
+  }
+  /* sự kiện */
+  view.addEventListener("click",function(e){
+    var t=e.target;
+    var dv=t.closest("[data-drive]");if(dv){curDrive=dv.getAttribute("data-drive");route();return}
+    var ck=t.closest("[data-ck]");if(ck){S.sel[ck.getAttribute("data-ck")]=ck.checked;drawSummary();return}
+    var ms=t.closest("[data-ms] button");if(ms){var k=ms.parentNode.getAttribute("data-ms");S.mode[k]=ms.getAttribute("data-m");if(S.mode[k]==="keep"){S.sel[k]=false}drawRows();drawSummary();return}
+    var ex=t.closest("[data-ex]");if(ex){var k2=ex.getAttribute("data-ex");S.open[k2]=!S.open[k2];drawRows();return}
+    var sh=t.closest("[data-sh]");if(sh){var k3=sh.getAttribute("data-sh");S.prot[k3]=!S.prot[k3];sh.classList.toggle("on",S.prot[k3]);toast(S.prot[k3]?"Đã bảo vệ mục này":"Đã bỏ bảo vệ");return}
+    var as=t.closest("#autoSeg button");if(as&&!as.disabled){S.auto=as.getAttribute("data-a");drawAutoTxt();return}
+    var ms2=t.closest("#mapSeg button");if(ms2){S.view=ms2.getAttribute("data-v");$$("#mapSeg button").forEach(function(b){b.classList.toggle("on",b===ms2)});drawMap();drawSummary();return}
+    if(t.closest("#rescan")){toast("Đang quét lại… (bản mẫu)");return}
+    if(t.closest("#askAI")){var n=pendingAI();if(!n)return;S.aiAsked=true;drawRows();toast("Đã gửi bản tóm tắt "+n+" mục (~"+n*120+" token). Kết quả chỉ là gợi ý, không tự xoá.");return}
+    if(t.closest("#doClean")){var g=gain();
+      modal('<h3>Xác nhận dọn '+count()+' mục?</h3><p>Ổ '+D.name+' sẽ trống <b>'+fmtGB(D.free)+' → '+fmtGB(D.free+g)+'</b> ('+stDisk(D.free)[1]+' → '+stDisk(D.free+g)[1]+').</p><p class="hint">Bản thật: mục vào thùng rác trước khi xoá hẳn; có ô nén zip và hỏi PIN.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" id="mCancel">Huỷ</button><button class="btn pri" id="mOk">Dọn (giả lập)</button></div>',function(){toast("Đã dọn "+fmtGB(g)+" (giả lập, không xoá gì)")});return}
+  });
+  wireHL(view,function(t){return t.getAttribute("data-k").split(" ")});
+  $("#saveOk").onclick=function(){S.init=saved();drawAutoTxt();toast("Đã lưu chính sách (giả lập)")};
+  $("#saveCancel").onclick=function(){var o=JSON.parse(S.init);S.mode=o[0];S.thr=o[1];S.auto=o[2];drawRows();drawSummary()};
+  var rz=function(){if(S.view==="map"&&$("#tm"))drawTM()};window.addEventListener("resize",rz);
+  cleanup=function(){window.removeEventListener("resize",rz)};
+  drawRows();drawMap();drawSummary();wireThr();
+}
+
+
+/* ====================================================================== */
+/*                         MÀN BỘ NHỚ & TIẾN TRÌNH                          */
+/* ====================================================================== */
+var MS={sel:"build",mode:"group",filter:""};
+function pgMem(view){
+  view.innerHTML=
+   '<section class="card ws-sticky"><div class="pb"><div class="rbar viz" id="rb"></div><div class="zstrip" id="rmarks"></div>'+
+   '<div class="bar-lbl" id="rbl"></div></div></section>'+
+   '<div class="ws" style="grid-template-columns:60fr 40fr"><section class="card"><div class="ph"><h3>Ai đang dùng RAM</h3>'+help("Gộp theo việc đang làm (build, trình duyệt…). Chọn một dòng để xem chi tiết và hiệu quả nếu đóng.")+'<span class="sp"></span>'+
+   '<span class="seg" id="mmSeg"><button data-m="group" class="on">Gộp theo việc</button><button data-m="proc">Từng tiến trình</button></span></div>'+
+   '<div class="pb" style="border-bottom:1px solid var(--line)"><div class="mapTop" style="margin:0"><div id="rdn"></div><div id="rlg"></div></div></div>'+
+   '<div style="padding:8px var(--space-4);border-bottom:1px solid var(--line)"><input id="flt" placeholder="Lọc theo tên…" style="width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--fg)"></div>'+
+   '<div class="plist viz" id="pl"></div></section>'+
+   '<section class="card" id="det"></section></div>'+
+   '<details class="card" style="margin-top:var(--space-4)"><summary class="ph" style="cursor:pointer;border:0"><h3>▸ CPU theo thời gian · Từng nhân logic · Thông tin máy</h3></summary><div class="pb"><div class="empty">Đang thu thập dữ liệu (7/12 mẫu)</div></div></details>';
+  function sel(){return RAM.groups.filter(function(g){return g.k===MS.sel})[0]}
+  function drawBar(){
+    var g=sel(),gain=g&&g.closable?g.v:0,fa=RAM.free+gain,T=RAM.total;
+    $("#rb").innerHTML=RAM.groups.map(function(x){var hat=(x.k===MS.sel&&gain>0);
+      return '<div class="'+(hat?"hatch":"")+'" data-k="'+x.k+'" style="width:'+x.v/T*100+'%;background-color:'+x.color+'" title="'+esc(x.short)+": "+fmtGB(x.v)+'"></div>'}).join("");
+    $("#rmarks").innerHTML=zstrip(T,[2.5,3.5,5]);
+    var st0=stRam(RAM.free),st1=stRam(fa);
+    $("#rbl").innerHTML=RAM.groups.map(function(x){return '<span data-k="'+x.k+'" style="white-space:nowrap"><i style="display:inline-block;width:10px;height:10px;border-radius:3px;background:'+x.color+'"></i> '+esc(x.short)+' <b>'+fmtGB(x.v)+'</b></span>'}).join("")+
+      '<span style="flex-basis:100%;height:0"></span>'+
+      '<span>Trống <b>'+fmtGB(RAM.free)+'</b> '+badge(st0)+'</span>'+(gain>0?'<span style="color:var(--normal)">Nếu đóng «'+esc(g.short)+'»: trống <b>'+fmtGB(RAM.free)+' → '+fmtGB(fa)+'</b> · '+st0[1]+' → '+st1[1]+'</span>':'<span class="mut">Mục đang chọn không đóng được từ đây.</span>');
+    var segs=RAM.groups.map(function(x){return {k:x.k,name:x.name,v:x.v,color:x.color,hatch:(x.k===MS.sel&&gain>0)}});
+    donut($("#rdn"),segs,T,{big:fmtGB(gain>0?fa:RAM.free),small:gain>0?"nếu đóng":"trống"},132,24);
+    legend($("#rlg"),RAM.groups.map(function(x){return {k:x.k,name:x.short,v:x.v,color:x.color}}).concat([{k:"",name:"Trống",v:RAM.free,color:"var(--free)"}]));
+    setHL(hlKeys);
+  }
+  function drawList(){
+    var f=MS.filter.toLowerCase(),h="";
+    if(MS.mode==="group"){
+      RAM.groups.forEach(function(g){ if(f&&(g.name+g.procs.join()).toLowerCase().indexOf(f)<0)return;
+        h+='<div class="pr '+(g.k===MS.sel?"sel":"")+'" data-k="'+g.k+'" data-g="'+g.k+'"><span class="dot" style="background:'+g.color+'"></span><b style="font-weight:600">'+esc(g.name)+'</b><span class="num"><b>'+fmtGB(g.v)+'</b></span><span class="mut num sm">'+g.cpu+'% CPU</span></div>';
+        if(g.k===MS.sel)h+=g.procs.map(function(p){return '<div class="ch"><span style="flex:1;min-width:0"><b>'+esc(p[0].split(" · ")[0])+'</b>'+(p[0].indexOf(" · ")>0?' · '+esc(p[0].split(" · ").slice(1).join(" · ")):'')+'</span><span class="num">'+p[1]+'</span></div>'}).join("")});
+    }else{
+      var all=[];RAM.groups.forEach(function(g){g.procs.forEach(function(p){all.push({g:g,n:p[0],m:p[1]})})});
+      all.sort(function(a,b){return parseFloat(b.m.replace(",","."))-parseFloat(a.m.replace(",","."))});
+      all.forEach(function(p){if(f&&p.n.toLowerCase().indexOf(f)<0)return;h+='<div class="pr '+(p.g.k===MS.sel?"sel":"")+'" data-k="'+p.g.k+'" data-g="'+p.g.k+'"><span class="dot" style="background:'+p.g.color+'"></span><span>'+esc(p.n)+'</span><span class="num"><b>'+p.m+'</b></span><span class="mut sm">'+esc(p.g.short)+'</span></div>'})}
+    $("#pl").innerHTML=h||'<div class="empty" style="margin:12px">Không có tiến trình khớp bộ lọc.</div>';setHL(hlKeys)}
+  function drawDet(){var g=sel(),gain=g.closable?g.v:0,fa=RAM.free+gain;
+    var chart=g.series?(function(){var s=g.series,mx=Math.max.apply(null,s),w=300,h=56,p=s.map(function(v,i){return (i/(s.length-1)*w).toFixed(1)+","+(h-4-v/mx*(h-10)).toFixed(1)}).join(" ");
+      return '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="56" preserveAspectRatio="none"><polyline points="'+p+'" fill="none" stroke="'+g.color+'" stroke-width="2"/></svg><div class="hint">RAM 1 giờ qua (24 mẫu)</div>'})():'<div class="empty">Đang thu thập dữ liệu ('+(5+g.procs.length)+'/12 mẫu)</div>';
+    $("#det").innerHTML='<div class="ph"><span class="dot" style="width:12px;height:12px;border-radius:3px;background:'+g.color+'"></span><h3 style="color:var(--fg);font-size:15px">'+esc(g.short)+'</h3><span class="sp"></span><span class="num"><b>'+fmtGB(g.v)+'</b> · '+g.cpu+'% CPU</span></div><div class="pb">'+
+      '<dl class="kv"><dt>Là gì</dt><dd>'+esc(g.what)+'</dd><dt>Của ai</dt><dd>'+esc(g.who)+'</dd><dt>Dòng lệnh</dt><dd><code>'+esc(g.cmd)+'</code></dd></dl>'+
+      '<div style="margin-top:14px">'+chart+'</div>'+
+      (gain>0?'<div class="gain">Nếu đóng: +'+fmtGB(gain)+' RAM → trống '+fmtGB(fa)+' · '+stRam(RAM.free)[1]+' → '+stRam(fa)[1]+'</div>':'<div class="gain" style="background:var(--panel2);color:var(--mut)">Không đề xuất đóng mục này.</div>')+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">'+(g.closable?'<button class="btn" data-act="Đã hạ ưu tiên (giả lập)">Hạ ưu tiên</button>':'')+'<button class="btn" data-act="Đã bảo vệ khỏi gợi ý (giả lập)">Bảo vệ</button></div>'+
+      '<p class="hint" style="margin-top:10px">'+esc(g.hint)+'</p><p class="hint">Resource Guard không có nút kết thúc tiến trình — bạn tự đóng trong ứng dụng.</p></div>'}
+  view.addEventListener("click",function(e){var g=e.target.closest("[data-g]");
+    if(g){MS.sel=g.getAttribute("data-g");pinnedKeys=[MS.sel];drawBar();drawList();drawDet();return}
+    var m=e.target.closest("#mmSeg button");if(m){MS.mode=m.getAttribute("data-m");$$("#mmSeg button").forEach(function(b){b.classList.toggle("on",b===m)});drawList();return}
+    var a=e.target.closest("[data-act]");if(a)toast(a.getAttribute("data-act"))});
+  $("#flt").addEventListener("input",function(){MS.filter=this.value;drawList()});
+  wireHL(view);pinnedKeys=[MS.sel];drawBar();drawList();drawDet();
+}
+
+/* ====================================================================== */
+/*                               MÀN TỔNG QUAN                              */
+/* ====================================================================== */
+function pgHome(view){
+  var steps=[{t:"Đóng Build .NET của dxwms nếu đã xong",g:1.4,res:"RAM"},{t:"Đóng bớt tab Edge",g:1.3,res:"RAM"}],on=[true,true];
+  view.innerHTML=
+   '<div class="alert b-critical" style="background:var(--critical-soft)"><div><h2>Máy đang thiếu RAM: còn 2,4 GB trống</h2>'+
+   '<div class="chips"><span class="mut sm" style="align-self:center">Sẵn sàng cho:</span><span class="chip no">Build ✗ thiếu 0,8 GB RAM</span><span class="chip no">Test ✗ thiếu 1,8 GB RAM</span><span class="chip ok">Trợ lý AI ✓</span></div></div><span class="sp"></span>'+
+   '<button class="btn" id="why">Vì sao?</button></div>'+
+   '<div id="whyTxt" class="card pb" style="display:none;margin-bottom:var(--space-4)">RAM trống 2,4 GB dưới ngưỡng Nguy cấp (2,5 GB). Build cần 3,2 GB trống, Test cần 4,2 GB. Ổ C còn 8,6 GB cũng đang Nguy cấp nhưng không gấp bằng RAM.</div>'+
+   '<section class="card" style="margin-bottom:var(--space-4)"><div class="ph"><h3>Tài nguyên</h3>'+help("Bấm một dòng để sang màn tương ứng.")+'<span class="sp"></span><span class="hint">hình tròn: ai đang chiếm</span></div><div id="resRows" class="viz"></div></section>'+
+   '<section class="card" style="margin-bottom:var(--space-4)"><div class="ph"><h3>Nên làm gì bây giờ</h3><span class="sp"></span><span class="hint">đúng tài nguyên đang thiếu</span></div><div id="steps"></div><div class="pb" id="after" style="font-weight:600"></div></section>'+
+   '<section class="card"><div class="ph"><h3>7 ngày qua Resource Guard đã</h3></div><div class="pb"><div class="tiles"><div class="tile"><b>3 lượt · 6,2 GB</b><span class="mut sm">tự dọn</span></div><div class="tile"><b>9 lượt · 5,2 GB</b><span class="mut sm">chạy thử — sẽ dọn</span></div><div class="tile"><b>2 lần</b><span class="mut sm">cảnh báo</span></div></div>'+
+   '<div class="tl"><div><time>Hôm nay 09:12</time><span>Cảnh báo RAM dưới 2,5 GB</span></div><div><time>Hôm qua 22:00</time><span>Tự dọn bin/obj cũ · 3,8 GB</span></div><div><time>3 ngày trước</time><span>Chạy thử «Gói NuGet» <span class="x">×4 lần</span></span></div><div><time>5 ngày trước</time><span>Cảnh báo ổ C dưới 10 GB</span></div></div></div></section>';
+  var rows=[
+   {n:"RAM",to:"mem",free:2.4,tot:7.8,st:stRam(2.4),note:"trống 2,4 / 7,8 GB",segs:RAM.groups.map(function(g){return {k:g.k,name:g.short,v:g.v,color:g.color}})},
+   {n:"Ổ C",to:"disk",free:8.6,tot:182,st:stDisk(8.6),note:"trống 8,6 / 182 GB · đủ dùng ~6 ngày",segs:[{k:"",name:"Hệ thống",v:52,color:"var(--d-system)"},{k:"",name:"Của bạn",v:109.4,color:"var(--d-mine)"},{k:"nuget",name:"Dọn được",v:13.4,color:"var(--normal)",hatch:1}]},
+   {n:"Ổ D",to:"disk",free:216,tot:300,st:stDisk(216),note:"trống 216 / 300 GB",segs:[{k:"",name:"Hệ thống",v:12,color:"var(--d-system)"},{k:"",name:"Của bạn",v:63,color:"var(--d-mine)"},{k:"",name:"Dọn được",v:9.2,color:"var(--normal)",hatch:1}]}];
+  $("#resRows").innerHTML=rows.map(function(r,i){return '<div class="res" data-to="'+r.to+'" data-i="'+i+'"><div class="dn" id="hd'+i+'"></div><div><div style="display:flex;gap:10px;align-items:baseline"><span class="t">'+r.n+'</span><span class="mut sm">'+r.note+'</span></div><div class="rbar" style="margin-top:6px;height:14px">'+r.segs.map(function(s){return '<div class="'+(s.hatch?"hatch":"")+'" style="width:'+s.v/r.tot*100+'%;background-color:'+s.color+'"></div>'}).join("")+'</div></div><div>'+badge(r.st)+'</div></div>'}).join("");
+  rows.forEach(function(r,i){donut($("#hd"+i),r.segs,r.tot,{big:Math.round((r.tot-r.free)/r.tot*100)+"%",small:"đã dùng"},68,12)});
+  function drawSteps(){
+    $("#steps").innerHTML=steps.map(function(s,i){return '<div class="step"><input type="checkbox" '+(on[i]?"checked":"")+' data-s="'+i+'" aria-label="Tính bước này"><span><b>'+(i+1)+'.</b> '+esc(s.t)+'</span><b class="num" style="color:var(--normal)">+'+fmtGB(s.g)+' RAM</b><span class="mut sm">bạn tự đóng</span><button class="btn" data-go="mem">Xem</button></div>'}).join("");
+    var g=0,n=0;steps.forEach(function(s,i){if(on[i]){g+=s.g;n++}});var fa=2.4+g;
+    $("#after").innerHTML=n?'→ Sau '+n+' bước: RAM trống 2,4 → <span style="color:var(--normal)">'+fmtGB(fa)+'</span> · '+badge(stRam(2.4))+' → '+badge(stRam(fa)):'<span class="mut">Chưa chọn bước nào.</span>'}
+  view.addEventListener("click",function(e){
+    var s=e.target.closest("[data-s]");if(s){on[+s.getAttribute("data-s")]=s.checked;drawSteps();return}
+    if(e.target.closest("[data-go]")){location.hash="#mem";return}
+    if(e.target.closest("#why")){var w=$("#whyTxt");w.style.display=w.style.display==="none"?"block":"none";return}
+    var r=e.target.closest(".res");if(r)location.hash="#"+r.getAttribute("data-to")});
+  wireHL(view);drawSteps();
+}
+function pgSettings(view){
+  view.innerHTML='<section class="card pb"><h3 style="font-size:16px;color:var(--fg)">Cài đặt</h3><p>Không có trong bản mẫu này (làm ở P10). Sẽ gồm: ngưỡng trạng thái (kéo như trên thước), PIN, thông báo, trợ lý AI, và phần «Nâng cao» của tự động hoá.</p></section>'}
+route();
+})();
+</script>
+</body>
+</html>

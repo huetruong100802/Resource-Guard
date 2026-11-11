@@ -2,8 +2,14 @@
 (function () {
   'use strict';
   var RG = window.RG, S = RG.S, $ = RG.$, MAX = 480;
-  var NAV = [['home', 'home', 'Trang chủ'], ['clean', 'trash', 'Dọn dẹp'], ['disk', 'disk', 'Ổ đĩa'], ['cpu', 'cpu', 'Tiến trình'], ['policy', 'policy', 'Tự động hoá'], ['settings', 'gear', 'Cài đặt']];
-  var ALIAS = { overview: 'home', '': 'home' };   // hash cũ; #agent mở ngăn kéo trợ lý ở Trang chủ
+  var NAV = [['home', 'home', 'Tổng quan'], ['disk', 'disk', 'Ổ đĩa'], ['mem', 'cpu', 'Bộ nhớ & tiến trình'], ['settings', 'gear', 'Cài đặt']];
+  // Hash cũ -> màn mới. Chỉ áp dụng khi trang cũ không còn đăng ký (clean/policy bị gỡ ở P7, cpu đổi thành mem ở P8); trong lúc chuyển tiếp trang cũ vẫn mở được.
+  var LEGACY = { clean: 'disk', policy: 'disk', cpu: 'mem', overview: 'home', agent: 'home', '': 'home' };
+  function resolve(name) {
+    if (name === 'mem' && !RG.pages.mem && RG.pages.cpu) return 'cpu';
+    if (!RG.pages[name] && LEGACY[name]) name = LEGACY[name];
+    return RG.pages[name] ? name : 'home';
+  }
   RG.nextAt = 0;
 
   RG.theme = function (t) {
@@ -18,22 +24,38 @@
   RG.go = function (name, noHash) {
     var wantAgent = name === 'agent';
     if (wantAgent) name = 'home';
-    if (ALIAS[name]) name = ALIAS[name];
-    if (!RG.pages[name]) name = 'home';
+    name = resolve(name);
     RG.cur = name;
     if (wantAgent) { noHash = false; setTimeout(function () { RG.askAgent(); }, 60); }
-    RG.$$('#nav button').forEach(function (b) { if (b.dataset.p === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    // Mục nav sáng theo màn đang mở; trang cũ (clean/policy/cpu) thuộc về mục của màn thay thế.
+    var navOf = { clean: 'disk', policy: 'disk', cpu: 'mem' }[name] || name;
+    RG.$$('#nav button').forEach(function (b) { if (b.dataset.p === navOf) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#pageTitle').textContent = RG.pages[name].title;
     if (!noHash) history.replaceState(null, '', '#' + name);
     var el = $('#page'); el.innerHTML = ''; window.scrollTo(0, 0);
     RG.pages[name].render(el);
     document.title = (S.live ? '[' + RG.human.state(S.live.state) + '] ' : '') + 'Resource Guard · ' + RG.pages[name].title;
   };
+  /* Badge trạng thái bấm được: popover liệt kê lý do + nút sang màn liên quan. */
   function setBadge(r) {
     var b = $('#badge'), why = RG.human.reasons(r);
     b.textContent = RG.human.state(r.state); b.className = 'badge ' + r.state;
     b.title = why.length ? why.join('; ') : 'Mọi chỉ số trong ngưỡng';
+    b.setAttribute('aria-haspopup', 'true');
+    if (RG.$('#badgePop')) RG.statusBadge(true);
   }
+  RG.statusBadge = function (refresh) {
+    var old = RG.$('#badgePop'), b = $('#badge');
+    if (old && !refresh) { old.parentNode.removeChild(old); b.setAttribute('aria-expanded', 'false'); return; }
+    if (old) old.parentNode.removeChild(old);
+    var items = RG.human.reasonItems(S.live), h = '<div class="pop-h">Trạng thái: <b>' + RG.esc(RG.human.state(S.live && S.live.state)) + '</b></div>';
+    h += items.length ? items.map(function (x, i) { return '<div class="pop-row"><span>' + RG.esc(x.text) + '</span><button class="btn sm" data-go="' + RG.esc(x.go) + '">Xem</button></div>'; }).join('') : '<div class="pop-row mut">Mọi chỉ số đang trong ngưỡng.</div>';
+    var p = document.createElement('div'); p.id = 'badgePop'; p.className = 'pop'; p.setAttribute('role', 'dialog'); p.setAttribute('aria-label', 'Lý do trạng thái'); p.innerHTML = h;
+    b.parentNode.appendChild(p); b.setAttribute('aria-expanded', 'true');
+    RG.$$('[data-go]', p).forEach(function (x) { x.onclick = function () { p.parentNode.removeChild(p); b.setAttribute('aria-expanded', 'false'); RG.go(x.dataset.go); }; });
+  };
+  document.addEventListener('click', function (e) { var p = RG.$('#badgePop'); if (p && !p.contains(e.target) && e.target.id !== 'badge') { p.parentNode.removeChild(p); var bb = $('#badge'); if (bb) bb.setAttribute('aria-expanded', 'false'); } });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { var p = RG.$('#badgePop'); if (p) { p.parentNode.removeChild(p); var bb = $('#badge'); if (bb) { bb.setAttribute('aria-expanded', 'false'); bb.focus(); } } } });
 
   function driveSig(a) { return (a || []).map(function (d) { return d.drive; }).join(','); }
   function onLive(r) {
@@ -42,7 +64,7 @@
     S.live = r;
     if (changed) {
       if (S.driveSel && !(r.drives || []).some(function (d) { return d.drive === S.driveSel; })) S.driveSel = null;
-      RG.loadDrives().catch(function () { }).then(function () { var q = RG.pages[RG.cur]; if (q && q.render && (RG.cur === 'home' || RG.cur === 'disk' || RG.cur === 'policy')) RG.go(RG.cur, true); });
+      RG.loadDrives().catch(function () { }).then(function () { var q = RG.pages[RG.cur]; if (q && q.render && (RG.cur === 'home' || RG.cur === 'disk')) RG.go(RG.cur, true); });
     }
     S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
     setBadge(r);
@@ -83,9 +105,10 @@
 
   function init() {
     $('#nav').innerHTML = NAV.map(function (n) {
-      return '<button data-p="' + n[0] + '">' + RG.icon(n[1]) + '<span class="lbl">' + n[2] + '</span>' + (n[0] === 'clean' ? '<span class="cnt" id="navCleanCnt" hidden>0</span>' : '') + '</button>';
+      return '<button data-p="' + n[0] + '">' + RG.icon(n[1]) + '<span class="lbl">' + n[2] + '</span>' + (n[0] === 'disk' ? '<span class="cnt" id="navDiskCnt" hidden>0</span>' : '') + '</button>';
     }).join('');
     RG.$$('#nav button').forEach(function (b) { b.onclick = function () { RG.go(b.dataset.p); }; });
+    $('#badge').onclick = function () { RG.statusBadge(); };
     $('#themeBtn').onclick = function () { RG.theme(dark() ? 'light' : 'dark'); };
     $('#quitBtn').onclick = function () { RG.quit(); };
     $('#themeBtn').innerHTML = RG.icon(dark() ? 'sun' : 'moon');

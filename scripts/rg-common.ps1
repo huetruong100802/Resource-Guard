@@ -1232,3 +1232,53 @@ function Invoke-RgApply {
         code = 0; message = $(if ($DryRun) { 'dry run' } else { 'applied' }); freedBytes = $freed; results = $results
     }
 }
+
+# ---------- Ngưỡng trạng thái sửa được từ UI (P4 plan-ux-clarity) ----------
+# Dạng vào/ra giống GET /api/settings: { ramAvailGB: { normalAbove, cautionFrom, restrictedFrom }, diskFreeGB: { normalAbove, cautionFrom }, commitPct: { restricted, critical } }.
+# Cho phép gửi một phần; phần thiếu lấy từ $Cfg hiện tại. Trả về { ok; error; merged } (merged = ngưỡng đầy đủ sau khi gộp).
+function Test-RgThresholdInput($In, $Cfg) {
+    $cur = [ordered]@{
+        ramAvailGB = [ordered]@{ normalAbove = [double]$Cfg.ram.normalAboveGB; cautionFrom = [double]$Cfg.ram.cautionFromGB; restrictedFrom = [double]$Cfg.ram.restrictedFromGB }
+        diskFreeGB = [ordered]@{ normalAbove = [double]$Cfg.disk.normalAboveGB; cautionFrom = [double]$Cfg.disk.cautionFromGB }
+        commitPct  = [ordered]@{ restricted = [double]$Cfg.commit.restrictedPct; critical = [double]$Cfg.commit.criticalPct }
+    }
+    $fail = { param($m) return [pscustomobject]@{ ok = $false; error = $m; merged = $null } }
+    if ($null -eq $In) { return (& $fail 'Thiếu ngưỡng.') }
+    foreach ($grp in @($cur.Keys)) {
+        $g = $In.PSObject.Properties[$grp]
+        if (-not $g -or $null -eq $g.Value) { continue }
+        foreach ($k in @($cur[$grp].Keys)) {
+            $p = $g.Value.PSObject.Properties[$k]
+            if (-not $p -or $null -eq $p.Value) { continue }
+            $d = 0.0
+            if (-not [double]::TryParse(([string]$p.Value), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d) -or [double]::IsNaN($d) -or [double]::IsInfinity($d)) { return (& $fail "Giá trị $grp.$k không phải số.") }
+            $cur[$grp][$k] = $d
+        }
+    }
+    $r = $cur.ramAvailGB; $d = $cur.diskFreeGB; $m = $cur.commitPct
+    foreach ($v in @($r.normalAbove, $r.cautionFrom, $r.restrictedFrom, $d.normalAbove, $d.cautionFrom, $m.restricted, $m.critical)) { if ($v -le 0) { return (& $fail 'Ngưỡng phải là số dương.') } }
+    if (-not ($r.normalAbove -gt $r.cautionFrom -and $r.cautionFrom -gt $r.restrictedFrom)) { return (& $fail 'RAM: mức Ổn phải lớn hơn Cần chú ý, và Cần chú ý lớn hơn Hạn chế.') }
+    if ($r.normalAbove -gt 256) { return (& $fail 'RAM: ngưỡng Ổn tối đa 256 GB.') }
+    if (-not ($d.normalAbove -gt $d.cautionFrom)) { return (& $fail 'Ổ đĩa: mức Ổn phải lớn hơn Cần chú ý.') }
+    if ($d.normalAbove -gt 5000) { return (& $fail 'Ổ đĩa: ngưỡng Ổn tối đa 5000 GB.') }
+    if (-not ($m.restricted -lt $m.critical)) { return (& $fail 'Bộ nhớ cam kết: mức Hạn chế phải nhỏ hơn Nguy cấp.') }
+    if ($m.restricted -lt 50 -or $m.critical -gt 100) { return (& $fail 'Bộ nhớ cam kết: phần trăm phải nằm trong khoảng 50 đến 100.') }
+    return [pscustomobject]@{ ok = $true; error = ''; merged = $cur }
+}
+
+# Nới lỏng = làm cho cảnh báo đến muộn hơn: ngưỡng "còn trống" thấp đi hoặc ngưỡng "% cam kết" cao lên. Dùng để quyết định có cần PIN khi tự động hoá đang Bật.
+function Test-RgThresholdsLoosened($Old, $New) {
+    foreach ($k in @('normalAbove', 'cautionFrom', 'restrictedFrom')) { if ([double]$New.ramAvailGB[$k] -lt [double]$Old.ramAvailGB[$k]) { return $true } }
+    foreach ($k in @('normalAbove', 'cautionFrom')) { if ([double]$New.diskFreeGB[$k] -lt [double]$Old.diskFreeGB[$k]) { return $true } }
+    foreach ($k in @('restricted', 'critical')) { if ([double]$New.commitPct[$k] -gt [double]$Old.commitPct[$k]) { return $true } }
+    return $false
+}
+
+# Ghi ngưỡng đã gộp vào config.json của người dùng (toàn bộ cấu hình, vì Get-RgConfig đọc đúng một file).
+function Save-RgThresholds($Merged) {
+    $cfg = Get-RgConfig
+    $cfg.ram.normalAboveGB = $Merged.ramAvailGB.normalAbove; $cfg.ram.cautionFromGB = $Merged.ramAvailGB.cautionFrom; $cfg.ram.restrictedFromGB = $Merged.ramAvailGB.restrictedFrom
+    $cfg.disk.normalAboveGB = $Merged.diskFreeGB.normalAbove; $cfg.disk.cautionFromGB = $Merged.diskFreeGB.cautionFrom
+    $cfg.commit.restrictedPct = $Merged.commitPct.restricted; $cfg.commit.criticalPct = $Merged.commitPct.critical
+    Write-RgFileAtomic (Join-Path (Initialize-RgHome) 'config.json') (ConvertTo-Json -InputObject $cfg -Depth 12)
+}

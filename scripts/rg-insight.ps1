@@ -148,9 +148,48 @@ function Get-RgDriveSamplesCached([int]$Days = 14) {
     return $script:RgSamplesCache
 }
 
+# Sự kiện ghi trong logs\rg-*.jsonl từ $Since (UTC) trở đi, chỉ các loại $Names. Đọc từng dòng và lọc bằng chuỗi trước khi parse JSON.
+function Read-RgEventsSince($Since, [string[]]$Names) {
+    $dir = Join-Path (Initialize-RgHome) 'logs'
+    $pat = '"event":"(' + ($Names -join '|') + ')"'
+    $out = New-Object System.Collections.ArrayList
+    $cut = ([datetime]$Since).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'rg-*.jsonl' -ErrorAction SilentlyContinue)) {
+        if ($f.LastWriteTime -lt ([datetime]$Since).ToLocalTime().AddDays(-1)) { continue }
+        foreach ($l in @(Get-Content -LiteralPath $f.FullName -Encoding UTF8 | Where-Object { $_ -match $pat })) {
+            try { $e = ConvertFrom-Json $l; if ([string]$e.ts -ge $cut) { [void]$out.Add($e) } } catch { }
+        }
+    }
+    return @($out)
+}
+
+# 7 ngày qua Resource Guard đã làm gì: số lượt tự dọn thật/chạy thử + dung lượng, dọn tay, và số lần trạng thái xấu đi (alerts).
+function Get-RgWeekSummary($Events = $null, $Now = $null) {
+    if ($null -eq $Now) { $Now = Get-Date }
+    if ($null -eq $Events) { $Events = Read-RgEventsSince (([datetime]$Now).AddDays(-7).ToUniversalTime()) @('auto-run', 'manual-cleanup', 'state-change') }
+    $cut = ([datetime]$Now).AddDays(-7).ToString('yyyy-MM-dd HH:mm:ss')
+    $rank = @{ Normal = 0; Caution = 1; Restricted = 2; Critical = 3 }
+    $w = [ordered]@{ autoRuns = 0; autoBytes = 0L; dryRuns = 0; dryBytes = 0L; alerts = 0; manualRuns = 0; manualBytes = 0L }
+    foreach ($e in @($Events)) {
+        if (-not $e -or [string]$e.ts -lt $cut) { continue }
+        $d = $e.data
+        switch ([string]$e.event) {
+            'auto-run' {
+                if ([string]$d.mode -eq 'dry-run') {
+                    $w.dryRuns++
+                    if ($d.byKind) { foreach ($p in $d.byKind.PSObject.Properties) { $w.dryBytes += [long]$p.Value.bytes } }
+                } else { $w.autoRuns++; $w.autoBytes += [long]$d.freedBytes }
+            }
+            'manual-cleanup' { $w.manualRuns++; $w.manualBytes += [long]$d.freedBytes }
+            'state-change' { if ($rank.ContainsKey([string]$d.to) -and $rank.ContainsKey([string]$d.from) -and $rank[[string]$d.to] -gt $rank[[string]$d.from]) { $w.alerts++ } }
+        }
+    }
+    return $w
+}
+
 # $Snapshot: availRamGB, commitPct, diskDrive, diskFreeGB, drives[{drive,freeGB,...}] (live của server dùng được ngay).
 # $Samples: hashtable drive -> mẫu (mặc định đọc metrics qua cache). $Table: bảng tiến trình server đang giữ.
-function Get-RgInsight($Snapshot, $Table, $Samples = $null, $Cfg = $null) {
+function Get-RgInsight($Snapshot, $Table, $Samples = $null, $Cfg = $null, $Events = $null) {
     if ($null -eq $Cfg) { $Cfg = Get-RgConfig }
     if ($null -eq $Samples) { $Samples = Get-RgDriveSamplesCached 14 }
     $ds = @($Snapshot.drives | Where-Object { $_ })
@@ -178,6 +217,7 @@ function Get-RgInsight($Snapshot, $Table, $Samples = $null, $Cfg = $null) {
         readiness = @(Get-RgReadiness $Snapshot $Table $Cfg)
         drives    = $drives
         ram       = [ordered]@{ availGB = $avail; state = (Get-RgRamState $avail $Cfg); goal = [ordered]@{ toState = 'Normal'; needGB = $ramNeed } }
+        week      = (Get-RgWeekSummary $Events)
     }
 }
 
@@ -221,7 +261,7 @@ function Get-RgItemScore($It) {
     return ([double]$It.sizeBytes * $rc * $rk)
 }
 
-# Dựng một bước từ danh sách mục (đã cùng ổ). $Kind = kind thật hoặc 'small'.
+# Dựng một bước từ danh sách mục (đã cùng ổ). $Kind = kind thật; bước < 50 MB giữ nguyên kind và riskLevel, chỉ đánh dấu minor.
 function New-RgAdviceStep([string]$Drive, [string]$Kind, $Items, $Policy, $Cfg) {
     $its = @($Items)
     $bytes = 0L; $score = 0.0; $risk = 'low'; $regen = 'auto'
@@ -232,21 +272,17 @@ function New-RgAdviceStep([string]$Drive, [string]$Kind, $Items, $Policy, $Cfg) 
         if ($rc -lt $script:RgRegenCoef[$regen]) { $regen = [string]$i.regen }   # lấy cách lấy lại KHÓ nhất
     }
     $first = $its | Sort-Object { [long]$_.sizeBytes } -Descending | Select-Object -First 1
-    $title = 'Các mục nhỏ'
     $auto = 'ask'
-    if ($Kind -ne 'small') {
-        $title = if ($script:RgStepTitles.ContainsKey($Kind)) { $script:RgStepTitles[$Kind] } else { $Kind }
-        if ($Kind -eq 'cache-aged') { try { $title = "Gói trong bộ nhớ đệm không dùng $([int]$Cfg.cleanup.cacheMinInactiveDays) ngày" } catch { } }
-        if ($Policy.categories.Contains($Kind)) { $auto = [string]$Policy.categories[$Kind] }
-    }
+    $title = if ($script:RgStepTitles.ContainsKey($Kind)) { $script:RgStepTitles[$Kind] } else { $Kind }
+    if ($Kind -eq 'cache-aged') { try { $title = "Gói trong bộ nhớ đệm không dùng $([int]$Cfg.cleanup.cacheMinInactiveDays) ngày" } catch { } }
+    if ($Policy.categories.Contains($Kind)) { $auto = [string]$Policy.categories[$Kind] }
     $sz = Format-RgSizeVi $bytes
-    $why = if ($its.Count -eq 1) { [string]$first.why } elseif ($Kind -eq 'small') { "$($its.Count) mục nhỏ cộng lại $sz; mỗi loại dưới 50 MB." } else { "$($its.Count) mục cùng loại ($sz). Mục lớn nhất: $([string]$first.why)" }
-    $impact = if ($Kind -eq 'small') { 'Gồm nhiều loại; mở từng mục để xem ảnh hưởng.' } else { [string]$first.impact }
-    $hint = if ($Kind -eq 'small') { 'Tuỳ loại; xem từng mục.' } else { [string]$first.regenHint }
+    $why = if ($its.Count -eq 1) { [string]$first.why } else { "$($its.Count) mục cùng loại ($sz). Mục lớn nhất: $([string]$first.why)" }
     return [ordered]@{
         id = "${Drive}:$Kind"; drive = $Drive; kind = $Kind; title = $title
+        resource = 'disk'; actionType = 'delete'; manual = $false; minor = ($bytes -lt 50MB)
         keys = @($its | ForEach-Object { [string]$_.key }); count = $its.Count; bytes = $bytes
-        riskLevel = $risk; regen = $regen; regenHint = $hint; why = $why; impact = $impact
+        riskLevel = $risk; regen = $regen; regenHint = [string]$first.regenHint; why = $why; impact = [string]$first.impact
         auto = $auto; cumBytes = 0L; reachesGoal = $false; agent = $null; _score = $score; _items = $its
     }
 }
@@ -259,8 +295,10 @@ Quy tắc (test từng điều):
     (đường dẫn con) bị bỏ khỏi bước để không đếm dung lượng hai lần.
  2. Gộp theo (drive, kind) thành bước. Điểm bước = Σ bytes × hệ số regen (auto 1.0, rebuild 0.9, redownload 0.7, restore-zip 0.4, none 0.3)
     × hệ số rủi ro (low 1.0, medium 0.6, high 0.3). `auto` của bước = chế độ nhóm trong chính sách (nhóm ngoài chính sách = 'ask').
- 3. Sắp theo điểm giảm dần trong từng ổ; ổ có mục tiêu (goal) đứng trước. Bước < 50 MB gộp vào một bước "Các mục nhỏ" (luôn đứng cuối).
-    Tối đa 5 bước mỗi ổ (phần dư gộp vào "Các mục nhỏ").
+ 3. Sắp theo điểm giảm dần trong từng ổ; bước < 50 MB giữ kind và riskLevel thật, đánh dấu minor=true và đứng cuối (UI gộp hiển thị).
+    Không còn kind 'small'. Tài nguyên có trạng thái xấu nhất đứng trước (ổ có mục tiêu trước ổ không có; ổ/RAM cùng mức: ổ trước).
+ 3b. RAM (khi có $Ram và trạng thái không phải Ổn): goal { resource='ram', needBytes, state } và tối đa 3 bước kind='close-app' (manual=true) lấy từ
+    $Workloads theo RAM giảm dần, bỏ agent/system/security/infra/unknown/được bảo vệ, dừng khi đủ đưa RAM về Ổn.
  4. cumBytes cộng dồn trong từng ổ; reachesGoal = true ở bước đầu tiên làm tổng >= needBytes (mục tiêu = đưa ổ lên mức Ổn).
  5. afterPlan = trạng thái ổ nếu làm hết các bước; shortBytes > 0 nghĩa là dọn hết vẫn chưa đủ -> `beyond` = 3 nhóm lớn nhất của lượt
     quét ổ (scan-breakdown-<X>.json) không thuộc loại dọn được, kèm gợi ý việc tự làm.
@@ -269,7 +307,7 @@ Quy tắc (test từng điều):
  7. stale = true khi lượt quét ứng viên cũ hơn 6 giờ (hoặc chưa có).
 Tham số cho phép test truyền dữ liệu giả; bỏ trống thì đọc từ state/ và Get-RgDrives.
 #>
-function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, $Policy = $null, $Drives = $null, $Cfg = $null, $Now = $null) {
+function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, $Policy = $null, $Drives = $null, $Cfg = $null, $Now = $null, $Ram = $null, $Workloads = $null) {
     if ($null -eq $Cfg) { $Cfg = Get-RgConfig }
     if ($null -eq $Policy) { $Policy = Get-RgPolicy }
     if ($null -eq $Now) { $Now = (Get-Date).ToUniversalTime() }
@@ -295,7 +333,7 @@ function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, 
         $thr = Get-RgDiskThresholds $Cfg $L
         if ($free -le [double]$thr.normalAboveGB) {
             $need = [long][math]::Ceiling(([double]$thr.normalAboveGB - $free) * 1GB)
-            $g = [ordered]@{ drive = $L; freeGB = $free; needBytes = $need; toState = 'Normal' }
+            $g = [ordered]@{ resource = 'disk'; drive = $L; freeGB = $free; needBytes = $need; toState = 'Normal'; state = (Get-RgDiskState $free $Cfg $L) }
             $goals += $g; $goalByDrive[$L] = $g
         }
     }
@@ -335,7 +373,8 @@ function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, 
             -not $nested })
 
     # Các bước theo ổ
-    $steps = @(); $afterPlan = @(); $beyond = @()
+    $steps = @(); $afterPlan = @(); $beyond = @(); $groups = @(); $gIdx = 0
+    $stateRank = @{ Normal = 0; Caution = 1; Restricted = 2; Critical = 3 }
     $driveOrder = @(@($elig | ForEach-Object { $_.drive }) + @($goals | ForEach-Object { $_.drive }) | Select-Object -Unique)
     $driveOrder = @($driveOrder | Sort-Object @{ Expression = { if ($goalByDrive.ContainsKey($_)) { 0 } else { 1 } } }, @{ Expression = { $_ } })
     foreach ($L in $driveOrder) {
@@ -343,15 +382,11 @@ function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, 
         $big = @(); $small = @()
         foreach ($grp in @($mine | Group-Object kind)) {
             $st = New-RgAdviceStep $L ([string]$grp.Name) @($grp.Group) $Policy $Cfg
-            if ($st.bytes -lt 50MB) { $small += $st } else { $big += $st }
+            if ($st.minor) { $small += $st } else { $big += $st }
         }
         $big = @($big | Sort-Object @{ Expression = { $_._score }; Descending = $true })
-        $smallItems = @($small | ForEach-Object { $_._items })
-        $allowed = 5
-        if ($big.Count + $(if ($smallItems.Count -gt 0) { 1 } else { 0 }) -gt 5) { $allowed = 4 }
-        if ($big.Count -gt $allowed) { $smallItems += @($big[$allowed..($big.Count - 1)] | ForEach-Object { $_._items }); $big = @($big[0..($allowed - 1)]) }
-        $ordered = @($big)
-        if ($smallItems.Count -gt 0) { $ordered += (New-RgAdviceStep $L 'small' $smallItems $Policy $Cfg) }
+        $small = @($small | Sort-Object @{ Expression = { $_._score }; Descending = $true })
+        $ordered = @($big) + @($small)
 
         # Agent: gắn nhãn, bỏ key 'keep' (SAU khi đã sắp thứ tự)
         $kept = @()
@@ -380,13 +415,14 @@ function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, 
             if ($need -gt 0 -and -not $hit -and $cum -ge $need) { $st.reachesGoal = $true; $hit = $true }
         }
         foreach ($st in $kept) { [void]$st.Remove('_score'); [void]$st.Remove('_items') }
-        $steps += $kept
+        $dRank = 0; if ($goalByDrive.ContainsKey($L)) { $dRank = [int]$stateRank[[string]$goalByDrive[$L].state] }
+        $groups += [pscustomobject]@{ rank = $dRank; idx = $gIdx; steps = @($kept) }; $gIdx++
 
         $dr = @($Drives | Where-Object { ([string]$_.drive).ToUpperInvariant() -eq $L }) | Select-Object -First 1
         if ($dr) {
             $afterFree = [double]$dr.freeGB + $cum / 1GB
             $short = [long][math]::Max(0L, [long]($need - $cum))
-            $afterPlan += [ordered]@{ drive = $L; freeGB = [math]::Round($afterFree, 1); state = (Get-RgDiskState $afterFree $Cfg $L); shortBytes = $short }
+            $afterPlan += [ordered]@{ resource = 'disk'; drive = $L; freeGB = [math]::Round($afterFree, 1); state = (Get-RgDiskState $afterFree $Cfg $L); shortBytes = $short }
             if ($short -gt 0) {
                 $bd = $null
                 if ($Breakdowns -is [System.Collections.IDictionary]) { if ($Breakdowns.Contains($L)) { $bd = $Breakdowns[$L] } }
@@ -400,6 +436,39 @@ function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, 
             }
         }
     }
+    # RAM: bước đóng ứng dụng (luôn thủ công); chỉ đề xuất, không tự đóng gì
+    if ($null -ne $Ram) {
+        $avail = [double]$Ram.availGB
+        $rState = Get-RgRamState $avail $Cfg
+        if ($rState -ne 'Normal') {
+            $need = [long][math]::Ceiling(([double]$Cfg.ram.normalAboveGB - $avail) * 1GB)
+            $goals += [ordered]@{ resource = 'ram'; drive = 'RAM'; freeGB = $avail; needBytes = $need; toState = 'Normal'; state = $rState }
+            $skipRoles = @('agent', 'system', 'security', 'infra', 'unknown')
+            $cands = @(@($Workloads) | Where-Object { $_ -and $skipRoles -notcontains [string]$_.role -and -not $_.protected -and [double]$_.ramMB -ge 100 } | Sort-Object { [double]$_.ramMB } -Descending)
+            $rsteps = @(); $cum = 0L; $hitR = $false
+            foreach ($w in $cands) {
+                if ($rsteps.Count -ge 3 -or $cum -ge $need) { break }
+                $b = [long]([double]$w.ramMB * 1MB); $cum += $b
+                $nm = [string]$w.title; if ($w.project) { $nm += ' — ' + [string]$w.project }
+                $what = $(if ($w.PSObject.Properties['what'] -and $w.what) { [string]$w.what } else { [string]$w.title })
+                $reach = ((-not $hitR) -and $cum -ge $need); if ($reach) { $hitR = $true }
+                $rsteps += [ordered]@{
+                    id = 'RAM:close-app:' + [string]$w.key; drive = 'RAM'; kind = 'close-app'; title = ('Đóng ' + $nm)
+                    resource = 'ram'; actionType = 'close-app'; workload = [string]$w.key; manual = $true; minor = $false
+                    keys = @(); count = [int]$w.count; bytes = $b; riskLevel = 'medium'; regen = 'auto'; regenHint = 'Mở lại ứng dụng khi cần'
+                    why = ('{0}. Đang giữ khoảng {1} RAM.' -f $what, (Format-RgSizeVi $b))
+                    impact = 'Việc chưa lưu trong ứng dụng này sẽ mất nếu bạn đóng mà chưa lưu'
+                    auto = 'ask'; cumBytes = $cum; reachesGoal = $reach; agent = $null
+                }
+            }
+            $groups += [pscustomobject]@{ rank = [int]$stateRank[$rState]; idx = $gIdx; steps = @($rsteps) }; $gIdx++
+            $afterAvail = $avail + $cum / 1GB
+            $afterPlan += [ordered]@{ resource = 'ram'; drive = 'RAM'; freeGB = [math]::Round($afterAvail, 1); state = (Get-RgRamState $afterAvail $Cfg); shortBytes = [long][math]::Max(0L, [long]($need - $cum))
+                beforeBytes = [long]($avail * 1GB); afterBytes = [long]($afterAvail * 1GB); stateBefore = $rState; stateAfter = (Get-RgRamState $afterAvail $Cfg) }
+        }
+    }
+    foreach ($g_ in @($groups | Sort-Object @{ Expression = { $_.rank }; Descending = $true }, @{ Expression = { $_.idx } })) { $steps += @($g_.steps) }
+    if ($goals.Count -gt 1) { $gi = @(0..($goals.Count - 1) | Sort-Object @{ Expression = { $stateRank[[string]$goals[$_].state] }; Descending = $true }, @{ Expression = { $_ } }); $goals = @($gi | ForEach-Object { $goals[$_] }) }
     $revBytes = 0L; foreach ($r in $reviewItems) { $revBytes += [long]$r.sizeBytes }
     return [ordered]@{
         generatedUtc = $Now.ToString('o'); candidatesUtc = $(if ($candUtc) { $candUtc.ToString('o') } else { $null }); stale = $stale

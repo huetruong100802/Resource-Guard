@@ -230,6 +230,50 @@ try {
     Assert ($ga.n -eq 2 -and $ga.cpu -eq 3.5 -and $ga.ramMB -eq 150 -and @($gp).Count -eq 3) 'procTop: cộng n/cpu/ramMB theo tên'
     $many = @(1..30 | ForEach-Object { [pscustomobject]@{ name = "p$_"; cpu = 0.0; ramMB = $_ } })
     Assert (@(Get-RgProcTop $many).Count -eq 12) 'procTop: chỉ giữ top 12 theo RAM (CPU = 0 không thêm nhóm)'
+    # ---- danh tính tiến trình (P2 plan-ux-clarity): fixture bảng tiến trình giả, không phụ thuộc máy ----
+    $idCfg = Get-RgConfig
+    $idRoots = @('C:\fx\Work')
+    $idRows = @{}
+    function New-IdRow([int]$ProcId, [int]$ParentId, [string]$N, [string]$Start, [string]$C, [string]$Grp = 'other') { $r = [pscustomobject]@{ Pid = $ProcId; ParentPid = $ParentId; Name = $N; Start = $Start; Cmd = $C; Group = $Grp }; $idRows[$ProcId] = $r; return $r }
+    [void](New-IdRow 100 1 'code' '20260101T000000Z' '"C:\Program Files\Microsoft VS Code\Code.exe"')
+    [void](New-IdRow 101 100 'pwsh' '20260101T000100Z' 'pwsh.exe -NoLogo')
+    $rBuild = New-IdRow 102 101 'dotnet' '20260101T000200Z' '"C:\Program Files\dotnet\dotnet.exe" build C:\fx\Work\dxwms\src\Api\Api.csproj' 'build'
+    $iBuild = Get-RgProcIdentity $rBuild $idRows $idCfg @{} $idRoots
+    Assert ($iBuild.role -eq 'build' -and $iBuild.project -eq 'dxwms' -and $iBuild.owner.name -eq 'code' -and $iBuild.owner.label -eq 'VS Code' -and $iBuild.confidence -eq 'rule') 'identity: dotnet build dưới Code -> pwsh: role build, dự án dxwms, owner Code'
+    Assert (($iBuild.chain -join '>') -eq 'code>pwsh>dotnet' -and $iBuild.workload -eq 'build|dxwms' -and $iBuild.what -like '*dxwms*') 'identity: chain code>pwsh>dotnet, workload build|dxwms'
+    $rNg = New-IdRow 103 101 'node' '20260101T000300Z' 'node "C:\fx\Work\dxwms\web\node_modules\@angular\cli\bin\ng.js" serve --port 4200' 'dev'
+    $iNg = Get-RgProcIdentity $rNg $idRows $idCfg @{} $idRoots
+    Assert ($iNg.role -eq 'devserver' -and $iNg.title -eq 'Angular dev server' -and $iNg.project -eq 'dxwms') 'identity: node ... ng.js serve -> devserver Angular'
+    $rSvc = New-IdRow 104 1 'svchost' '20260101T000000Z' 'C:\Windows\system32\svchost.exe -k netsvcs'
+    $iSvc = Get-RgProcIdentity $rSvc $idRows $idCfg @{ 104 = @('Windows Update', 'BITS') } $idRoots
+    Assert ($iSvc.role -eq 'system' -and $iSvc.what -like '*2 dịch vụ*Windows Update*BITS*') 'identity: svchost liệt kê 2 dịch vụ'
+    $rOrph = New-IdRow 105 9999 'dotnet' '20260101T000400Z' 'dotnet.exe test C:\fx\Work\orphanproj\T.csproj' 'build'
+    $iOrph = Get-RgProcIdentity $rOrph $idRows $idCfg @{} $idRoots
+    Assert ($iOrph.role -eq 'test' -and $iOrph.owner -eq $null -and $iOrph.project -eq 'orphanproj' -and @($iOrph.chain).Count -eq 1) 'identity: tiến trình mồ côi vẫn có role/dự án, không owner'
+    $rNoProj = New-IdRow 106 9999 'dotnet' '20260101T000400Z' 'dotnet.exe build D:\elsewhere\X.csproj' 'build'
+    $iNoProj = Get-RgProcIdentity $rNoProj $idRows $idCfg @{} $idRoots
+    Assert ($iNoProj.project -eq $null -and $iNoProj.confidence -eq 'guess') 'identity: không nằm dưới workspaceRoots -> project null, confidence guess'
+    $rEmpty = New-IdRow 107 9999 'mystery' '20260101T000400Z' ''
+    $iEmpty = Get-RgProcIdentity $rEmpty $idRows $idCfg @{} $idRoots
+    Assert ($iEmpty.role -eq 'unknown' -and $iEmpty.what -eq 'Chưa nhận diện được' -and $iEmpty.confidence -eq 'guess') 'identity: dòng lệnh rỗng (không có quyền đọc) -> unknown, không lỗi'
+    # PID tái sử dụng + vòng lặp cha-con: không treo, không lấy cha khởi động sau con
+    [void](New-IdRow 110 111 'a' '20260101T000500Z' 'a.exe')
+    [void](New-IdRow 111 110 'b' '20260101T000500Z' 'b.exe')
+    $iLoop = Get-RgProcIdentity $idRows[110] $idRows $idCfg @{} $idRoots
+    Assert (@($iLoop.chain).Count -le 5 -and $iLoop.chain[-1] -eq 'a') 'identity: vòng lặp cha-con không treo'
+    $rReuse = New-IdRow 112 100 'dotnet' '20250101T000000Z' 'dotnet.exe build C:\fx\Work\old\A.csproj' 'build'
+    $iReuse = Get-RgProcIdentity $rReuse $idRows $idCfg @{} $idRoots
+    Assert ($iReuse.owner -eq $null) 'identity: cha khởi động sau con (PID tái sử dụng) bị bỏ qua'
+    $wls = @(Get-RgWorkloads @(
+            [pscustomobject]@{ pid = 102; ramMB = 400; cpu = 10; protected = $false; identity = $iBuild },
+            [pscustomobject]@{ pid = 103; ramMB = 900; cpu = 2; protected = $false; identity = $iNg },
+            [pscustomobject]@{ pid = 108; ramMB = 100; cpu = 1; protected = $false; identity = $iBuild }))
+    Assert ($wls.Count -eq 2 -and $wls[0].key -eq 'devserver|dxwms' -and $wls[1].count -eq 2 -and $wls[1].ramMB -eq 500 -and @($wls[1].pids).Count -eq 2) 'workloads: gộp theo khoá, sắp theo RAM giảm dần'
+    $hs = Hide-RgCmdSecret 'app.exe --password hunter2 --token=abc123 -p s3cret apikey=XYZ&x=1 --name ok'
+    Assert ($hs -notmatch 'hunter2|abc123|s3cret|XYZ' -and $hs -match '--name ok') 'identity: Hide-RgCmdSecret che password/token/-p/apikey, giữ phần còn lại'
+    $gpw = Get-RgProcTop @([pscustomobject]@{ pid = 1; name = 'aaa'; cpu = 1.0; ramMB = 10 }, [pscustomobject]@{ pid = 2; name = 'aaa'; cpu = 1.0; ramMB = 90 }) 12 8 @{ 1 = 'x|1'; 2 = 'x|2' }
+    Assert (@($gpw)[0].workload -eq 'x|2') 'procTop: thêm workload của tiến trình nặng nhất trong nhóm; không truyền map thì không có trường'
+    Assert (-not (@(Get-RgProcTop @([pscustomobject]@{ pid = 1; name = 'aaa'; cpu = 1.0; ramMB = 10 }))[0].PSObject.Properties['workload'])) 'procTop: bản ghi không có workload vẫn hợp lệ (tương thích cũ)'
     function Add-FakeMetric([datetime]$When, [string]$ProcName, [double]$Cpu, [int]$Ram, [int]$N) {
         $r = [ordered]@{ ts = $When.ToString('yyyy-MM-dd HH:mm:ss'); totalRamGB = 15.89; procTop = @([ordered]@{ name = $ProcName; n = $N; cpu = $Cpu; ramMB = $Ram }, [ordered]@{ name = 'other-proc'; n = 1; cpu = 0.5; ramMB = 10 }) }
         Add-Content -LiteralPath (Join-Path $home_ ('state\metrics-{0}.jsonl' -f $When.ToString('yyyyMMdd'))) -Value (ConvertTo-Json -InputObject $r -Compress) -Encoding UTF8
@@ -330,9 +374,9 @@ try {
     Assert (@('k9', 'k10', 'k13', 'k7', 'k8') | Where-Object { $allKeys -contains $_ } | ForEach-Object { $_ } | Measure-Object | ForEach-Object { $_.Count -eq 0 }) 'advice: report / vùng bảo vệ / tiến trình / young / needsAdmin không vào bước'
     Assert (($adv.review.count -eq 2) -and $adv.review.keys -contains 'k7' -and $adv.review.keys -contains 'k8' -and $adv.review.bytes -eq [long](0.8 * 1GB)) 'advice: mục young và needsAdmin vào review (không tính mục bảo vệ/report)'
     Assert ($allKeys -notcontains 'k11') 'advice: mục nằm trong mục dọn khác bị bỏ để không đếm đôi'
-    Assert ($cSteps[0].kind -eq 'cache-aged' -and $cSteps[1].kind -eq 'dotnet-artifact' -and $cSteps[2].kind -eq 'node_modules' -and $cSteps[3].kind -eq 'large-item' -and $cSteps[4].kind -eq 'small') 'advice: sắp theo điểm bytes x regen x rủi ro (cache > bin/obj > node_modules > mục lớn), "Các mục nhỏ" cuối'
+    Assert ($cSteps[0].kind -eq 'cache-aged' -and $cSteps[1].kind -eq 'dotnet-artifact' -and $cSteps[2].kind -eq 'node_modules' -and $cSteps[3].kind -eq 'large-item' -and $cSteps[4].kind -eq 'temp-entry' -and $cSteps[4].minor -and -not $cSteps[0].minor) 'advice: sắp theo điểm bytes x regen x rủi ro (cache > bin/obj > node_modules > mục lớn), bước nhỏ (minor) cuối, giữ kind thật'
     Assert ($cSteps[1].count -eq 2 -and $cSteps[1].keys -contains 'k2a' -and $cSteps[1].keys -contains 'k2b' -and $cSteps[1].bytes -eq [long](4.1 * 1GB)) 'advice: gộp theo (ổ, kind): hai mục bin/obj thành một bước'
-    Assert ($cSteps[4].count -eq 2 -and $cSteps[4].keys -contains 'k4' -and $cSteps[4].keys -contains 'k5' -and $cSteps[4].id -eq 'C:small') 'advice: bước < 50 MB gộp vào "Các mục nhỏ"'
+    Assert ($cSteps[4].count -eq 2 -and $cSteps[4].keys -contains 'k4' -and $cSteps[4].keys -contains 'k5' -and $cSteps[4].id -eq 'C:temp-entry' -and $cSteps[4].riskLevel -eq 'low' -and @($adv.steps | Where-Object kind -eq 'small').Count -eq 0) 'advice: bước < 50 MB giữ kind và riskLevel thật, minor=true, không còn kind small'
     $sumB = 0L; foreach ($s_ in $cSteps) { $sumB += [long]$s_.bytes }
     Assert ($cSteps[0].cumBytes -eq $cSteps[0].bytes -and $cSteps[1].cumBytes -eq ($cSteps[0].bytes + $cSteps[1].bytes) -and $cSteps[4].cumBytes -eq $sumB) 'advice: cumBytes cộng dồn'
     Assert (-not $cSteps[0].reachesGoal -and $cSteps[1].reachesGoal -and @($cSteps | Where-Object reachesGoal).Count -eq 1) 'advice: reachesGoal đúng ở bước đầu tiên làm tổng >= mục tiêu (7,8 + 4,1 >= 11,4)'
@@ -351,10 +395,58 @@ try {
     Assert ($apS.shortBytes -gt 0 -and $apS.state -ne 'Normal' -and @($advShort.steps | Where-Object reachesGoal).Count -eq 0) 'advice: dọn hết vẫn thiếu -> shortBytes > 0, không bước nào reachesGoal'
     Assert ($advShort.beyond.Count -eq 3 -and $advShort.beyond[0].cat -eq 'programs' -and $advShort.beyond[1].cat -eq 'documents' -and $advShort.beyond[2].cat -eq 'app-data' -and $advShort.beyond[0].hint -match 'Ứng dụng') 'advice: beyond = 3 nhóm lớn nhất không dọn được (bỏ temp), kèm gợi ý'
 
-    # tối đa 5 bước mỗi ổ: phần dư gộp vào "Các mục nhỏ"
+    # nhiều nhóm: không còn giới hạn 5 bước và không gộp vào "Các mục nhỏ"
     $many = @((AI 'm1' 'temp-entry' 'C:\m\t' 0.06), (AI 'm2' 'dotnet-artifact' 'C:\m\o' 0.5), (AI 'm3' 'node_modules' 'C:\m\n' 0.5), (AI 'm4' 'cache-aged' 'C:\m\c' 0.5), (AI 'm5' 'stale-repo' 'C:\m\r' 0.5), (AI 'm6' 'large-item' 'C:\m\l' 0.5))
     $advMany = Get-RgAdvice ([pscustomobject]@{ finishedUtc = $nowU.ToString('o'); items = $many }) @{} $null $advPol @([pscustomobject]@{ drive = 'C'; freeGB = 100 }) $cfg $nowU
-    Assert (@($advMany.steps).Count -eq 5 -and @($advMany.steps)[4].kind -eq 'small' -and @($advMany.steps)[4].count -eq 2 -and @($advMany.steps | ForEach-Object { $_.count } | Measure-Object -Sum).Sum -eq 6) 'advice: tối đa 5 bước mỗi ổ, phần dư gộp vào "Các mục nhỏ" (không mất mục)'
+    Assert (@($advMany.steps).Count -eq 6 -and @($advMany.steps | Where-Object kind -eq 'small').Count -eq 0 -and @($advMany.steps | ForEach-Object { $_.count } | Measure-Object -Sum).Sum -eq 6) 'advice: 6 nhóm -> 6 bước, không gộp "Các mục nhỏ", không mất mục'
+
+    # RAM (P3 plan-ux-clarity): bước đóng ứng dụng theo workload
+    function WL([string]$Key, [string]$Role, [string]$Title, [int]$Mb, [bool]$Prot = $false, [string]$Proj = '') { [pscustomobject]@{ key = $Key; role = $Role; title = $Title; project = $Proj; what = "Đang chạy $Title"; count = 2; ramMB = $Mb; cpuPct = 1.0; pids = @(1, 2); protected = $Prot } }
+    $wlAll = @((WL 'agent|c' 'agent' 'Trợ lý AI' 3000), (WL 'system|s' 'system' 'Dịch vụ Windows' 2500), (WL 'unknown|u' 'unknown' 'abc' 2400), (WL 'browser|edge' 'browser' 'Trình duyệt' 1500),
+        (WL 'devserver|dxwms' 'devserver' 'Angular dev server' 1200 $false 'dxwms'), (WL 'editor|code' 'editor' 'Trình soạn thảo code' 900), (WL 'app|prot' 'app' 'Được bảo vệ' 2000 $true), (WL 'app|tiny' 'app' 'Nhỏ' 50), (WL 'app|x' 'app' 'Ứng dụng X' 400))
+    $advRam1 = Get-RgAdvice ([pscustomobject]@{ finishedUtc = $nowU.ToString('o'); items = @() }) @{} $null $advPol @([pscustomobject]@{ drive = 'C'; freeGB = 100 }) $cfg $nowU ([pscustomobject]@{ availGB = 2.1; totalGB = 16 }) $wlAll
+    $rs = @($advRam1.steps)
+    Assert ($rs.Count -ge 1 -and $rs[0].kind -eq 'close-app' -and $rs[0].resource -eq 'ram' -and $rs[0].actionType -eq 'close-app' -and $rs[0].manual -and $rs[0].workload -eq 'browser|edge') 'advice RAM: thiếu RAM + ổ Ổn -> bước đầu là close-app (workload nặng nhất được phép), manual = true'
+    Assert (@($rs | Where-Object { $_.workload -match '^(agent|system|unknown)\|' -or $_.workload -eq 'app|prot' -or $_.workload -eq 'app|tiny' }).Count -eq 0) 'advice RAM: không đề xuất agent/system/unknown/workload được bảo vệ/workload < 100 MB'
+    Assert ($rs.Count -le 3 -and $rs[0].impact -match 'chưa lưu' -and $rs[0].why -match 'Đang chạy' -and $rs[0].riskLevel -eq 'medium') 'advice RAM: tối đa 3 bước, impact nhắc việc chưa lưu, why lấy identity.what'
+    $ramGoal = @($advRam1.goals | Where-Object resource -eq 'ram')[0]
+    Assert ($ramGoal.needBytes -eq [long][math]::Ceiling((5 - 2.1) * 1GB) -and $ramGoal.state -eq 'Restricted') 'advice RAM: goal ram { needBytes, state }'
+    $apR = @($advRam1.afterPlan | Where-Object resource -eq 'ram')[0]
+    Assert ($apR.stateBefore -eq 'Restricted' -and $apR.afterBytes -gt $apR.beforeBytes -and $apR.shortBytes -eq 0 -and $apR.stateAfter -eq 'Normal') 'advice RAM: afterPlan ram có before/after và trạng thái trước -> sau'
+    Assert (@($rs | Where-Object reachesGoal).Count -eq 1 -and $rs[-1].reachesGoal) 'advice RAM: dừng ở bước đầu tiên đủ đưa RAM về Ổn'
+    $advRamOk = Get-RgAdvice ([pscustomobject]@{ finishedUtc = $nowU.ToString('o'); items = @() }) @{} $null $advPol @() $cfg $nowU ([pscustomobject]@{ availGB = 9; totalGB = 16 }) $wlAll
+    Assert (@($advRamOk.steps).Count -eq 0 -and @($advRamOk.goals | Where-Object resource -eq 'ram').Count -eq 0) 'advice RAM: RAM Ổn -> không có bước/goal RAM'
+    # cả hai cùng thiếu: tài nguyên xấu hơn đứng trước (RAM Nguy cấp hơn ổ Cần chú ý -> RAM trước; ổ Nguy cấp hơn RAM Cần chú ý -> ổ trước)
+    $advBothA = Get-RgAdvice $advCand @{} $null $advPol @([pscustomobject]@{ drive = 'C'; freeGB = 15 }) $cfg $nowU ([pscustomobject]@{ availGB = 1.5; totalGB = 16 }) $wlAll
+    Assert (@($advBothA.steps)[0].resource -eq 'ram') 'advice RAM: RAM Nguy cấp + ổ Cần chú ý -> bước RAM đứng trước'
+    $advBothB = Get-RgAdvice $advCand @{} $null $advPol @([pscustomobject]@{ drive = 'C'; freeGB = 5 }) $cfg $nowU ([pscustomobject]@{ availGB = 4; totalGB = 16 }) $wlAll
+    Assert (@($advBothB.steps)[0].resource -eq 'disk') 'advice RAM: ổ Nguy cấp + RAM Cần chú ý -> bước dọn ổ đứng trước'
+
+    # ---- ngưỡng trạng thái + tóm tắt 7 ngày (P4 plan-ux-clarity) ----
+    $thCfg = Get-RgConfig
+    $thOk = Test-RgThresholdInput ([pscustomobject]@{ ramAvailGB = [pscustomobject]@{ normalAbove = 6; cautionFrom = 4; restrictedFrom = 2 } }) $thCfg
+    Assert ($thOk.ok -and $thOk.merged.ramAvailGB.normalAbove -eq 6 -and $thOk.merged.diskFreeGB.normalAbove -eq [double]$thCfg.disk.normalAboveGB) 'thresholds: gửi một phần -> phần thiếu lấy từ cấu hình hiện tại'
+    Assert (-not (Test-RgThresholdInput ([pscustomobject]@{ ramAvailGB = [pscustomobject]@{ normalAbove = 3; cautionFrom = 4 } }) $thCfg).ok) 'thresholds: thứ tự sai (Ổn <= Cần chú ý) bị từ chối'
+    Assert (-not (Test-RgThresholdInput ([pscustomobject]@{ diskFreeGB = [pscustomobject]@{ normalAbove = 10; cautionFrom = 10 } }) $thCfg).ok) 'thresholds: ổ đĩa Ổn = Cần chú ý bị từ chối'
+    Assert (-not (Test-RgThresholdInput ([pscustomobject]@{ commitPct = [pscustomobject]@{ restricted = 95; critical = 90 } }) $thCfg).ok) 'thresholds: commit Hạn chế >= Nguy cấp bị từ chối'
+    Assert (-not (Test-RgThresholdInput ([pscustomobject]@{ ramAvailGB = [pscustomobject]@{ normalAbove = -5 } }) $thCfg).ok -and -not (Test-RgThresholdInput ([pscustomobject]@{ ramAvailGB = [pscustomobject]@{ normalAbove = 'abc' } }) $thCfg).ok) 'thresholds: số âm hoặc không phải số bị từ chối'
+    $thOld = (Test-RgThresholdInput ([pscustomobject]@{}) $thCfg).merged
+    $thLoose = (Test-RgThresholdInput ([pscustomobject]@{ diskFreeGB = [pscustomobject]@{ normalAbove = [double]$thCfg.disk.normalAboveGB - 5 } }) $thCfg).merged
+    $thTight = (Test-RgThresholdInput ([pscustomobject]@{ diskFreeGB = [pscustomobject]@{ normalAbove = [double]$thCfg.disk.normalAboveGB + 5 } }) $thCfg).merged
+    Assert ((Test-RgThresholdsLoosened $thOld $thLoose) -and -not (Test-RgThresholdsLoosened $thOld $thTight) -and -not (Test-RgThresholdsLoosened $thOld $thOld)) 'thresholds: hạ ngưỡng trống = nới lỏng; nâng ngưỡng hoặc giữ nguyên thì không'
+    Save-RgThresholds $thTight
+    $thBack = Get-RgConfig
+    Assert ([double]$thBack.disk.normalAboveGB -eq [double]$thCfg.disk.normalAboveGB + 5 -and $thBack.identity.rules) 'thresholds: ghi config.json rồi đọc lại đúng, không mất các khoá khác'
+    Save-RgThresholds $thOld
+    $wkNow = Get-Date
+    function EV([string]$Ev, [double]$AgoHours, $Data) { [pscustomobject]@{ ts = $wkNow.AddHours(-$AgoHours).ToString('yyyy-MM-dd HH:mm:ss'); event = $Ev; data = $Data } }
+    $wk = Get-RgWeekSummary @(
+        (EV 'auto-run' 5 ([pscustomobject]@{ mode = 'on'; items = 3; freedBytes = 1000 })), (EV 'auto-run' 30 ([pscustomobject]@{ mode = 'on'; items = 1; freedBytes = 500 })),
+        (EV 'auto-run' 8 ([pscustomobject]@{ mode = 'dry-run'; items = 4; freedBytes = 0; byKind = [pscustomobject]@{ a = [pscustomobject]@{ items = 2; bytes = 300 }; b = [pscustomobject]@{ items = 2; bytes = 200 } } })),
+        (EV 'manual-cleanup' 2 ([pscustomobject]@{ items = 2; freedBytes = 70 })), (EV 'auto-run' (24 * 9) ([pscustomobject]@{ mode = 'on'; items = 9; freedBytes = 9999 })),
+        (EV 'state-change' 3 ([pscustomobject]@{ from = 'Normal'; to = 'Critical' })), (EV 'state-change' 2 ([pscustomobject]@{ from = 'Critical'; to = 'Normal' })), (EV 'state-change' 1 ([pscustomobject]@{ from = 'Normal'; to = 'Caution' }))) $wkNow
+    Assert ($wk.autoRuns -eq 2 -and $wk.autoBytes -eq 1500 -and $wk.dryRuns -eq 1 -and $wk.dryBytes -eq 500 -and $wk.manualRuns -eq 1 -and $wk.manualBytes -eq 70 -and $wk.alerts -eq 2) 'week: đếm lượt tự dọn / chạy thử / dọn tay / cảnh báo trong 7 ngày, bỏ sự kiện cũ hơn 7 ngày'
+    Assert ($null -ne (Get-RgInsight $snapOk $tbl @{} $cfg @()).week -and (Get-RgInsight $snapOk $tbl @{} $cfg @()).week.autoRuns -eq 0) 'week: /api/insight có trường week'
 
     # stale
     $advStale = Get-RgAdvice ([pscustomobject]@{ finishedUtc = $nowU.AddHours(-7).ToString('o'); items = @() }) @{} $null $advPol @() $cfg $nowU
@@ -1031,7 +1123,7 @@ try {
     [void](Save-RgPolicy (ConvertTo-RgPolicy ([pscustomobject]@{ mode = 'off' })))   # server không được tự dọn trong lúc test
     $lsn = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0); $lsn.Start(); $apiPort = ([Net.IPEndPoint]$lsn.LocalEndpoint).Port; $lsn.Stop()
     $apiBase = "http://127.0.0.1:$apiPort"
-    $srvProc = Start-Process $hostExe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'scripts\rg-server.ps1'), '-Port', $apiPort, '-NoOpen', '-NoToast' `
+    $srvProc = Start-Process $hostExe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $root 'scripts\rg-server.ps1') + '"'), '-Port', $apiPort, '-NoOpen', '-NoToast' `
         -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $sandbox 'srv.out') -RedirectStandardError (Join-Path $sandbox 'srv.err')
     $hdr = @{ 'X-RG-Client' = 'ui' }
     function Api([string]$Method, [string]$Path, $Body = $null, [bool]$WithClientHeader = $true) {   # trả { code; json }
