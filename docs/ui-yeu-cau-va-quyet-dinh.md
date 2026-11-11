@@ -6,7 +6,7 @@ File này ghi lại điều chủ sản phẩm đã nói, tách khỏi plan phas
 
 1. **UI phải rõ ràng trước.** Giao diện thực tế đang lệch mockup, xấu và lộn xộn.
 2. **Luồng thủ công (manual) phải chạy đầy đủ**: xem ổ đĩa, hiểu cái gì chiếm chỗ, chọn nhóm, xem trước ảnh hưởng, dọn, khôi phục.
-3. Agent AI và tự động hoá **để sau**. Chưa triển khai vội.
+3. Agent AI và tự động hoá: từ 2026-11-11 chủ sản phẩm chọn hướng tự động hoá song song với việc lấp GAP (xem §7–§11). Ưu tiên 1 và 2 vẫn giữ.
 
 ## 2. Yêu cầu UI đã nêu
 
@@ -75,3 +75,54 @@ Chưa làm hoặc chưa kiểm:
 - Số "14 ngày qua chạm … lần" trong chi tiết mốc chưa nối dữ liệu (đang bỏ qua nếu thiếu).
 
 Ghi chú môi trường: ổ C của máy đang còn dưới 0,3 GB nên mọi thao tác ghi file (ảnh chụp, state) có thể lỗi `ENOSPC`.
+
+## 7. Hướng trợ lý tự động hoá (chốt 2026-11-11)
+
+Quyết định của chủ sản phẩm:
+
+- Nhắm tới **agent tự động hoá**, làm song song với việc lấp GAP (xem §10), không chờ UI xong.
+- Người dùng phải **cảm nhận có một trợ lý AI quản lý resource máy mình**: lập báo cáo những file nên xoá, nén hoặc nên chuyển nhóm sang mức tự động dọn. Với tiến trình, phải cho biết cái nào là cái nào, nguồn gốc, công việc nào đang dùng, để làm gì.
+- **Không bắt agent đọc từng file.** Đơn vị đánh giá là **cụm** gom từ metadata, không phải từng mục đủ lớn. Ví dụ: hơn 20 file Excel trong Downloads (mỗi file nhẹ), database cũ lâu không dùng nằm ở góc khuất.
+- Nguyên tắc ở §3 giữ nguyên: agent đề xuất, Policy Engine thi hành; học tách khỏi đổi chính sách; Phase 1 phải đáng tin khi không có AI.
+
+Vấn đề hiện tại dẫn tới quyết định này: theo README, `large-item` chỉ nhận mục từ 500 MB và mục chưa đủ tuổi phải từ 100 MB (`cleanup.youngMinMB`) mới vào danh sách. Mục nhẹ hoặc ở góc khuất không bao giờ đến được agent đánh giá.
+
+## 8. Kết thúc tiến trình từ app (đảo quyết định cũ, 2026-11-11)
+
+- Chủ sản phẩm muốn người dùng **kết thúc tiến trình ngay trong app** thay vì mở Task Manager. Quyết định này **thay thế** câu "không có nút kết thúc tiến trình" ở README (mục Tiến trình), TECHNOTE §8 (route `/api/process/priority`) và dòng 2 của `scripts/rg-proc.ps1`. Các nơi đó **chưa được sửa**.
+- Tiến trình quan trọng (hệ thống, bảo mật, dịch vụ, chính Resource Guard, vùng người dùng đã bảo vệ) **không bao giờ** nằm trong danh sách có thể kết thúc.
+- Số phận của một tiến trình do kết quả đánh giá quyết định.
+
+Ghi chú thiết kế (đề xuất, chưa chốt):
+
+- Danh sách đủ điều kiện xây theo allowlist theo lớp, không chỉ denylist (cùng nguyên tắc với `Get-RgDeleteBlocker`).
+- Kết thúc êm trước, buộc dừng sau; kiểm lại PID + start time + tên bằng `Test-RgProcessIdentity` ngay trước khi thực thi; tiến trình đang giữ lease của agent thì cảnh báo rõ.
+- Hiện kill chỉ đi qua `Invoke-RgApply` cho tiến trình có trong ledger và thuộc nhóm build/test/dev (`scripts/rg-common.ps1`:1122-1133). Đường kết thúc cho tiến trình ngoài ledger chưa tồn tại.
+
+## 9. Câu hỏi còn mở
+
+- Cơ chế duyệt kết thúc tiến trình: một cú bấm hay cần PIN.
+- Chính sách khi preflight không nhận được trả lời từ server: build/test cho chạy tiếp hay chặn; subagent khi máy ở trạng thái Hạn chế hoặc Nguy cấp.
+- Job Object và giới hạn process group (ép giới hạn RAM/CPU lên cả nhóm tiến trình ở tầng Windows): chưa quyết, đề xuất để ngoài phạm vi.
+- Mức tự động cao nhất cho file cá nhân (hiện không bao giờ tự xoá, TECHNOTE §7.2). Đề xuất: "chờ duyệt rồi nén".
+- Nhóm tự động đầu tiên sau chế độ chạy thử. Đề xuất: cache dev đủ tuổi.
+- Chưa xác minh: nguồn tải qua `Zone.Identifier`, thời gian mở file gần nhất (có thể bị tắt trên Windows), cách xác định tiến trình đang giữ database, giao thức hook của Claude Code và Codex.
+
+## 10. Đánh giá GAP (2026-11-11, đối chiếu code)
+
+| GAP | Trạng thái | Bằng chứng |
+|---|---|---|
+| Ownership và lifecycle | Nền đã có (định danh PID + start + tên, ledger có chủ, orphan). Còn thiếu: ledger do agent tự đăng ký, không có TTL/heartbeat, không có cây tiến trình, kill chỉ một PID | `rg-common.ps1`:254-260, :282-320, :1168 |
+| Tiến trình nào được xử lý | Gần như đã có: nhóm cho phép + phải có trong ledger + giới hạn mỗi lượt | `rg-common.ps1`:1122-1133 |
+| Quản lý trước khi workload chạy | Preflight chỉ kiểm tra tại một thời điểm: chưa giữ chỗ, chưa có hook Claude/Codex, chưa đếm subagent đang chạy | `rg-common.ps1`:427-483; README (mục giới hạn) |
+| Cleanup phục hồi và xác minh | Đã có plan hash, approval, revalidate, zip có xác minh. Còn thiếu: kill chưa chờ và xác minh thoát, kind không nén xoá thẳng, chưa có journal ghi trước | `rg-common.ps1`:1042-1107, :1144-1147, :1170-1188, :1168-1169 |
+| Benchmark | Chưa có. Acceptance (TECHNOTE ghi 374 test) chạy trên fixture, chưa chạy lại gần đây; README ghi 132 test, lệch TECHNOTE | `tests/Acceptance.ps1`; §6 |
+| U7 (nhóm "Tệp tạm & cache") | Chưa làm, cần biết tiến trình nào đang giữ file | §2 |
+
+## 11. Lộ trình đề xuất (chưa chốt)
+
+1. Số liệu và hậu kiểm: journal, kill có xác minh, metrics, đo overhead watcher.
+2. Hook lifecycle và ledger hai tầng (khai báo + quan sát).
+3. Lease có fencing, giữ chỗ cho preflight, probe tiến trình đang giữ file (U7).
+4. Trợ lý hiểu máy ở chế độ chạy thử: cụm, hồ sơ từng cụm, báo cáo, giải thích tiến trình. Phần báo cáo chỉ đọc nên có thể làm song song từ bước 2.
+5. Tự động có ngân sách: vòng lặp thi hành trong phạm vi được cấp, đề nghị nâng mức theo số liệu (người dùng cấp bằng PIN), tự hạ mức khi bị khôi phục nhiều, có nút dừng khẩn cấp.
