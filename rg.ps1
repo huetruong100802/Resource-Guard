@@ -8,11 +8,13 @@
 #   rg shortcut [remove]     # lối tắt "Resource Guard" ở Start Menu (thêm -Desktop để tạo cả ngoài màn hình nền)
 #   rg path [remove]         # thêm thư mục này vào PATH của người dùng để gõ "rg" ở bất kỳ đâu (mở terminal mới sau khi thêm)
 #   rg pin                   # đặt PIN cho chế độ tự dọn "Bật" (chỉ ở console tương tác)
+#   rg hooks print [-Heavy]  # IN đoạn JSON hook cho ~/.claude/settings.json (không tự sửa file); -Heavy thêm build/test qua Bash. rg hooks status: lease đang giữ
+#   rg panic                 # DỪNG KHẨN CẤP: tắt chính sách tự động + huỷ mọi job nền của Resource Guard (không cần PIN; bật lại cần PIN)
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)][ValidateSet('start', 'open', 'stop', 'restart', 'status', 'run', 'autostart', 'shortcut', 'path', 'pin', 'help')][string]$Command = 'help',
+    [Parameter(Position = 0)][ValidateSet('start', 'open', 'stop', 'restart', 'status', 'run', 'autostart', 'shortcut', 'path', 'pin', 'hooks', 'panic', 'help')][string]$Command = 'help',
     [Parameter(Position = 1)][string]$Arg = '',
-    [int]$Port = 8765, [switch]$Force, [switch]$NoOpen, [switch]$Desktop
+    [int]$Port = 8765, [switch]$Force, [switch]$NoOpen, [switch]$Desktop, [switch]$Heavy
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -86,7 +88,27 @@ switch ($Command) {
         "Đã thêm $root vào PATH người dùng. Mở terminal mới rồi gõ: rg status"
     }
     'pin' { & (Join-Path $root 'scripts\resource-manager.ps1') serve setpin }
+    'hooks' {
+        . (Join-Path $root 'scripts\rg-common.ps1')
+        switch ($Arg) {
+            'print' {
+                # stdout chỉ có JSON (để chuyển hướng/ghép); lời nhắc đi qua Write-Host. Resource Guard KHÔNG bao giờ tự sửa settings của bạn.
+                [Console]::Error.WriteLine('Gộp khối "hooks" dưới đây vào ~/.claude/settings.json (hoặc .claude/settings.json của dự án). Resource Guard không tự sửa file này.')
+                Get-RgHooksSnippet $root -Heavy:$Heavy
+            }
+            'status' {
+                $ls = @(Get-RgLeases)
+                if ($ls.Count) { $ls | Format-Table sessionId, agent, token, subagents, reservations, lastSeenUtc -AutoSize | Out-String } else { 'Không có phiên agent nào đang giữ lease.' }
+            }
+            default { 'Dùng: rg hooks print [-Heavy] | rg hooks status' }
+        }
+    }
+    'panic' {
+        . (Join-Path $root 'scripts\rg-common.ps1'); . (Join-Path $root 'scripts\rg-policy.ps1')
+        $pr = Invoke-RgPanic -By 'cli'
+        "Đã dừng khẩn cấp: chính sách tự động trước đó '$($pr.modeBefore)' -> 'off'; huỷ $(@($pr.stopped).Count) job nền" + $(if (@($pr.failed).Count) { "; $(@($pr.failed).Count) việc không dừng được (xem logs)" } else { '' }) + '. Bật lại ở màn Chính sách (cần PIN).'
+    }
     default {
-        Get-Content -LiteralPath $PSCommandPath -TotalCount 11 -Encoding UTF8 | ForEach-Object { $_ -replace '^#   ?', '  ' -replace '^# ', '' }
+        Get-Content -LiteralPath $PSCommandPath -TotalCount 13 -Encoding UTF8 | ForEach-Object { $_ -replace '^#   ?', '  ' -replace '^# ', '' }
     }
 }

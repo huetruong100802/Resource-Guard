@@ -18,7 +18,7 @@ powershell -NoProfile -File scripts\resource-manager.ps1 serve setpin
 # Dừng
 powershell -NoProfile -File scripts\resource-manager.ps1 serve stop
 
-# Test nghiệm thu (374 test; chạy trên Windows PowerShell 5.1, không cần pwsh)
+# Test nghiệm thu (725 test; chạy trên Windows PowerShell 5.1, không cần pwsh)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Acceptance.ps1
 ```
 
@@ -39,6 +39,10 @@ rg-server.ps1  ── vòng lặp đơn luồng: lấy mẫu → ghi state\live.
    │      rg-cleanup.ps1  dọn mục người dùng tick
    │      rg-auto.ps1     một lượt dọn tự động theo chính sách
    │      rg-agent.ps1    gọi claude để đánh giá
+   │      rg-assistant-act.ps1  nén/dọn một cụm (qua Invoke-RgAction)
+   ├─ Invoke-RgAction (rg-autonomy.ps1) ── cửa duy nhất vào Policy Engine
+   │      registry action · mức L0–L3 theo nhóm · journal · nhật ký action
+   ├─ rg-hook.ps1 ◄── hook Claude Code (lease, preflight, subagent), luôn thoát 0 khi lỗi nội bộ
    └─ ui\*  (vanilla JS, SVG, không phụ thuộc thư viện ngoài)
 ```
 
@@ -49,7 +53,12 @@ rg-server.ps1  ── vòng lặp đơn luồng: lấy mẫu → ghi state\live.
 | `rg-server.ps1` | HTTP + SSE, router, auto-spawn khi chạm ngưỡng |
 | `rg-scan.ps1` | Quét đĩa (Win32 `FindFirstFileExW`, đa luồng, phạm vi nhanh/đầy đủ, cây thư mục) và danh sách ứng viên dọn |
 | `rg-insight.ps1` | Mức sẵn sàng build/test/agent, dự báo ngày đầy ổ, kế hoạch đề xuất tất định (`New-RgAdvice`) |
-| `rg-proc.ps1` | Hạ ưu tiên tiến trình (đảo ngược được), lịch sử theo tiến trình |
+| `rg-proc.ps1` | Hạ ưu tiên tiến trình (đảo ngược được), lịch sử theo tiến trình, điều kiện kết thúc tiến trình (`Get-RgProcEndVerdict`), giải thích tiến trình (`Get-RgProcExplain`: vai trò, cây cha, service, đường cài, chữ ký, đang phục vụ job nào). File này **không** chứa `Stop-Process`; mọi lần kết thúc đi qua `Stop-RgProcessVerified` |
+| `rg-assistant.ps1` | Kiểm kê metadata nhẹ → cụm tất định → verdict (luật + agent) → báo cáo trợ lý; `Invoke-RgClusterAction` (nén/dọn một cụm) |
+| `rg-assistant-act.ps1` | Job nền nén/dọn một cụm, gọi `Invoke-RgAction -Actor human` |
+| `rg-autonomy.ps1` | Action registry, mức tự chủ L0–L3 theo nhóm, `Invoke-RgAction`, trạng thái chống lặp, tự hạ mức, nút dừng khẩn cấp |
+| `rg-hook.ps1` | Điểm vào cho hook Claude Code: lease phiên, preflight giữ chỗ RAM, đếm subagent; không lưu prompt/transcript |
+| `rg-restore.ps1` | Khôi phục từ kho nén (zip có xác minh) |
 | `rg-setup.ps1` | Chạy cùng Windows, lối tắt Start Menu, cờ lần đầu (`state\setup.json`) |
 | `rg-auto.ps1` | Một lượt dọn tự động trong process riêng |
 | `rg-cleanup.ps1` | Dọn các mục người dùng chọn (theo key) |
@@ -64,16 +73,14 @@ SSE thay cho polling. Mất kết nối thì UI tự nối lại. Mỗi tick ser
 
 ## 3. Giao diện
 
-Sidebar + 6 trang, sáng/tối, responsive (kiểm ở 1280/980/400 px), điều hướng được bằng bàn phím, có aria. Hash cũ `#overview` → `#home`; `#agent` → `#home` + ngăn kéo trợ lý.
+Sidebar + 4 màn, sáng/tối, responsive (kiểm ở 1280/980/400 px), điều hướng được bằng bàn phím, có aria. Hash cũ được ánh xạ trong `boot.js` (`LEGACY`): `#overview`/`#agent` → `#home`, `#clean`/`#policy` → `#disk`, `#cpu` → `#mem`.
 
 | Trang (hash) | Tệp | Nội dung |
 |---|---|---|
-| Trang chủ (`#home`) | `p-home.js` | Câu trạng thái, mức sẵn sàng, thanh tác động từng ổ, kế hoạch đề xuất, “Resource Guard đã làm gì” (điểm đánh dấu → biên lai), chỉ số chi tiết thu gọn |
-| Dọn dẹp (`#clean`) | `p-clean.js` | Nhóm theo bước của `/api/advice`, thanh ảnh hưởng trực tiếp, hộp xác nhận trước → sau, dự kiến vs thực tế |
-| Ổ đĩa (`#disk`) | `p-disk.js` | Thanh nhóm hiện dần (`cats` trong progress), treemap + lớp phủ, Top lớn nhất, ngăn kéo thư mục |
-| Tiến trình (`#cpu`) | `p-proc.js` | RAM xếp chồng, CPU + điểm đánh dấu `proc-priority`, bảng, ngăn kéo (lịch sử, what-if, hạ ưu tiên) |
-| Tự động hoá (`#policy`) | `p-auto.js` | Câu mô tả, vạch ngưỡng kéo được, xem trước `/api/auto/preview` (debounce 300 ms), mức điền sẵn, mục Nâng cao |
-| Cài đặt (`#settings`) | `p-overview.js` | Chu kỳ, ngưỡng, giao diện, công tắc chạy cùng Windows/lối tắt |
+| Trang chủ (`#home`) | `p-home.js` | Câu trạng thái, mức sẵn sàng, thanh tác động từng ổ, kế hoạch đề xuất, **Báo cáo của trợ lý** (cụm nên nén/dọn/giữ, nén → khôi phục), banner khi tự dọn xong vẫn vượt mốc, nút **Dừng khẩn cấp**, “Resource Guard đã làm gì” (điểm đánh dấu → biên lai), chỉ số chi tiết thu gọn |
+| Ổ đĩa (`#disk`) | `p-disk.js` | Dọn dẹp + chính sách hợp nhất: thanh trước → sau, bản đồ + việc có thể làm (công tắc tự động ngay trên dòng), treemap, thanh lưu chính sách |
+| Tiến trình (`#mem`, alias `#cpu`) | `p-proc.js` | RAM xếp chồng, CPU + điểm đánh dấu `proc-priority`, bảng, ngăn kéo (lịch sử, what-if, hạ ưu tiên, **Giải thích tiến trình**, kết thúc tiến trình có xác nhận trước → sau) |
+| Cài đặt (`#settings`) | `p-overview.js` | Chu kỳ, ngưỡng, giao diện, chạy cùng Windows/lối tắt, thẻ **Mức tự chủ** theo nhóm (L0–L3, nâng L3 cần PIN) |
 
 Thư viện dùng chung: `core.js` (`RG.human` — nhãn tiếng Việt cho lý do/sự kiện, `RG.lineChart` có `markers`/`dragLine`, `RG.fmtLocal` giờ địa phương), `viz.js` (`RG.viz.impactBar/treemap/stackArea`, `RG.drawer`, `RG.receipt`; trang thử `#viz-demo`), `p-setup.js` (hộp lần đầu), `p-agent.js` (`RG.askAgent`). UI luôn chỉ gửi key/pid, không gửi đường dẫn.
 
@@ -120,7 +127,7 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
   - mục thuộc vùng bảo vệ (của người dùng hoặc agent còn hạn) bị ép thành `keep`;
   - verdict `keep` + `confidence = high` cho **đường dẫn** loại `delete` được ghi vào `state\agent-keep.json` (xem dưới);
   - gợi ý chính sách trùng cài đặt hiện tại bị lọc.
-- Verdict `clean` chỉ **chọn sẵn ô** ở trang Dọn dẹp; người dùng vẫn phải xác nhận, xoá vẫn qua plan → approve → apply.
+- Verdict `clean` chỉ **chọn sẵn ô** ở trang Ổ đĩa (ô Việc có thể làm); người dùng vẫn phải xác nhận, xoá vẫn qua plan → approve → apply.
 - **Agent giữ** (`rg-policy.ps1`, `Add-RgAgentKeep` / `Get-RgAgentKeepMatch`): bảo vệ có thời hạn (30 ngày, tối đa 200 mục), tách khỏi `protectPaths` của người dùng.
   - `Test-RgPathProtected` (danh sách ứng viên, dọn tay, tự dọn) kiểm cả hai nguồn, cùng quy tắc tiền tố hai chiều; mục agent giữ bị ẩn khỏi danh sách dọn và hiện ở khối “Agent đang giữ”.
   - Chỉ làm chặt hơn nên không cần PIN. Đã giữ thì không gia hạn; hết hạn thì được đánh giá lại ở lượt sau.
@@ -139,6 +146,12 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
 6. Static chỉ phục vụ whitelist đuôi css/js/svg.
 7. **PIN** (PBKDF2, 120k vòng) bắt buộc khi chuyển sang mode `on` hoặc *nới lỏng* chính sách khi đang `on`; siết thêm bảo vệ thì không cần. Sai 5 lần → khoá 5 phút. Đặt PIN chỉ ở console.
 8. Kill tiến trình chỉ với nhóm cho phép (`build`, `test`, `dev`), có giới hạn `maxKillsPerRun`.
+9. **Kết thúc tiến trình từ app** (`POST /api/process/end`): chỉ nhận `pid` + `start`; điều kiện ở `Get-RgProcEndVerdict` (allowlist lớp: build, test, máy chủ dev, trình quản lý gói, compiler, language server; hệ thống, bảo mật, dịch vụ, Docker/SQL/WSL, vùng bảo vệ và chính Resource Guard thì không bao giờ). Một đường duy nhất `Stop-RgProcessVerified`: kiểm lại PID + thời điểm khởi động + tên ngay trước khi làm → đóng êm → chờ → buộc dừng → xác minh đã thoát (cả cây con thuộc nhóm cho phép). Tiến trình đang giữ lease/ledger của agent cần thêm PIN. `rg-proc.ps1` không chứa `Stop-Process`/`.Kill(`/`taskkill`/`CloseMainWindow` (có test).
+10. **Journal ghi-trước** (`state\journal.jsonl`): xoá, nén, khôi phục, kết thúc tiến trình ghi `intent` rồi `done|failed`; không ghi được `intent` thì không làm. Lần khởi động sau, `intent` mồ côi được báo và đóng là `interrupted`; plan xoá dở có thể chạy tiếp (kiểm lại từng mục). Lỗi ghi file/log không bị nuốt: `/api/health`, `state\io-health.json`. `plans\` giữ 60 ngày, log 30 ngày, journal tối đa 4096 KB (`retention.*`).
+11. **Agent đề xuất, Policy Engine thi hành** (`rg-autonomy.ps1`): `Invoke-RgAction` là cửa duy nhất; agent chỉ chọn `id` trong registry (5 action: `clean-cache`, `archive-cluster`, `clean-cluster`, `end-process`, `lower-priority`), tham số lạ (đường dẫn, khoá không phải 12 hex, PID ≤ 4) bị từ chối. Tác nhân không phải người chỉ thi hành khi nhóm ở **L3** + quyền của action ở L3 + chính sách `mode` ≠ `off`; mục `young`, `report`, agent-keep và file cá nhân không bao giờ tự xoá (trần nhóm L2; file cá nhân tối đa là “duyệt rồi nén zip có xác minh”).
+12. **Mức tự chủ** (`policy.autonomy.<nhóm>` = `L0` Tắt · `L1` Đề xuất · `L2` Chờ duyệt · `L3` Tự động): thiếu khoá = `L1`, riêng nhóm có category cũ (`cache-aged`, `temp-entry`…) kế thừa category (auto=L3, ask=L2, keep=L0) để không đổi hành vi cũ. Nâng lên L3 cần PIN (kể cả khi mode chưa bật); hạ mức thì không. Tự hạ khi bị khôi phục nhiều (`Invoke-RgAutonomyDemote`); đề nghị nâng khi N lượt chạy thử không bị khôi phục.
+13. **Dừng khẩn cấp** (`POST /api/panic`, `rg.ps1 panic`, nút ở Trang chủ): đặt `mode=off` và huỷ job nền của Resource Guard (chỉ tiến trình có dòng lệnh khớp `rg-*.ps1`). Không cần PIN vì chỉ làm chặt hơn; bật lại chính sách thì cần PIN.
+14. **Riêng tư của trợ lý**: hook không lưu prompt/transcript/tin nhắn cuối; payload gửi agent không có đường dẫn đầy đủ hay tên file (chỉ ≤ 5 tên mẫu trong cụm ở báo cáo cục bộ, không gửi đi); cụm ở `AppData` (góc khuất) chỉ báo cáo; API báo cáo bỏ `root` của cụm.
 
 ## 8. API (rút gọn)
 
@@ -153,9 +166,17 @@ API thêm trong đợt đổi UX (mọi POST cần `X-RG-Client`):
 | `GET /api/insight` · `GET /api/advice` | Mức sẵn sàng + dự báo ngày đầy; kế hoạch đề xuất tất định (`steps`, `review`) |
 | `GET /api/drive/history?drive=X&days=N` | Dung lượng trống theo giờ (biểu đồ 14 ngày) |
 | `GET /api/process/history?name=X&min=N` | Lịch sử RAM/CPU của tiến trình theo tên (mặc định 60 phút, tối đa 1440) |
-| `POST /api/process/priority {pid,start,level}` | Chỉ đổi PriorityClass `Normal` ↔ `BelowNormal` (`below` / `normal`), **không có đường kết thúc tiến trình**. Một hàm quyết định (`Get-RgProcLowerVerdict`) dùng chung cho `canLower/whyNot` ở danh sách và lúc thực thi; từ chối tiến trình Windows/giao diện và các tiến trình của chính Resource Guard; PID + start time + tên phải khớp dữ liệu sống |
+| `POST /api/process/priority {pid,start,level}` | Chỉ đổi PriorityClass `Normal` ↔ `BelowNormal` (`below` / `normal`); việc kết thúc tiến trình là route riêng `POST /api/process/end`. Đi qua `Invoke-RgAction -Id lower-priority`. Một hàm quyết định (`Get-RgProcLowerVerdict`) dùng chung cho `canLower/whyNot` ở danh sách và lúc thực thi; từ chối tiến trình Windows/giao diện và các tiến trình của chính Resource Guard; PID + start time + tên phải khớp dữ liệu sống |
 | `POST /api/auto/preview {policy}` | Xem trước chính sách chưa lưu: số lần chạm, mục sẽ bị chọn, bằng chứng của lượt chạy thử |
 | `GET/POST /api/setup` | `firstRun`, `autostart`, `shortcut`; POST chỉ nhận bool và `firstRunDone`; **PIN không đặt qua đây** |
+| `POST /api/process/end {pid,start[,pin]}` | Kết thúc tiến trình có xác minh (`Stop-RgProcessVerified`); tiến trình đang giữ lease của agent cần `pin`; mã lỗi `bad-pid`, `bad-start`, `autonomy-off`, `pin-*` |
+| `GET /api/process/explain?pid=N&start=S` | Giải thích tất định: vai trò, cây cha, service, đường cài, chữ ký, “đang phục vụ job nào” (ledger/lease), kèm nguồn; PID + start phải khớp tiến trình sống |
+| `GET /api/leases` | Phiên agent đang giữ lease, giữ chỗ preflight, số subagent, tiến trình quan sát được từ cây tiến trình (chỉ đọc, không có prompt) |
+| `GET /api/health` | Sức khoẻ ghi dữ liệu, journal mở, plan có thể chạy tiếp |
+| `GET /api/assistant/report` | Báo cáo trợ lý: cụm + verdict + tổng hợp, kèm tiến độ quét kiểm kê/agent (không có đường dẫn từng file) |
+| `POST /api/assistant/{scan,ask,act,dismiss}` | Quét kiểm kê nền · nhờ agent đánh giá cụm (vắng `claude` thì dùng luật) · nén/dọn một cụm `{clusterId, action: compress\|clean}` · ẩn cụm |
+| `GET /api/autonomy` · `POST /api/autonomy/{level,snooze}` | Mức tự chủ theo nhóm + banner + đề nghị nâng/hạ + registry; đặt mức `{group, level[, pin]}` (nâng L3 cần PIN: `pin-required`/`pin-wrong`/`pin-locked`/`pin-not-set`; vượt trần `over-cap`); hoãn banner `{hours}` |
+| `POST /api/panic` | Dừng khẩn cấp: `mode=off` + huỷ job nền; không cần PIN |
 Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-locked` · `pin-not-set`.
 
 ## 9. Bẫy đã gặp (đọc trước khi sửa code)
@@ -179,10 +200,13 @@ Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-lo
 
 - `Install-Watcher.ps1` (tự khởi động cùng Windows) chưa được cài trên máy này; hiện phải chạy `serve` thủ công.
 - Quét đĩa nhanh hơn nhiều (xem mục 11) nhưng vẫn là tác vụ nặng I/O; chưa có quét tăng dần (USN) — xem mục 12.
-- Mục tiêu hỗ trợ là Windows PowerShell 5.1 (có sẵn trên Windows, không phải máy nào cũng có `pwsh`); Acceptance 374 test chạy ở 5.1. PowerShell 7+ chưa được kiểm và không bắt buộc.
+- Mục tiêu hỗ trợ là Windows PowerShell 5.1 (có sẵn trên Windows, không phải máy nào cũng có `pwsh`); Acceptance 725 test chạy ở 5.1. PowerShell 7+ chưa được kiểm và không bắt buộc.
 - Agent chỉ thấy metadata nên không phân biệt được file "trông như rác nhưng quan trọng" — đó là lý do cá nhân/không rõ nguồn gốc luôn ở dạng gợi ý.
-- Chưa đo ảnh hưởng của chính watcher lên CPU/RAM trong nhiều giờ liên tục.
-- Ảnh chụp di động sau khi sửa banner (`.alert` flex-wrap) chưa chụp lại.
+- Ảnh hưởng của watcher lên CPU/RAM có công cụ đo (`tests/Bench-Watcher.ps1`) nhưng chưa có số đo nhiều giờ liên tục.
+- Giải thích tiến trình hiện là tất định (không qua agent); hook chỉ có cho Claude Code, chưa có cho Codex.
+- `Documents`/`Desktop` nằm trong `protected.segments` mặc định nên cụm file thực tế chủ yếu ra từ `Downloads`; cụm ở `AppData` chỉ báo cáo.
+- Chạy thử ≥ 1 tuần ở máy thật trước khi bật L3 cho nhóm đầu tiên (số liệu ở thẻ Mức tự chủ).
+- Ảnh trong `docs/img` chưa chụp lại sau đợt đổi UX/trợ lý.
 
 ## 11. Quét ổ v2: vùng quét và cây thư mục
 

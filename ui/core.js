@@ -375,7 +375,7 @@
   RG.startJob = function (path, body, okMsg) {
     return RG.api(path, { method: 'POST', body: body || {} }).then(function (j) {
       if (okMsg) RG.toast(j.already ? 'Tác vụ này đang chạy.' : okMsg);
-      var n = { '/api/disk/scan': 'breakdown', '/api/candidates/scan': 'candidates', '/api/cleanup/apply': 'cleanup', '/api/cleanup/elevate': 'cleanup', '/api/archive/restore': 'cleanup','/api/auto/run': 'auto', '/api/agent/run': 'agent' }[path];
+      var n = { '/api/disk/scan': 'breakdown', '/api/candidates/scan': 'candidates', '/api/cleanup/apply': 'cleanup', '/api/cleanup/elevate': 'cleanup', '/api/archive/restore': 'cleanup','/api/auto/run': 'auto', '/api/agent/run': 'agent', '/api/assistant/act': 'cleanup' }[path];
       if (n) S.jobs[n] = { status: 'running', pct: 0, message: 'đang khởi động…', startedUtc: new Date().toISOString(), pending: true, t0: Date.now() };
       RG.watchJobs();
       if (RG.pages[RG.cur] && RG.pages[RG.cur].jobs) RG.pages[RG.cur].jobs();

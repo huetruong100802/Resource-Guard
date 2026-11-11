@@ -68,6 +68,8 @@
     }
     S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
     setBadge(r);
+    /* r.stale = bản số liệu lần chạy trước server nạp sẵn để có gì hiển thị ngay; tick thật sẽ thay trong vài giây. */
+    var ct = $('#connTxt'); if (ct) { if (r.stale) ct.textContent = 'đang cập nhật…'; else if (ct.textContent === 'đang cập nhật…') ct.textContent = 'trực tiếp'; }
     RG.nextAt = Date.now() + (r.intervalSec || 15) * 1000;
     if (S.settings) S.settings.intervalSec = r.intervalSec || S.settings.intervalSec;
     document.title = '[' + RG.human.state(r.state) + '] Resource Guard · ' + RG.pages[RG.cur].title;
@@ -118,18 +120,36 @@
     window.addEventListener('hashchange', function () { RG.go(location.hash.slice(1), true); });
     setInterval(function () { var s = Math.max(0, Math.round((RG.nextAt - Date.now()) / 1000)); $('#cd').textContent = RG.nextAt ? s : '–'; }, 500);
 
-    Promise.all([
-      RG.api('/api/settings').then(function (s) { S.settings = s; S.thr = s.thresholds; }),
-      RG.api('/api/history').then(function (h) { S.hist = (h || []).slice(-MAX); }),
-      RG.loadPolicy().catch(function () { }),
-      RG.loadCands().catch(function () { }),
-      RG.loadDrives().catch(function () { }).then(function () { return RG.loadDisk(); }).catch(function () { })
-    ]).catch(function () { }).then(function () {
-      if (S.hist.length) S.live = S.hist[S.hist.length - 1];
+    /* Vẽ trang ngay khi có số liệu cần thiết (cài đặt + lịch sử, đều nhẹ); phần nặng (chính sách, ứng viên dọn, ổ đĩa) nạp song song,
+       chờ tối đa 1,2 giây rồi vẽ luôn, xong thì làm tươi lại. Trước đây phải chờ hết mọi API nên trang trống tới hàng chục giây khi server đang lấy mẫu đầu tiên. */
+    var painted = false;
+    function firstPaint() {
+      if (painted) return; painted = true;
+      if (S.hist.length && !S.live) S.live = S.hist[S.hist.length - 1];
       RG.updateNavBadges();
       if (S.live) setBadge(S.live);
       RG.go(location.hash.slice(1) || 'home', true);
       connect(); RG.watchJobs(); RG.setup.check();
+      /* Chưa có lịch sử (máy mới cài): lấy bản tức thời của server thay vì chờ tin SSE đầu tiên. */
+      if (!S.live) RG.api('/api/state').then(function (j) { if (j && j.state && !S.live) onLive(j); }).catch(function () { });
+    }
+    var fast = Promise.all([
+      RG.api('/api/settings').then(function (s) { S.settings = s; S.thr = s.thresholds; }).catch(function () { }),
+      RG.api('/api/history').then(function (h) { S.hist = (h || []).slice(-MAX); }).catch(function () { })
+    ]);
+    var rest = Promise.all([
+      RG.loadPolicy().catch(function () { }),
+      RG.loadCands().catch(function () { }),
+      RG.loadDrives().catch(function () { }).then(function () { return RG.loadDisk(); }).catch(function () { })
+    ]);
+    fast.then(function () {
+      var t = setTimeout(firstPaint, 1200);
+      rest.then(function () {
+        clearTimeout(t);
+        if (!painted) { firstPaint(); return; }
+        RG.updateNavBadges();
+        if (RG.cur === 'home' || RG.cur === 'disk') RG.go(RG.cur, true);
+      });
     });
   }
   init();

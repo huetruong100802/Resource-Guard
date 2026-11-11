@@ -1,7 +1,12 @@
 {
   "ram": { "normalAboveGB": 5, "cautionFromGB": 3, "restrictedFromGB": 2 },
   "disk": { "drive": "C", "normalAboveGB": 20, "cautionFromGB": 10 },
-  "scan": { "autoRefreshHours": 6, "cpuMaxPct": 40 },
+  "scan": { "autoRefreshHours": 6, "cpuMaxPct": 40, "maxAgeHours": 12, "minGapMinutes": 10 },
+  "inventory": { "roots": ["%USERPROFILE%\\Downloads", "%USERPROFILE%\\Documents", "%USERPROFILE%\\Desktop"], "hiddenRoots": ["%LOCALAPPDATA%", "%APPDATA%"], "hiddenExt": ["db", "sqlite", "sqlite3", "bak", "mdf", "ldf"], "hiddenMinMB": 1, "hiddenMaxDepth": 5, "maxDepth": 12, "maxFiles": 40000, "maxSeconds": 90, "minClusterFiles": 3, "minClusterMB": 50, "keepRecentDays": 30, "compressAfterDays": 90, "installerCleanAfterDays": 30, "tempCleanAfterDays": 14 },
+  "retention": { "plansDays": 60, "logDays": 30, "journalMaxKB": 4096 },
+  "autonomy": { "promoteMinRuns": 5, "promoteMinDays": 7, "demoteRestoreRate": 0.25, "demoteMinArchives": 4, "demoteFailures": 3, "windowDays": 30 },
+  "ledger": { "ttlHours": 24 },
+  "lease": { "ttlMin": 180, "reserveTtlMin": 10, "subagentTtlMin": 30, "warmupSec": 90, "deferMaxSec": 20, "lastKnownMaxAgeMin": 30, "agentProcessNames": ["claude", "codex", "node"] },
   "commit": { "restrictedPct": 90, "criticalPct": 97 },
   "estimateGB": { "build": 2.0, "test": 3.0, "subagent": 0.5, "session": 0 },
   "policy": {
@@ -25,7 +30,7 @@
     { "name": "node", "cmdRegex": "(ng(\\.js)?\"?\\s+build|vite(\\.js)?\"?\\s+build|\\bngc\\b|\\btsc\\b|webpack)" }
   ],
   "heavyExcludeCmdRegex": "nodemode|VBCSCompiler|MSBuildTaskHost|build-server|--version",
-  "kill": { "allowedGroups": ["build", "test", "dev"] },
+  "kill": { "allowedGroups": ["build", "test", "dev"], "allowedRoles": ["build", "test", "devserver", "packagemgr", "compiler", "langserver", "runtime-app"] },
   "identity": {
     "launchers": [
       { "name": "code", "label": "VS Code" },
@@ -72,7 +77,7 @@
     ]
   },
   "cleanup": {
-    "workspaceRoots": ["%USERPROFILE%\\Work\\Repositories"],
+    "workspaceRoots": ["%USERPROFILE%\\Work\\Repositories", "%USERPROFILE%\\Workspace", "%USERPROFILE%\\source\\repos", "%USERPROFILE%\\repos", "%USERPROFILE%\\Projects"],
     "maxDepth": 6,
     "minAgeDays": { "dotnet-artifact": 14, "node_modules": 30, "temp-entry": 14 },
     "cacheMinInactiveDays": 14,
@@ -81,6 +86,7 @@
     "tempTop": 30,
     "minCacheMB": 100,
     "youngMinMB": 100,
+    "heldProbe": true,
     "cacheDirs": {
       "nuget-packages":   "%USERPROFILE%\\.nuget\\packages",
       "nuget-http-cache": "%LOCALAPPDATA%\\NuGet\\v3-cache",

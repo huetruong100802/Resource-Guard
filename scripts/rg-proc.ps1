@@ -1,7 +1,8 @@
-﻿# rg-proc.ps1 - HẠ ƯU TIÊN tiến trình (đảo ngược được). Dot-source sau rg-common.ps1 và rg-policy.ps1.
-# KHÔNG có đường kết thúc tiến trình nào ở đây: chỉ đổi PriorityClass Normal <-> BelowNormal.
-# An toàn: mọi kiểm tra thuộc về MỘT hàm quyết định (Get-RgProcLowerVerdict) dùng chung cho danh sách (canLower/whyNot) và cho lúc thực thi,
-# nên nút trên UI và việc server thực sự làm luôn khớp. Lúc thực thi còn kiểm lại bằng dữ liệu sống (PID + start time + tên + mức hiện tại).
+﻿# rg-proc.ps1 - HẠ ƯU TIÊN tiến trình (đảo ngược được) và KẾT THÚC tiến trình từ app (B1). Dot-source sau rg-common.ps1 và rg-policy.ps1.
+# File này không tự gọi API dừng tiến trình của Windows: việc kết thúc luôn đi qua Stop-RgProcessVerified (rg-common.ps1), cửa duy nhất
+# (kiểm lại PID + start time + tên, đóng êm trước, buộc sau, xác minh đã thoát). Hạ ưu tiên chỉ đổi PriorityClass Normal <-> BelowNormal.
+# An toàn: mọi kiểm tra thuộc về MỘT hàm quyết định (Get-RgProcLowerVerdict / Get-RgProcEndVerdict) dùng chung cho danh sách (canLower, canEnd, whyNot)
+# và cho lúc thực thi, nên nút trên UI và việc server thực sự làm luôn khớp. Lúc thực thi còn kiểm lại bằng dữ liệu sống.
 
 # Tên tiến trình của Windows/giao diện: không bao giờ đụng tới dù ở phiên người dùng.
 $script:RgProcCriticalNames = @('system', 'idle', 'registry', 'smss', 'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'lsaiso', 'lsm', 'svchost',
@@ -47,13 +48,17 @@ function Get-RgSelfPids([switch]$Fresh) {
 }
 
 # Bối cảnh dùng chung cho nhiều dòng: dựng MỘT lần mỗi yêu cầu.
-function New-RgProcContext($Cfg = $null, $Policy = $null, [switch]$FreshSelf) {
+function New-RgProcContext($Cfg = $null, $Policy = $null, [switch]$FreshSelf, $Table = $null) {
     if ($null -eq $Cfg) { $Cfg = Get-RgConfig }
     if ($null -eq $Policy) { $Policy = Get-RgPolicy }
-    $ledger = @{}; foreach ($e in @(Read-RgLedger)) { if ($e.pid) { $ledger[[int]$e.pid] = $true } }
+    $ledger = @{}; $ledgerEntries = @{}
+    foreach ($e in @(Read-RgLedger)) { if ($e.pid) { $ledger[[int]$e.pid] = $true; $ledgerEntries[[int]$e.pid] = $e } }
     $lowered = @{}; foreach ($e in @(Read-RgProcPriority)) { $lowered["$([int]$e.pid)|$([string]$e.start)"] = $e }
+    # ledger tầng quan sát (C3): hậu duệ build/test/dev của phiên agent đang giữ lease. Không có lease nào thì không tốn thêm gì.
+    $observed = @{}
+    try { foreach ($o in @(Get-RgObservedLedger -Table $Table -Cfg $Cfg)) { if (-not $ledger.ContainsKey([int]$o.pid)) { $observed[[int]$o.pid] = $o } } } catch { }
     return [pscustomobject]@{
-        cfg = $Cfg; policy = $Policy; ledger = $ledger; lowered = $lowered
+        cfg = $Cfg; policy = $Policy; ledger = $ledger; ledgerEntries = $ledgerEntries; observed = $observed; lowered = $lowered
         self = (Get-RgSelfPids -Fresh:$FreshSelf); session = [int][Diagnostics.Process]::GetCurrentProcess().SessionId
     }
 }
@@ -147,6 +152,108 @@ function Set-RgProcPriority([int]$ProcId, [string]$Start, [string]$Level) {
     return [pscustomobject]$r
 }
 
+# ===================== Kết thúc tiến trình từ app (B1, docs §8) =====================
+# Allowlist THEO LỚP (vai trò suy ra từ danh tính tiến trình), không chỉ denylist: chỉ lớp trong kill.allowedRoles mới được kết thúc.
+# Không bao giờ đủ điều kiện: hệ thống, bảo mật, dịch vụ/phiên khác, hạ tầng (Docker/SQL/WSL), chính Resource Guard, vùng người dùng đã bảo vệ.
+# Tiến trình do trợ lý AI đăng ký (ledger) được phép kết thúc kể cả khi lớp không nằm trong allowlist, nhưng nếu chủ (agent) còn sống
+# thì tiến trình đang giữ lease của agent => cần PIN. Chủ đã chết (mồ côi) => một cú bấm.
+$script:RgDefaultEndRoles = @('build', 'test', 'devserver', 'packagemgr', 'compiler', 'langserver', 'runtime-app')
+
+function Get-RgEndRoles($Cfg) {
+    try { if ($Cfg -and $Cfg.PSObject.Properties['kill'] -and $Cfg.kill -and $Cfg.kill.PSObject.Properties['allowedRoles'] -and $Cfg.kill.allowedRoles) { return @($Cfg.kill.allowedRoles | ForEach-Object { [string]$_ }) } } catch { }
+    return $script:RgDefaultEndRoles
+}
+
+# Quyết định THUẦN. Trả { ok; reason; needsPin; ledger; role }. $Role = vai trò từ Get-RgProcIdentity ('' nếu chưa rõ).
+function Get-RgProcEndVerdict([int]$ProcId, [string]$Name, [string]$Group, [string]$Cmd, $Session, [string]$Role, $Ctx, [string]$Start = '') {
+    $n = ([string]$Name -replace '\.exe$', '').ToLowerInvariant()
+    $res = [ordered]@{ ok = $false; reason = ''; needsPin = $false; ledger = $false; observed = $false; role = $Role }
+    $deny = { param($m) $res.reason = $m; return [pscustomobject]$res }
+    if ($ProcId -le 4) { return (& $deny 'Tiến trình hệ thống: không đụng tới.') }
+    if ($Ctx.self.ContainsKey($ProcId) -or ($Cmd -and $Cmd -match $script:RgProcSelfCmdRegex)) { return (& $deny 'Đây là tiến trình của chính Resource Guard.') }
+    if ($script:RgProcCriticalNames -contains $n) { return (& $deny 'Tiến trình hệ thống hoặc giao diện Windows: không đụng tới.') }
+    if (@('system', 'security') -contains $Role) { return (& $deny 'Do Windows quản lý: không kết thúc từ đây.') }
+    if ($Group -eq 'infra') { return (& $deny 'Hạ tầng (Docker, SQL Server, WSL...): dừng từ chính dịch vụ đó, không kết thúc từ đây để tránh hỏng dữ liệu.') }
+    $entry = $null
+    if ($Ctx.ledgerEntries -and $Ctx.ledgerEntries.ContainsKey($ProcId)) {
+        $e = $Ctx.ledgerEntries[$ProcId]
+        if (-not $Start -or [string]$e.start -eq $Start) { $entry = $e }
+    }
+    if ($Group -eq 'agent' -and -not $entry) { return (& $deny 'Tiến trình của trợ lý AI: hãy kết thúc phiên từ chính ứng dụng đó.') }
+    if (Test-RgProcessProtected $n $Ctx.policy) { return (& $deny 'Bạn đã đặt tiến trình này vào vùng bảo vệ.') }
+    if ($null -eq $Session) { return (& $deny 'Không đọc được phiên chạy của tiến trình này.') }
+    if ([int]$Session -eq 0) { return (& $deny 'Tiến trình dịch vụ hệ thống (phiên 0): không đụng tới.') }
+    if ([int]$Session -ne [int]$Ctx.session) { return (& $deny 'Tiến trình thuộc phiên đăng nhập khác.') }
+    if ($entry) {
+        $res.ledger = $true
+        $ownerAlive = $false
+        if ($entry.ownerStart) { $ownerAlive = [bool](Test-RgProcessIdentity ([int]$entry.ownerPid) ([string]$entry.ownerStart) '') }
+        $res.needsPin = $ownerAlive   # agent còn sống = đang giữ lease
+        $res.ok = $true
+        return [pscustomobject]$res
+    }
+    if (-not $Role) { return (& $deny 'Chưa nhận diện được loại tiến trình này nên không cho kết thúc từ app. Hãy đóng từ chính ứng dụng.') }
+    if ((Get-RgEndRoles $Ctx.cfg) -notcontains $Role) { return (& $deny "Loại '$Role' không nằm trong danh sách được kết thúc từ app. Hãy đóng từ chính ứng dụng, sau khi lưu việc đang làm.") }
+    $res.ok = $true
+    # quan sát được là con cháu của phiên agent ĐANG SỐNG (giữ lease): giống tiến trình có ledger, cần PIN. Lớp vẫn phải nằm trong allowlist ở trên.
+    if ($Ctx.PSObject.Properties['observed'] -and $Ctx.observed -and $Ctx.observed.ContainsKey($ProcId) -and (-not $Start -or [string]$Ctx.observed[$ProcId].start -eq $Start)) {
+        $res.needsPin = $true; $res.observed = $true
+    }
+    return [pscustomobject]$res
+}
+
+# Kiểm bằng dữ liệu SỐNG ngay trước khi làm: PID + start time + tên khớp, rồi verdict thuần. Trả { ok; reason; needsPin; ledger; role; name; ramMB }.
+function Test-RgProcEndable([int]$ProcId, [string]$Start, $Ctx = $null) {
+    $res = [ordered]@{ ok = $false; reason = ''; needsPin = $false; ledger = $false; role = ''; name = ''; ramMB = 0 }
+    try {
+        if ($null -eq $Ctx) { $Ctx = New-RgProcContext -FreshSelf }
+        if ($ProcId -le 4) { $res.reason = 'Tiến trình hệ thống: không đụng tới.'; return [pscustomobject]$res }
+        $c = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId" -ErrorAction SilentlyContinue
+        if (-not $c) { $res.reason = 'Tiến trình không còn chạy.'; return [pscustomobject]$res }
+        if ((ConvertTo-RgStamp $c.CreationDate) -ne $Start) { $res.reason = 'Tiến trình đã thay đổi (PID được dùng lại). Hãy tải lại danh sách.'; return [pscustomobject]$res }
+        $name = ([string]$c.Name -replace '\.exe$', '').ToLowerInvariant(); $res.name = $name
+        $res.ramMB = [math]::Round([double]$c.WorkingSetSize / 1MB, 0)
+        $cmd = [string]$c.CommandLine
+        $grp = Get-RgGroup $name $cmd $Ctx.cfg
+        $role = ''
+        try {   # vai trò cần chuỗi cha: dựng bảng tiến trình một lần (CIM), chỉ khi bấm kết thúc nên chấp nhận chi phí
+            $tbl = @(Get-RgProcessTable); $by = @{}; foreach ($t in $tbl) { $by[[int]$t.Pid] = $t }
+            $row = $by[$ProcId]
+            if ($row) { $role = [string](Get-RgProcIdentity $row $by $Ctx.cfg (Get-RgServiceMap) @(Get-RgWorkspaceRoots $Ctx.cfg.cleanup)).role }
+        } catch { }
+        $v = Get-RgProcEndVerdict $ProcId $name $grp $cmd $c.SessionId $role $Ctx $Start
+        $res.ok = $v.ok; $res.reason = $v.reason; $res.needsPin = $v.needsPin; $res.ledger = $v.ledger; $res.role = $v.role
+    } catch { $res.reason = 'Không kiểm tra được tiến trình: ' + [string]$_.Exception.Message }
+    return [pscustomobject]$res
+}
+
+# Kết thúc MỘT tiến trình (cùng cây con thuộc nhóm cho phép). KHÔNG ném lỗi: trả { ok; code; pid; name; method; tree; skipped; freedMB; error }.
+# $PinVerified: server đã xác minh PIN (chỉ cần khi tiến trình đang giữ lease của agent). Ghi journal trước/sau và log 'proc-end'.
+function Invoke-RgProcEnd([int]$ProcId, [string]$Start, [bool]$PinVerified = $false) {
+    $r = [ordered]@{ ok = $false; code = ''; pid = $ProcId; name = ''; method = 'none'; tree = @(); skipped = @(); freedMB = 0; error = '' }
+    try {
+        if ($Start -notmatch '^\d{8}T\d{6}Z$') { $r.error = 'Thiếu hoặc sai thời điểm khởi động của tiến trình.'; $r.code = 'bad-start'; return [pscustomobject]$r }
+        $ctx = New-RgProcContext -FreshSelf
+        $t = Test-RgProcEndable $ProcId $Start $ctx
+        $r.name = [string]$t.name
+        if (-not $t.ok) { $r.error = [string]$t.reason; $r.code = 'not-eligible'; return [pscustomobject]$r }
+        if ($t.needsPin -and -not $PinVerified) { $r.error = 'Tiến trình đang do trợ lý AI giữ nên cần PIN.'; $r.code = 'pin-required'; return [pscustomobject]$r }
+        $jid = $null
+        try { $jid = Write-RgJournalIntent -Action 'kill' -Kind 'process' -Target "pid $ProcId $($t.name)" -Extra ([ordered]@{ via = 'ui'; role = $t.role; ledger = $t.ledger; recovery = 'none' }) }
+        catch { $r.error = 'Không ghi được nhật ký nên chưa kết thúc gì: ' + $_.Exception.Message; $r.code = 'journal'; return [pscustomobject]$r }
+        $k = Stop-RgProcessVerified -ProcId $ProcId -Start $Start -Name ([string]$t.name) -Cfg $ctx.cfg
+        $r.method = [string]$k.method; $r.tree = @($k.tree); $r.skipped = @($k.skipped)
+        if ($k.ok) {
+            $r.ok = $true; $r.freedMB = [double]$t.ramMB
+            Close-RgJournal $jid 'done' "ended ($($k.method)); verified exited"
+        } else {
+            $r.error = [string]$k.reason; $r.code = 'not-exited'
+            Close-RgJournal $jid 'failed' ([string]$k.reason)
+        }
+        Write-RgLog 'proc-end' ([ordered]@{ pid = $ProcId; name = $t.name; role = $t.role; ledger = $t.ledger; ok = $r.ok; method = $r.method; children = [math]::Max(0, @($k.tree).Count - 1) })
+    } catch { $r.error = 'Không kết thúc được: ' + [string]$_.Exception.Message; $r.code = 'error' }
+    return [pscustomobject]$r
+}
 
 # ===================== Danh tính tiến trình (P2 plan-ux-clarity) =====================
 # Trả lời "đây là gì, của ai, để làm gì" CHỈ từ dữ liệu có sẵn trong Get-RgProcessTable (Name, Cmd, ParentPid, Start) + tên dịch vụ cho svchost.
@@ -347,6 +454,114 @@ function Get-RgProcIdentity($Row, $ByPid, $Cfg, $Services = $null, $Roots = $nul
         $script:RgIdCache[$ck] = @{ at = [datetime]::UtcNow.Ticks; v = $res }
     }
     return $res
+}
+
+# ---------- D4: giải thích tiến trình (là gì, từ đâu, đang phục vụ việc gì) ----------
+# Chỉ ĐỌC. Toàn bộ nội dung do luật tất định dựng từ dữ liệu có cấu trúc (danh tính, cây tiến trình, dịch vụ, file cài đặt, chữ ký số, ledger/lease);
+# không có dòng lệnh nào đi ra ngoài và không cần AI. Kết quả dành cho người dùng xem trên máy mình (có đường dẫn cài đặt).
+
+$script:RgSigCache = @{}
+# Chữ ký số của một file thực thi: { signed; status; publisher }. Cache theo đường dẫn + ngày sửa (Get-AuthenticodeSignature ~vài chục ms).
+function Get-RgFileSignature([string]$Path) {
+    $none = [pscustomobject]@{ signed = $false; status = 'Unknown'; publisher = '' }
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $none }
+    try {
+        $key = $Path.ToLowerInvariant() + '|' + (Get-Item -LiteralPath $Path -Force).LastWriteTimeUtc.Ticks
+        if ($script:RgSigCache.ContainsKey($key)) { return $script:RgSigCache[$key] }
+        $s = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+        $pub = ''
+        if ($s.SignerCertificate) { $m = [regex]::Match([string]$s.SignerCertificate.Subject, '(?:^|,\s*)CN=("([^"]+)"|[^,]+)'); if ($m.Success) { $pub = $(if ($m.Groups[2].Success) { $m.Groups[2].Value } else { $m.Groups[1].Value.Trim() }) } }
+        $r = [pscustomobject]@{ signed = ([string]$s.Status -eq 'Valid'); status = [string]$s.Status; publisher = $pub }
+        if ($script:RgSigCache.Count -gt 500) { $script:RgSigCache = @{} }
+        $script:RgSigCache[$key] = $r
+        return $r
+    } catch { return $none }
+}
+
+function Format-RgUptimeVi([datetime]$StartLocal) {
+    $m = [int][math]::Max(0, ((Get-Date) - $StartLocal).TotalMinutes)
+    if ($m -lt 2) { return 'vừa mới bắt đầu' }
+    if ($m -lt 120) { return "$m phút" }
+    if ($m -lt 2880) { return ('{0:n0} giờ' -f [math]::Floor($m / 60.0)) }
+    return ('{0:n0} ngày' -f [math]::Floor($m / 1440.0))
+}
+
+# Trả { ok; error } nếu không giải thích được (PID đã chết hoặc bị tái sử dụng), ngược lại bản giải thích có cấu trúc kèm 'text'.
+function Get-RgProcExplain {
+    param([int]$ProcId, [string]$Start = '', $Cfg = $null, $Table = $null, $Ctx = $null)
+    if ($null -eq $Cfg) { $Cfg = Get-RgConfig }
+    if ($ProcId -le 0) { return [pscustomobject]@{ ok = $false; error = 'PID không hợp lệ.' } }
+    $c = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId" -ErrorAction SilentlyContinue
+    if (-not $c) { return [pscustomobject]@{ ok = $false; error = 'Tiến trình không còn chạy.' } }
+    $stamp = ConvertTo-RgStamp $c.CreationDate
+    if ($Start -and $stamp -ne $Start) { return [pscustomobject]@{ ok = $false; error = 'Tiến trình đã thay đổi (PID được dùng lại). Hãy tải lại danh sách.' } }
+    if ($null -eq $Table) { $Table = @($script:RgTableCache) }
+    if (@($Table | Where-Object { $_ }).Count -eq 0) { $Table = @(Get-RgProcessTable) }
+    $by = @{}; foreach ($t in @($Table)) { if ($t) { $by[[int]$t.Pid] = $t } }
+    $name = ([string]$c.Name -replace '\.exe$', '').ToLowerInvariant()
+    $cmd = [string]$c.CommandLine
+    $row = $by[$ProcId]
+    if ($null -eq $row -or [string]$row.Start -ne $stamp) {
+        $row = [pscustomobject]@{ Pid = $ProcId; ParentPid = [int]$c.ParentProcessId; Name = $name; Start = $stamp; Cmd = $cmd; Group = (Get-RgGroup $name $cmd $Cfg) }
+        $by[$ProcId] = $row
+    }
+    $roots = @(Get-RgWorkspaceRoots $Cfg.cleanup)
+    $svcMap = Get-RgServiceMap
+    $idn = Get-RgProcIdentity $row $by $Cfg $svcMap $roots
+    $services = @($svcMap[$ProcId] | Where-Object { $_ })
+
+    # cha trực tiếp (bỏ qua nếu cha khởi động SAU con = PID bị tái sử dụng)
+    $parent = $null
+    $pr = $by[[int]$row.ParentPid]
+    if ($pr -and [int]$pr.Pid -ne $ProcId -and -not ([string]$pr.Start -and [string]::CompareOrdinal([string]$pr.Start, $stamp) -gt 0)) { $parent = [pscustomobject]@{ pid = [int]$pr.Pid; name = [string]$pr.Name } }
+
+    # file cài đặt + chữ ký
+    $exe = [string]$c.ExecutablePath; $company = ''; $product = ''
+    if ($exe -and (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        try { $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe); $company = [string]$vi.CompanyName; $product = [string]$vi.ProductName } catch { }
+    }
+    $sig = Get-RgFileSignature $exe
+    $install = $(if ($exe) { Split-Path $exe -Parent } else { '' })
+
+    # đang phục vụ việc gì: ledger (agent tự đăng ký) > quan sát từ cây tiến trình của phiên giữ lease > hậu duệ của chủ lease
+    if ($null -eq $Ctx) { $Ctx = New-RgProcContext -Cfg $Cfg -Table $Table }
+    $serving = [pscustomobject]@{ kind = 'none'; agent = ''; label = ''; detail = '' }
+    $le = $Ctx.ledgerEntries[$ProcId]
+    if ($le -and [string]$le.start -eq $stamp) {
+        $serving = [pscustomobject]@{ kind = 'ledger'; agent = [string]$le.agent; label = [string]$le.label; detail = "Do trợ lý AI '$($le.agent)' đăng ký" + $(if ($le.label) { ": $($le.label)" } else { '' }) }
+    } elseif ($Ctx.observed.ContainsKey($ProcId)) {
+        $o = $Ctx.observed[$ProcId]
+        $serving = [pscustomobject]@{ kind = 'observed'; agent = [string]$o.agent; label = [string]$o.group; detail = "Là tiến trình $($o.group) chạy trong phiên của trợ lý AI '$($o.agent)' (nhìn thấy qua cây tiến trình)" }
+    }
+
+    $role = [string]$idn.role
+    $parts = New-Object System.Collections.ArrayList
+    [void]$parts.Add(("{0}: {1}." -f $idn.title, ([string]$idn.what).TrimEnd('.')))
+    if ($services.Count -gt 0) { [void]$parts.Add(('Đây là tiến trình dịch vụ Windows ({0}).' -f ((@($services | Select-Object -First 3)) -join ', '))) }
+    if (@($idn.chain).Count -gt 1) { [void]$parts.Add(('Được mở theo chuỗi: {0}.' -f ((@($idn.chain)) -join ' → '))) }
+    elseif ($parent) { [void]$parts.Add(('Được mở bởi {0}.' -f $parent.name)) }
+    if ($idn.project) { [void]$parts.Add(('Thuộc dự án "{0}".' -f $idn.project)) }
+    if ($serving.kind -ne 'none') { [void]$parts.Add($serving.detail + '.') }
+    if ($exe) {
+        $who = $(if ($sig.signed) { 'có chữ ký số hợp lệ' + $(if ($sig.publisher) { " của $($sig.publisher)" } else { '' }) }
+            elseif ($sig.status -eq 'NotSigned') { 'không có chữ ký số' } elseif ($sig.status -eq 'Unknown') { 'chưa kiểm được chữ ký số' } else { "chữ ký số không hợp lệ ($($sig.status))" })
+        [void]$parts.Add(('Chạy từ {0}; file {1}.' -f $install, $who))
+    }
+    [void]$parts.Add(('Đã chạy {0}.' -f (Format-RgUptimeVi $c.CreationDate)))
+    if ($idn.closeHint) { [void]$parts.Add(([string]$idn.closeHint).TrimEnd('.') + '.') }
+    $sources = @('luật nhận diện')
+    if (@($idn.chain).Count -gt 1 -or $parent) { $sources += 'cây tiến trình' }
+    if ($services.Count -gt 0) { $sources += 'danh sách dịch vụ' }
+    if ($exe) { $sources += 'file cài đặt và chữ ký số' }
+    if ($serving.kind -ne 'none') { $sources += $(if ($serving.kind -eq 'ledger') { 'sổ tiến trình của agent' } else { 'phiên agent đang giữ lease' }) }
+
+    return [pscustomobject][ordered]@{
+        ok = $true; pid = $ProcId; start = $stamp; name = $name; title = [string]$idn.title; role = $role; what = [string]$idn.what; confidence = [string]$idn.confidence
+        chain = @($idn.chain); parent = $parent; services = @($services); project = $idn.project
+        install = [pscustomobject]@{ dir = $install; company = $company; product = $product; signed = [bool]$sig.signed; signStatus = [string]$sig.status; publisher = [string]$sig.publisher }
+        serving = $serving; uptimeText = (Format-RgUptimeVi $c.CreationDate); closeHint = [string]$idn.closeHint
+        text = ($parts -join ' '); sources = $sources
+    }
 }
 
 # Gộp các dòng (đã có .identity) theo khoá workload -> sắp theo RAM giảm dần.

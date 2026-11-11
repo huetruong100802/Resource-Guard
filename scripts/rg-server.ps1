@@ -197,6 +197,9 @@ $url = "http://localhost:$Port/"
 Set-Content -LiteralPath $script:InfoPath -Value (ConvertTo-Json ([ordered]@{ pid = $PID; port = $Port; url = $url; startedUtc = (Get-Date).ToUniversalTime().ToString('o') }) -Compress) -Encoding UTF8
 try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal' } catch { }
 Write-RgLog 'server-start' ([ordered]@{ pid = $PID; url = $url; mode = (Get-RgPolicy).mode })
+$script:JournalRecovered = @()
+try { $script:JournalRecovered = @(Resolve-RgJournalPending) } catch { Write-RgLog 'journal-resolve-error' ([string]$_) }   # hành động dở từ lần chạy trước (A1)
+$script:RetentionAt = [datetime]::MinValue
 
 Write-Host ''
 Write-Host "  Resource Guard đang chạy (tự dọn: $((Get-RgPolicy).mode))" -ForegroundColor Green
@@ -213,7 +216,20 @@ $script:AutoSpawnedAt = [datetime]::MinValue
 $script:ScanCheckAt = [datetime]::MinValue; $script:ScanAutoAt = $null; $script:CpuRing = New-Object System.Collections.ArrayList   # quét nền tự làm mới (P10)
 $script:StopRequested = $false
 $live = $null
-$nextSample = [datetime]::MinValue
+# Có số liệu ngay từ request đầu (A6): nạp bản live.json của lần chạy trước (nếu còn mới) đánh dấu stale; tick đầu tiên sẽ thay nó.
+try {
+    $lj = Read-RgStateText 'live.json'
+    if ($lj) {
+        $ol = ConvertFrom-Json $lj
+        $olAt = [datetime]::MinValue
+        if ($ol.ts -and [datetime]::TryParseExact([string]$ol.ts, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, 'None', [ref]$olAt) -and ((Get-Date) - $olAt).TotalMinutes -le 30) {
+            $ol | Add-Member -NotePropertyName stale -NotePropertyValue $true -Force
+            $live = $ol
+        }
+    }
+} catch { }
+# Tick đầu tiên chạy nặng (~vài giây khi nguội): lùi 2 giây để loạt request đầu của UI được phục vụ trước.
+$nextSample = (Get-Date).AddSeconds(2)
 $nextBeat = (Get-Date).AddSeconds(10)
 $accept = $listener.GetContextAsync()
 try {
@@ -244,6 +260,93 @@ try {
                     }
                 }
                 elseif ($path -eq '/api/state') { Send-Json $ctx $live }
+                elseif ($path -eq '/api/effect' -and $req.HttpMethod -eq 'GET') {
+                    # Hiệu quả của dọn dẹp (A5): GB giải phóng, số mục, số lần khôi phục, ai duyệt; đọc từ journal
+                    $ed = 30; $eq = 0
+                    if ([int]::TryParse([string]$req.QueryString['days'], [ref]$eq) -and $eq -ge 1) { $ed = [math]::Min(365, $eq) }
+                    Send-Json $ctx (Get-RgEffectMetrics $ed)
+                }
+                elseif ($path -eq '/api/health' -and $req.HttpMethod -eq 'GET') {
+                    # Sức khoẻ ghi dữ liệu (A1): lỗi ghi file/log/journal và hành động bị ngắt giữa chừng ở lần chạy trước
+                    $ioh = Get-RgIoHealth
+                    Send-Json $ctx ([ordered]@{ ok = [bool]$ioh.ok; io = $ioh; journalOpen = @(Get-RgJournalPending).Count; recovered = @($script:JournalRecovered); resumablePlans = @(Get-RgResumablePlans) })
+                }
+                elseif ($path -eq '/api/leases' -and $req.HttpMethod -eq 'GET') {
+                    # Phiên agent đang giữ lease + giữ chỗ preflight + tiến trình quan sát được từ cây tiến trình (ledger tầng 2). Chỉ đọc, không có thông tin prompt.
+                    $lcfg = Get-RgConfig
+                    $ls = @(Get-RgLeases $lcfg)
+                    $obs = @(); if ($ls.Count) { try { $obs = @(Get-RgObservedLedger -Cfg $lcfg -Leases $ls) } catch { } }
+                    Send-Json $ctx ([ordered]@{ leases = $ls; reservations = @(Get-RgReservations $lcfg | ForEach-Object { [ordered]@{ id = $_.id; sessionId = $_.sessionId; task = $_.task; estimateGB = $_.estimateGB; createdUtc = $_.createdUtc; expiresUtc = $_.expiresUtc } })
+                            subagents = [int](@($ls | ForEach-Object { [int]$_.subagents } | Measure-Object -Sum).Sum); observed = $obs })
+                }
+                elseif ($path -eq '/api/autonomy' -and $req.HttpMethod -eq 'GET') {
+                    # Mức tự chủ theo nhóm + banner + đề nghị nâng/hạ theo số liệu + danh sách action (E1-E4). Chỉ đọc.
+                    $apol = Get-RgPolicy
+                    Send-Json $ctx ([ordered]@{ mode = $apol.mode; groups = @(Get-RgAutonomyView $apol); banner = (Get-RgAutonomyBanner); advice = (Get-RgAutonomyAdvice (Get-RgConfig) $apol)
+                            actions = @(Get-RgActionList); demotions = @((Read-RgAutonomyState).demotions); pinConfigured = (Test-RgPinConfigured) })
+                }
+                elseif ($path -eq '/api/autonomy/level' -and $req.HttpMethod -eq 'POST') {
+                    try {   # đặt mức một nhóm; nâng lên L3 cần PIN, hạ thì không
+                        $b = Read-RgBody $req
+                        $grp = [string]$b.group; $lvl = ([string]$b.level).ToUpperInvariant()
+                        $apol = Get-RgPolicy
+                        $probe = Get-RgPolicy; $pex = Get-RgAutonomyExplicit $probe; $pex[$grp] = $lvl; $probe.autonomy = $pex
+                        $pinOk = $false; $reply = $null
+                        if ((Test-RgAutonomyNeedsPin $apol $probe)) {
+                            if (-not (Test-RgPinConfigured)) { $reply = [ordered]@{ ok = $false; code = 'pin-not-set'; error = 'Chưa đặt PIN. Đặt ở terminal: resource-manager.ps1 serve setpin' } }
+                            elseif ([string]::IsNullOrEmpty([string]$b.pin)) { $reply = [ordered]@{ ok = $false; code = 'pin-required'; error = 'Nâng lên mức tự động cần PIN.' } }
+                            else {
+                                $pr = Test-RgPin ([string]$b.pin)
+                                if ($pr.ok) { $pinOk = $true } else { $reply = [ordered]@{ ok = $false; code = $(if ($pr.locked) { 'pin-locked' } else { 'pin-wrong' }); retryAfterSec = $pr.retryAfterSec; error = $(if ($pr.locked) { "Sai PIN quá nhiều lần, thử lại sau $($pr.retryAfterSec) giây." } else { 'PIN không đúng.' }) } }
+                            }
+                        }
+                        if ($reply) { Send-Json $ctx $reply 403 }
+                        else {
+                            $sr = Set-RgGroupLevel $grp $lvl $pinOk
+                            if ($sr.ok) { Send-Json $ctx ([ordered]@{ ok = $true; groups = @(Get-RgAutonomyView) }) } else { Send-Json $ctx ([ordered]@{ ok = $false; code = $sr.code; error = $sr.error }) 400 }
+                        }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
+                elseif ($path -eq '/api/autonomy/snooze' -and $req.HttpMethod -eq 'POST') {
+                    try { $b = Read-RgBody $req; $hh = 6; [void][int]::TryParse([string]$b.hours, [ref]$hh); [void](Set-RgAutonomySnooze $hh); Send-Json $ctx ([ordered]@{ ok = $true }) }
+                    catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
+                elseif ($path -eq '/api/panic' -and $req.HttpMethod -eq 'POST') {
+                    # Dừng khẩn cấp: tắt chính sách + huỷ job nền của Resource-Guard. Không cần PIN (dừng luôn được phép).
+                    try { Send-Json $ctx (Invoke-RgPanic -By 'ui') } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 500 }
+                }
+                elseif ($path -eq '/api/assistant/report' -and $req.HttpMethod -eq 'GET') {
+                    # "Báo cáo của trợ lý" (D5): cụm tệp + verdict + tổng hợp. Chỉ metadata; không có đường dẫn từng file, không có tên file ngoài mẫu ≤ 5 tên của cụm.
+                    $rep = Get-RgAssistantReport (Get-RgConfig)
+                    Send-Json $ctx ([ordered]@{ report = $rep; scan = (Get-RgJobState 'scan-inventory.progress.json'); ask = (Get-RgJobState 'agent.progress.json') })
+                }
+                elseif ($path -eq '/api/assistant/scan' -and $req.HttpMethod -eq 'POST') {
+                    if (Test-RgJobRunning 'scan-inventory.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
+                    else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'inventory'); Send-Json $ctx ([ordered]@{ ok = $true }) }
+                }
+                elseif ($path -eq '/api/assistant/ask' -and $req.HttpMethod -eq 'POST') {
+                    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Máy này không có lệnh claude; trợ lý vẫn dùng luật tất định.' }) 400 }
+                    elseif (Test-RgJobRunning 'agent.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
+                    else { Start-RgJob 'rg-agent.ps1' @('-Mode', 'clusters'); Send-Json $ctx ([ordered]@{ ok = $true }) }
+                }
+                elseif ($path -eq '/api/assistant/act' -and $req.HttpMethod -eq 'POST') {
+                    try {
+                        $b = Read-RgBody $req
+                        $cid = [string]$b.clusterId; $act = [string]$b.action
+                        if ($cid -notmatch '^[0-9a-f]{12}$') { throw 'clusterId không hợp lệ.' }
+                        if (@('compress', 'clean') -notcontains $act) { throw "Hành động chỉ nhận 'compress' hoặc 'clean'." }
+                        if (Test-RgJobRunning 'cleanup.progress.json') { throw 'Một lượt dọn khác đang chạy.' }
+                        Start-RgJob 'rg-assistant-act.ps1' @('-ClusterId', $cid, '-Action', $act, '-By', 'ui')
+                        Send-Json $ctx ([ordered]@{ ok = $true })
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
+                elseif ($path -eq '/api/assistant/dismiss' -and $req.HttpMethod -eq 'POST') {
+                    try {
+                        $b = Read-RgBody $req
+                        if (-not (Add-RgDismissed ([string]$b.clusterId))) { throw 'clusterId không hợp lệ.' }
+                        Send-Json $ctx ([ordered]@{ ok = $true })
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
                 elseif ($path -eq '/api/history') { Send-Json $ctx @(Read-RgMetricsTail 480) }
                 elseif ($path -eq '/api/events') {
                     $mx = 30; $mq = 0
@@ -350,11 +453,54 @@ try {
                             if ($st -eq '') { $why = 'Chưa đọc được thời điểm khởi động; thử lại sau vài giây.' }
                             elseif ($low) { $why = 'Đã hạ ưu tiên rồi; có thể trả về bình thường.' }
                             else { $why = Get-RgProcLowerVerdict ([int]$_.pid) ([string]$_.name) ([string]$_.group) $(if ($tr) { [string]$tr.Cmd } else { '' }) $_.session $pctx }
+                            # Kết thúc (B1): cùng một hàm quyết định với lúc thực thi; chưa đọc được thời điểm khởi động thì chưa cho kết thúc
+                            $ev = $null
+                            if ($st -ne '') { $ev = Get-RgProcEndVerdict ([int]$_.pid) ([string]$_.name) ([string]$_.group) $(if ($tr) { [string]$tr.Cmd } else { '' }) $_.session $(if ($ident) { [string]$ident.role } else { '' }) $pctx $st }
                             [ordered]@{ pid = $_.pid; name = $_.name; cpu = $_.cpu; ramMB = $_.ramMB; group = $_.group; agent = $_.agent; protected = (Test-RgProcessProtected ([string]$_.name) $pol)
-                                start = $st; lowered = $low; canLower = ($why -eq ''); whyNot = $why; cmd = $cmdShown; identity = $ident }
+                                start = $st; lowered = $low; canLower = ($why -eq ''); whyNot = $why; cmd = $cmdShown; identity = $ident
+                                canEnd = [bool]($ev -and $ev.ok); endNeedsPin = [bool]($ev -and $ev.needsPin); whyNotEnd = $(if ($ev) { [string]$ev.reason } else { 'Chưa đọc được thời điểm khởi động; thử lại sau vài giây.' }) }
                         })
                     $wl = @(Get-RgWorkloads $rows)
                     Send-Json $ctx ([ordered]@{ ts = $(if ($live) { $live.ts } else { $null }); logical = (Get-RgCpuInfo).logical; procs = $rows; workloads = $wl })
+                }
+                elseif ($path -eq '/api/process/explain' -and $req.HttpMethod -eq 'GET') {
+                    # Giải thích tiến trình (D4): là gì, từ đâu, đang phục vụ việc gì. Chỉ nhận pid (+ start); chỉ đọc, không tốn AI.
+                    $xp = 0
+                    if (-not [int]::TryParse([string]$req.QueryString['pid'], [ref]$xp) -or $xp -le 0) { Send-Json $ctx ([ordered]@{ ok = $false; code = 'bad-pid'; error = 'PID không hợp lệ.' }) 400 }
+                    else {
+                        $xr = Get-RgProcExplain -ProcId $xp -Start ([string]$req.QueryString['start']) -Cfg (Get-RgConfig) -Table @($script:RgTableCache)
+                        if ($xr.ok) { Send-Json $ctx $xr } else { Send-Json $ctx $xr 404 }
+                    }
+                }
+                elseif ($path -eq '/api/process/end' -and $req.HttpMethod -eq 'POST') {
+                    # Kết thúc tiến trình từ app (B1). Chỉ nhận pid + start (+ pin khi cần); mọi kiểm tra nằm trong Invoke-RgProcEnd / Stop-RgProcessVerified.
+                    try {
+                        $b = Read-RgBody $req
+                        $bp = 0
+                        if ($null -eq $b -or -not [int]::TryParse([string]$b.pid, [ref]$bp) -or $bp -le 0) { Send-Json $ctx ([ordered]@{ ok = $false; code = 'bad-pid'; error = 'PID không hợp lệ.' }) 400 }
+                        else {
+                            $pinVerified = $false; $pinReply = $null
+                            $probe = Test-RgProcEndable $bp ([string]$b.start) (New-RgProcContext -FreshSelf)
+                            if ($probe.ok -and $probe.needsPin) {
+                                $pinB = $(if ($b.PSObject.Properties['pin']) { [string]$b.pin } else { '' })
+                                if (-not (Test-RgPinConfigured)) { $pinReply = [ordered]@{ ok = $false; code = 'pin-not-set'; error = 'Tiến trình này do trợ lý AI giữ nên cần PIN, nhưng chưa đặt PIN. Đặt ở terminal: resource-manager.ps1 serve setpin' } }
+                                elseif ([string]::IsNullOrEmpty($pinB)) { $pinReply = [ordered]@{ ok = $false; code = 'pin-required'; error = 'Tiến trình đang do trợ lý AI giữ nên cần PIN.' } }
+                                else {
+                                    $pr = Test-RgPin $pinB
+                                    if ($pr.ok) { $pinVerified = $true }
+                                    else { $pinReply = [ordered]@{ ok = $false; code = $(if ($pr.locked) { 'pin-locked' } else { 'pin-wrong' }); retryAfterSec = $pr.retryAfterSec; error = $(if ($pr.locked) { "Sai PIN quá nhiều lần, thử lại sau $($pr.retryAfterSec) giây." } else { 'PIN không đúng.' }) } }
+                                }
+                            }
+                            if ($pinReply) { Send-Json $ctx $pinReply 403 }
+                            else {
+                                # E1: đi qua cửa duy nhất của Policy Engine (kiểm schema, mức nhóm, rồi Invoke-RgProcEnd)
+                                $ar = Invoke-RgAction -Id 'end-process' -Params @{ pid = $bp; start = [string]$b.start } -Actor human -PinVerified $pinVerified
+                                $er = $ar.result
+                                if (-not $er) { $er = [pscustomobject][ordered]@{ ok = $false; code = $(if ($ar.outcome -eq 'invalid') { 'bad-start' } else { 'autonomy-off' }); pid = $bp; error = [string]$ar.reason } }
+                                if ($er.ok) { Send-Json $ctx $er } else { Send-Json $ctx $er 400 }
+                            }
+                        }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
                 }
                 elseif ($path -eq '/api/process/priority' -and $req.HttpMethod -eq 'POST') {
                     # Chỉ nhận pid + start + level (không đường dẫn, không tên). Mọi kiểm tra nằm trong Set-RgProcPriority.
@@ -363,7 +509,9 @@ try {
                         $bp = 0
                         if ($null -eq $b -or -not [int]::TryParse([string]$b.pid, [ref]$bp) -or $bp -le 0) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'PID không hợp lệ.' }) 400 }
                         else {
-                            $pr = Set-RgProcPriority $bp ([string]$b.start) ([string]$b.level)
+                            $ar = Invoke-RgAction -Id 'lower-priority' -Params @{ pid = $bp; start = [string]$b.start; level = [string]$b.level } -Actor human   # E1: cửa duy nhất
+                            $pr = $ar.result
+                            if (-not $pr) { $pr = [pscustomobject][ordered]@{ ok = $false; pid = $bp; error = [string]$ar.reason } }
                             if ($pr.ok) { Send-Json $ctx $pr } else { Send-Json $ctx $pr 400 }
                         }
                     } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
@@ -442,6 +590,7 @@ try {
                                     ageDays = $_.ageDays; newestWriteUtc = $_.newestWriteUtc; reason = $_.reason; risk = $_.risk; protected = [bool]$prot; needsAdmin = [bool]$_.needsAdmin; young = [bool]$_.young
                                     why = [string]$_.why; impact = [string]$_.impact; regen = [string]$_.regen; regenHint = [string]$_.regenHint; riskLevel = [string]$_.riskLevel
                                     canArchive =(Test-RgArchivable ([string]$_.kind)) -and ($_.action -eq 'delete')
+                                    heldBy = @($_.heldBy | Where-Object { $_ })
                                     setting = $(if ($pol.categories.Contains([string]$_.kind)) { $pol.categories[[string]$_.kind] } else { 'keep' }) }
                             })
                     }
@@ -611,12 +760,18 @@ try {
                     heavy = $rec.heavy; ledgerOrphans = $rec.ledgerOrphans; top = $rec.top
                     reasons = @($script:RgLastReasons); intervalSec = $iv
                     cores = $rec.cores; topCpu = $rec.topCpu; procCount = $rec.procCount; uptimeSec = $rec.uptimeSec; cpuInfo = (Get-RgCpuInfo); procTop = $rec.procTop
+                    ioErrors = [int](Get-RgIoHealth).errors; overhead = (Get-RgWatcherOverhead)
+                }
+                if (((Get-Date) - $script:RetentionAt).TotalHours -ge 6) {   # dọn plans/logs/journal cũ (A1)
+                    $script:RetentionAt = Get-Date
+                    try { [void](Invoke-RgRetention) } catch { Write-RgLog 'retention-error' ([string]$_) }
                 }
                 try { Write-RgFileAtomic (Join-Path (Initialize-RgHome) 'state\live.json') (ConvertTo-Json -InputObject $live -Depth 5 -Compress) } catch { }
                 try {   # tự dọn nền: chỉ spawn khi mode != off, có áp lực và hết cooldown
                     $pol = Get-RgPolicy
                     if ([string]$pol.mode -ne 'off' -and ((Get-Date) - $script:AutoSpawnedAt).TotalSeconds -ge 90) {
                         $stress = Get-RgStressInfo $pol (Get-RgConfig) $rec
+                        if (-not ($stress.diskStress -or $stress.ramStress)) { [void](Update-RgAutonomyState $stress 0 $false) }   # hết áp lực: mở khoá để lần vượt sau báo lại (E3)
                         if (Test-RgAutoDue $pol $stress) {
                             $script:AutoSpawnedAt = Get-Date
                             Write-RgLog 'auto-spawn' ([ordered]@{ mode = $pol.mode; disk = $stress.diskState; ram = $stress.ramState })
@@ -636,7 +791,7 @@ try {
                             $sDir = Join-Path (Initialize-RgHome) 'state'
                             $wt = { param($f) if (Test-Path -LiteralPath $f) { (Get-Item -LiteralPath $f).LastWriteTimeUtc } else { $null } }
                             $dv = @(Get-RgDrives | ForEach-Object { [pscustomobject]@{ drive = $_.drive; focusUtc = (& $wt (Join-Path $sDir "scan-breakdown-$($_.drive).json")); fullUtc = (& $wt (Join-Path $sDir "scan-fixed-$($_.drive).json")) } })
-                            $dec = Test-RgScanDue -Now (Get-Date) -JobRunning $anyJob -CpuSamples @($script:CpuRing) -LastAutoStart $script:ScanAutoAt -RefreshHours $refreshH -CpuMax (Get-RgScanCpuMax $scanCfg) -Drives $dv -CandidatesUtc (& $wt (Join-Path $sDir 'scan-candidates.json'))
+                            $dec = Test-RgScanDue -Now (Get-Date) -JobRunning $anyJob -CpuSamples @($script:CpuRing) -LastAutoStart $script:ScanAutoAt -RefreshHours $refreshH -CpuMax (Get-RgScanCpuMax $scanCfg) -MinGapMinutes (Get-RgScanMinGapMinutes $scanCfg) -Drives $dv -CandidatesUtc (& $wt (Join-Path $sDir 'scan-candidates.json'))
                             if ($dec.due) {
                                 $script:ScanAutoAt = Get-Date
                                 Write-RgLog 'scan-auto' ([ordered]@{ kind = $dec.kind; drive = $dec.drive; scope = $dec.scope; because = $dec.because })

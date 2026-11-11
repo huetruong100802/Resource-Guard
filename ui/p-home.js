@@ -1,5 +1,6 @@
 /* p-home.js - Tổng quan (#home): câu trạng thái + sẵn sàng, mỗi tài nguyên một dòng (donut nhỏ + thanh), "Nên làm gì bây giờ" (tối đa 3 bước),
-   7 ngày qua + dòng thời gian sự kiện. Không có hành động xoá ở đây: [Xem] chỉ chuyển sang màn Ổ đĩa / Bộ nhớ với mục chọn sẵn. */
+   "Báo cáo của trợ lý" (cụm tệp: nén / dọn / giữ; UI chỉ gửi clusterId + hành động), 7 ngày qua + dòng thời gian sự kiện.
+   "Nên làm gì" không xoá gì: [Xem] chỉ chuyển sang màn Ổ đĩa / Bộ nhớ với mục chọn sẵn. Hành động duy nhất ở đây là trên cụm của trợ lý, có hộp xác nhận. */
 (function () {
   'use strict';
   var RG = window.RG, S = RG.S, esc = RG.esc, $ = RG.$, V = RG.viz, GB = 1073741824;
@@ -191,6 +192,107 @@
     RG.$$('#hWeek .h-ev').forEach(function (r) { var go = function () { eventDrawer(ev[+r.dataset.i].e); }; r.onclick = go; r.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } }; });
   }
 
+  /* ---------- Báo cáo của trợ lý (D5) ----------
+     Cụm tệp do server kiểm kê + gom (metadata, không đọc nội dung). UI chỉ gửi clusterId + hành động (compress | clean | Để sau);
+     đường dẫn do server tự giải, mỗi tệp vẫn đi qua plan → approve → apply. File cá nhân tối đa là NÉN (zip có kiểm tra, khôi phục được). */
+  var A = { rep: null, scan: null, ask: null, loading: false, timer: null, all: false };
+  var VERD = { compress: ['Nén', 'keep'], clean: ['Dọn', 'ask'], keep: ['Giữ nguyên', ''] };
+  function assistLoad() {
+    return RG.api('/api/assistant/report').then(function (j) { A.rep = j.report; A.scan = j.scan; A.ask = j.ask; }).catch(function () { });
+  }
+  function scanRunning() { return !!(A.scan && A.scan.status === 'running'); }
+  function assistPoll() {
+    if (A.timer) return;
+    A.timer = setTimeout(function () {
+      A.timer = null;
+      assistLoad().then(function () { if (RG.cur !== 'home') return; drawAssist(); if (scanRunning() || (S.jobs.cleanup && S.jobs.cleanup.status === 'running')) assistPoll(); });
+    }, 1500);
+  }
+  function clusterRow(c) {
+    var v = VERD[c.verdict] || VERD.keep, act = '';
+    if (c.actionable && c.verdict === 'compress') act += '<button class="btn sm primary" data-as="compress" data-id="' + esc(c.clusterId) + '">Nén</button> ';
+    if (c.actionable && c.verdict === 'clean') act += '<button class="btn sm danger" data-as="clean" data-id="' + esc(c.clusterId) + '">Dọn</button> ';
+    if (!c.reportOnly) act += '<button class="btn sm" data-as="later" data-id="' + esc(c.clusterId) + '" title="Ẩn cụm này 30 ngày">Để sau</button>';
+    var gain = (c.actionable && c.gainBytes > 0) ? '<b class="num">~' + RG.fmtBytes(c.gainBytes) + '</b><span class="small mut"> giải phóng</span>' : '<span class="small mut">' + RG.fmtBytes(c.totalBytes) + '</span>';
+    return '<div class="as-row" data-cl="' + esc(c.clusterId) + '"><div class="as-main"><div class="as-ttl"><span class="pill ' + v[1] + '">' + v[0] + '</span> ' + esc(c.label) +
+      (c.reportOnly ? ' <span class="pill" title="Dữ liệu ứng dụng ở góc khuất: chỉ báo cáo, không bao giờ đụng tới">chỉ báo cáo</span>' : '') + '</div>' +
+      '<div class="small mut">' + esc(c.verdictReason || '') + ' <span class="pill" title="' + (c.source === 'agent' ? 'Agent đánh giá, đã qua bộ lọc bảo vệ' : 'Luật tất định, không dùng AI') + '">' + (c.source === 'agent' ? 'agent' : 'luật') + '</span></div>' +
+      ((c.sample && c.sample.length) ? '<div class="small mut as-smp">Ví dụ: ' + c.sample.slice(0, 3).map(esc).join(', ') + (c.count > 3 ? '…' : '') + '</div>' : '') + '</div>' +
+      '<div class="as-side"><div class="as-gain">' + gain + '</div><div class="as-acts">' + act + '</div></div></div>';
+  }
+  function drawAssist() {
+    var el = $('#hAssist'); if (!el) return;
+    var r = A.rep, busyClean = S.jobs.cleanup && S.jobs.cleanup.status === 'running', head, body = '';
+    var btns = '<button class="btn sm" id="asScan"' + (scanRunning() ? ' disabled' : '') + '>' + RG.icon('refresh') + ' ' + (scanRunning() ? 'Đang xem…' : (r && r.scanned ? 'Quét lại' : 'Xem máy này')) + '</button>' +
+      (r && r.agent && r.agent.available ? ' <button class="btn sm" id="asAsk" title="Nhờ agent (claude) đánh giá thêm; chỉ gửi mô tả cụm, không gửi tên file hay đường dẫn">Nhờ agent đánh giá</button>' : '');
+    head = '<h2>Báo cáo của trợ lý' + RG.help('Trợ lý xem metadata của Tải xuống, Tài liệu, Màn hình và dữ liệu lớn ở góc khuất (không đọc nội dung tệp), gom thành cụm rồi đề xuất: nén, dọn hoặc giữ. File cá nhân chỉ có thể nén (zip có kiểm tra, khôi phục được), không bao giờ xoá thẳng. Mọi thao tác chờ bạn bấm.') + '<span class="sp"></span>' + btns + '</h2>';
+    if (!r || !r.scanned) {
+      body = '<div class="small mut" style="margin:8px 0">' + (scanRunning() ? 'Đang xem các thư mục của bạn…' : 'Trợ lý chưa xem máy này. Bấm “Xem máy này”: chỉ đọc tên, dung lượng và ngày sửa, không mở nội dung tệp.') + '</div>';
+    } else {
+      var cl = (r.clusters || []).slice().sort(function (a, b) { return (b.actionable ? b.gainBytes : 0) - (a.actionable ? a.gainBytes : 0) || b.totalBytes - a.totalBytes; });
+      var act = cl.filter(function (c) { return c.actionable; }), rest = cl.filter(function (c) { return !c.actionable; }), sm = r.summary || {};
+      body = '<div class="small mut" style="margin:6px 0">' + (act.length ? act.length + ' cụm có thể xử lý · giải phóng được khoảng <b>' + RG.fmtBytes(sm.gainBytes || 0) + '</b>' : 'Chưa có gì cần xử lý') +
+        ' · quét ' + esc(RG.fmtLocal(r.builtUtc)) + (r.stale ? ' <span class="pill ask">đã cũ, hãy quét lại</span>' : '') + (r.truncated ? ' <span class="pill ask" title="Quá nhiều tệp: chỉ xem được một phần">xem được một phần</span>' : '') + '</div>';
+      if (busyClean) body += '<div class="small" style="margin:6px 0">' + RG.icon('info') + ' Đang xử lý: ' + esc((S.jobs.cleanup && S.jobs.cleanup.message) || '…') + '</div>';
+      body += '<div class="as-list">' + act.slice(0, 8).map(clusterRow).join('') + '</div>';
+      if (act.length > 8) body += '<div class="small mut">… và ' + (act.length - 8) + ' cụm nhỏ hơn.</div>';
+      if (rest.length) body += '<details class="as-more"' + (A.all ? ' open' : '') + '><summary class="small mut">Giữ nguyên / chỉ báo cáo (' + rest.length + ')</summary><div class="as-list">' + rest.slice(0, 20).map(clusterRow).join('') + '</div></details>';
+    }
+    el.innerHTML = '<div class="card mt">' + head + body + '</div>';
+    bindAssist();
+  }
+  function actConfirm(c, kind) {
+    var n = c.count, html = kind === 'compress'
+      ? '<p>Nén <b>' + n + ' tệp</b> (' + esc(c.label) + ') thành file zip cạnh bản gốc. Mỗi zip được kiểm tra lại trước khi xoá bản gốc.</p><p class="hint">Khôi phục bất cứ lúc nào ở “Bản đã nén” (màn Ổ đĩa). Tệp mới dùng trong 30 ngày hoặc đang được ứng dụng khác mở sẽ được bỏ qua.</p>'
+      : '<p>Xoá <b>' + n + ' tệp</b> (' + esc(c.label) + '). Đây là loại tải lại / tạo lại được (bộ cài, file tạm), <b>không có bản sao</b> sau khi xoá.</p><p class="hint">Tệp mới dùng trong 30 ngày hoặc đang được ứng dụng khác mở sẽ được bỏ qua.</p>';
+    return RG.confirm(kind === 'compress' ? 'Nén cụm này?' : 'Dọn cụm này?', html, kind === 'compress' ? 'Nén' : 'Dọn', kind === 'clean');
+  }
+  function bindAssist() {
+    var sc = $('#asScan'); if (sc) sc.onclick = function () {
+      sc.disabled = true;
+      RG.api('/api/assistant/scan', { method: 'POST', body: {} }).then(function () { A.scan = { status: 'running' }; drawAssist(); assistPoll(); }).catch(function (e) { RG.toast(e.message, 'err'); sc.disabled = false; });
+    };
+    var ak = $('#asAsk'); if (ak) ak.onclick = function () {
+      ak.disabled = true;
+      RG.api('/api/assistant/ask', { method: 'POST', body: {} }).then(function () { RG.toast('Agent đang đánh giá các cụm…'); assistPoll(); }).catch(function (e) { RG.toast(e.message, 'err', 8000); ak.disabled = false; });
+    };
+    RG.$$('#hAssist [data-as]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.dataset.id, kind = b.dataset.as, c = ((A.rep && A.rep.clusters) || []).filter(function (x) { return x.clusterId === id; })[0]; if (!c) return;
+        if (kind === 'later') { RG.api('/api/assistant/dismiss', { method: 'POST', body: { clusterId: id } }).then(function () { return assistLoad(); }).then(drawAssist).catch(function (e) { RG.toast(e.message, 'err'); }); return; }
+        actConfirm(c, kind).then(function (ok) {
+          if (!ok) return;
+          RG.startJob('/api/assistant/act', { clusterId: id, action: kind }, 'Đang xử lý cụm…').then(function () { drawAssist(); assistPoll(); }).catch(function () { });
+        });
+      };
+    });
+  }
+
+  /* ---------- Banner tự động hoá (E3/E4): vẫn quá mốc sau khi tự dọn, đề nghị nâng mức, nút dừng khẩn cấp ---------- */
+  var AB = { aut: null };
+  function loadAut() { return RG.api('/api/autonomy').then(function (j) { AB.aut = j; }).catch(function () { }); }
+  function drawBanner() {
+    var el = $('#hBanner'); if (!el) return;
+    var a = AB.aut, mode = (a && a.mode) || (S.policy && S.policy.mode) || 'off', h = '';
+    if (a && a.banner && a.banner.active) {
+      var ds = (a.banner.drives || []).map(function (d) { return 'ổ ' + esc(d.drive) + ': ' + RG.fmtGB(d.freeGB) + ' trống (mục tiêu ' + RG.fmtGB(d.targetFreeGB) + ')'; }).join(' · ');
+      h += '<div class="card mt as-banner" role="alert"><b>' + RG.icon('alert') + ' Trợ lý đã dọn nhưng máy vẫn thiếu chỗ.</b> <span class="small">' + esc(a.banner.message) + (ds ? ' ' + ds + '.' : '') + '</span>' +
+        '<span class="sp"></span><button class="btn sm" data-bn="disk">Xem việc cần dọn</button> <button class="btn sm" data-bn="snooze">Hoãn 6 giờ</button></div>';
+    }
+    var prom = a && a.advice && a.advice.promote && a.advice.promote[0];
+    if (prom) h += '<div class="card mt"><span class="small">' + RG.icon('spark') + ' Gợi ý: ' + esc(prom.reason) + '</span><span class="sp"></span><button class="btn sm" data-bn="settings">Xem ở Cài đặt</button></div>';
+    if (mode !== 'off') h += '<div class="small mut" style="margin-top:8px;text-align:right">Chính sách tự động đang ' + (mode === 'on' ? 'Bật' : 'Chạy thử') + ' · <button class="btn sm danger" data-bn="panic" title="Tắt chính sách tự động và huỷ mọi job nền">Dừng khẩn cấp</button></div>';
+    el.innerHTML = h;
+    RG.$$('#hBanner [data-bn]').forEach(function (b) {
+      b.onclick = function () {
+        var k = b.dataset.bn;
+        if (k === 'disk' || k === 'settings') RG.go(k);
+        else if (k === 'snooze') RG.api('/api/autonomy/snooze', { method: 'POST', body: { hours: 6 } }).then(function () { return loadAut(); }).then(drawBanner).catch(function (e) { RG.toast(e.message, 'err'); });
+        else if (k === 'panic' && RG.panic) RG.panic().then(function () { return loadAut(); }).then(drawBanner);
+      };
+    });
+  }
+
   /* Dữ liệu chia đoạn cho thanh/donut: nhóm việc của RAM, phân tích từng ổ (lỗi → giữ thanh một màu). */
   function loadShares() {
     var ps = [RG.api('/api/processes').then(function (j) { H.wl = j.workloads || []; }).catch(function () { })];
@@ -200,17 +302,18 @@
   RG.pages.home = {
     title: 'Tổng quan',
     render: function (el) {
-      el.innerHTML = '<div id="hStatus"></div><div id="hRes"></div><div id="hPlan"></div><div id="hWeek"></div>';
+      el.innerHTML = '<div id="hStatus"></div><div id="hBanner"></div><div id="hRes"></div><div id="hPlan"></div><div id="hAssist"></div><div id="hWeek"></div>';
       H.hover = null;
-      drawStatus(); drawRes(); drawPlan(); drawWeek();
+      drawStatus(); drawBanner(); drawRes(); drawPlan(); drawAssist(); drawWeek();
       this.refresh();
     },
     refresh: function () {
-      Promise.all([RG.loadInsight().catch(function () { }), RG.loadAdvice().catch(function () { }), RG.loadEvents().catch(function () { }), RG.loadCands().catch(function () { }), RG.loadAuto().catch(function () { }), RG.loadPolicy().catch(function () { }), loadShares()]).then(function () {
-        if (RG.cur !== 'home') return; drawStatus(); drawRes(); drawPlan(); drawWeek();
+      Promise.all([RG.loadInsight().catch(function () { }), RG.loadAdvice().catch(function () { }), RG.loadEvents().catch(function () { }), RG.loadCands().catch(function () { }), RG.loadAuto().catch(function () { }), RG.loadPolicy().catch(function () { }), loadShares(), assistLoad(), loadAut()]).then(function () {
+        if (RG.cur !== 'home') return; drawStatus(); drawBanner(); drawRes(); drawPlan(); drawAssist(); drawWeek();
+        if (scanRunning()) assistPoll();
       });
     },
-    jobs: function () { if (RG.cur === 'home') drawPlan(); },
+    jobs: function () { if (RG.cur === 'home') { drawPlan(); drawAssist(); } },
     live: function () { if (!$('#hStatus')) return; drawStatus(); drawRes(); }
   };
   RG.pages.overview = RG.pages.home;

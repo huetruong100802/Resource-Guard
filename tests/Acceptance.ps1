@@ -563,7 +563,10 @@ try {
     Assert ((Get-RgProcLowerVerdict 4 'system' 'other' '' 0 $ctxL) -match 'hệ thống') 'priority: PID <= 4 -> từ chối'
     foreach ($pp in $procs) { if ($pp.Id -in $prA.Id, $prB.Id) { Assert (-not $pp.HasExited) 'priority: tiến trình thử vẫn sống sau mọi lần từ chối (không có đường kill)' } }
     $srvSrc = Get-Content (Join-Path $root 'scripts\rg-proc.ps1') -Raw
-    Assert ($srvSrc -notmatch 'Stop-Process|\.Kill\(|taskkill|CloseMainWindow') 'priority: rg-proc.ps1 không chứa bất kỳ đường kết thúc tiến trình nào'
+    # Từ B1 (plan-automation) rg-proc.ps1 có nút kết thúc, nhưng KHÔNG tự gọi API dừng tiến trình: chỉ đi qua Stop-RgProcessVerified (rg-common.ps1).
+    Assert ($srvSrc -notmatch 'Stop-Process|\.Kill\(|taskkill|CloseMainWindow') 'priority: rg-proc.ps1 không tự gọi Stop-Process/Kill/taskkill/CloseMainWindow (kết thúc chỉ qua Stop-RgProcessVerified)'
+    $priSrc = [regex]::Match($srvSrc, 'function Set-RgProcPriority.*?(?=\r?\n# =====)', 'Singleline').Value
+    Assert ($priSrc -and $priSrc -notmatch 'Stop-RgProcessVerified|Invoke-RgProcEnd') 'priority: Set-RgProcPriority không có đường kết thúc tiến trình'
 
     Write-Host "`n[preview] xem trước chính sách + bằng chứng chạy thử (P5)"
     $pvCand = [pscustomobject]@{ finishedUtc = $nowU.ToString('o'); items = @(
@@ -1203,6 +1206,15 @@ finally {
     if (Test-Path $j) { (Get-Item $j -Force).Delete() }
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item Env:\AGENT_RESOURCE_HOME -ErrorAction SilentlyContinue
+}
+# Bộ test của plan-automation chạy ở process riêng (sandbox riêng); cộng kết quả vào tổng.
+$autoTest = Join-Path $PSScriptRoot 'Acceptance-Auto.ps1'
+if (Test-Path -LiteralPath $autoTest) {
+    Write-Host "`n[Acceptance-Auto] plan-automation"
+    $autoOut = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $autoTest 2>&1 | Out-String
+    $autoOut.TrimEnd() -split "`r?`n" | ForEach-Object { if ($_ -match '^\s+(PASS|FAIL)|^\[|^$') { Write-Host $_ } }
+    if ($autoOut -match 'AUTO-RESULT pass=(\d+) fail=(\d+)') { $script:pass += [int]$Matches[1]; $script:fail += [int]$Matches[2] }
+    else { $script:fail++; Write-Host '  FAIL  Acceptance-Auto.ps1 không trả kết quả' -ForegroundColor Red }
 }
 Write-Host ("`nKết quả: {0} pass, {1} fail" -f $script:pass, $script:fail)
 if ($script:fail -gt 0) { exit 1 }
