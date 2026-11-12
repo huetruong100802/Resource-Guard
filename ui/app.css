@@ -107,6 +107,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:po
 .alert.warn b{color:var(--critical)}
 .alert.info{background:var(--accent-soft);border-color:transparent}
 .alert.ok{background:var(--normal-soft);border-color:transparent}
+/* Cỡ mặc định cho mọi biểu tượng RG.icon: không có thì SVG giãn kín khung cha. Các luật `.btn svg`, `.empty svg`… cụ thể hơn nên vẫn thắng. */
+:where(svg.ic){width:1.1em;height:1.1em;flex:none;vertical-align:-.2em}
 .empty{text-align:center;padding:36px 16px;color:var(--mut)}
 .empty h3{margin:8px 0 4px;color:var(--fg);font-size:16px}
 .empty svg{width:42px;height:42px;opacity:.6}
@@ -379,7 +381,7 @@ button.badge:hover{filter:brightness(1.08)}
 .rb-mk.top:hover .mk-s,.rb-mk.top:focus-within .mk-s,.rb-mk.top.on .mk-s{display:none}
 .rb-mk.top .rb-lab{z-index:3;background:var(--panel)}
 .rb-mk.top .rb-knob{z-index:3}
-svg.tm .tile.ftile rect.main{stroke:var(--mut);stroke-width:1.5;stroke-dasharray:6 4}
+svg.tm .tile.ftile rect.tmr{stroke:var(--mut);stroke-width:1.5;stroke-dasharray:6 4}
 .hatch{background-image:repeating-linear-gradient(45deg,transparent 0 4px,var(--panel) 4px 7px)}
 .donut{position:relative;display:inline-block;flex:none}
 .donut .dseg{cursor:pointer;transition:opacity .15s}
@@ -395,11 +397,11 @@ svg.tm .tile.ftile rect.main{stroke:var(--mut);stroke-width:1.5;stroke-dasharray
 .legend .lg .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .legend .lg .v{color:var(--mut)}
 svg.tm{--tm-fill:color-mix(in srgb,var(--accent) 62%,var(--panel))}
-svg.tm .tile rect.main{stroke:var(--panel);stroke-width:2}
+svg.tm .tile rect.tmr{stroke:var(--panel);stroke-width:2}
 svg.tm.hl-on .tile:not(.hl){opacity:.72}
-svg.tm .tile.hl rect.main{stroke:var(--accent);stroke-width:3}
-svg.tm .tile.sel rect.main{stroke:var(--accent);stroke-width:3.5}
-svg.tm .tile.parent rect.main{stroke:var(--panel);stroke-width:1}
+svg.tm .tile.hl rect.tmr{stroke:var(--accent);stroke-width:3}
+svg.tm .tile.sel rect.tmr{stroke:var(--accent);stroke-width:3.5}
+svg.tm .tile.parent rect.tmr{stroke:var(--panel);stroke-width:1}
 svg.tm text.hd{font-weight:600;fill:var(--fg)}
 .chart-empty{margin:4px 0}
 

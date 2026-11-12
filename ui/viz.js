@@ -275,6 +275,16 @@
     function layout(node, x, y, w, h, level, out) {
       var v = view(node), tiles = kidsOf(v, level === 0 ? maxTiles : 12), total = 0; tiles.forEach(function (t) { total += t.bytes; });
       if (!(total > 0) || w < 8 || h < 8) return;
+      // Ô quá nhỏ (< ~26×26px) gộp thành MỘT ô "(khác)": ô bề rộng/cao ~0 vẫn bị vẽ viền 2px thành vạch kẻ, nhìn như các hình chữ nhật chồng lên nhau.
+      var minA = 700, tinyN = 0, sumTiny = 0, sumTinyF = 0, solid = [], restT = null;
+      tiles.forEach(function (t) { if (t.rest) restT = t; else if (t.bytes / total * w * h < minA && !t.freeTile) { tinyN++; sumTiny += t.bytes; sumTinyF += t.files || 0; } else solid.push(t); });
+      if (tinyN > 0) {
+        if (restT) { restT = { name: restT.name, path: restT.path, key: restT.key, bytes: restT.bytes + sumTiny, files: (restT.files || 0) + sumTinyF, rest: true, children: [] }; }
+        else if (tinyN > 1 || sumTiny / total * w * h >= 120) restT = { name: '(khác)', path: node.path, key: String(node.key || node.path) + '#rest', bytes: sumTiny, files: sumTinyF, rest: true, children: [] };
+        if (restT) { tiles = solid.concat([restT]).sort(function (a, b) { return b.bytes - a.bytes; }); }
+        else tiles = solid.length ? solid : tiles;
+        total = 0; tiles.forEach(function (t) { total += t.bytes; });
+      }
       var rects = squarify(tiles.map(function (t) { return t.bytes / total * w * h; }), x, y, w, h);
       tiles.forEach(function (t, i) {
         var r = rects[i], it = { node: t, r: r, level: level, parent: v, kids: false };
@@ -301,7 +311,7 @@
         var w = Math.max(0, r[2] - 1.5), h = Math.max(0, r[3] - 1.5), x = RG.n1(r[0] + .75), y = RG.n1(r[1] + .75), ws = RG.n1(w), hs = RG.n1(h);
         var op = t.sys || t.freeTile ? 1 : (ov === 'fixed' || t.zone === 'fixed' ? .45 : (it.kids ? .38 : 1));
         svg += '<g class="tile' + (drill ? ' drill' : '') + (it.kids ? ' parent' : '') + (t.freeTile ? ' ftile' : '') + '" data-i="' + i + '" data-k="' + esc(keyOf(t)) + '" tabindex="0" role="button" aria-label="' + esc(label) + '"><title>' + esc(label) + (ov ? ' · ' + ({ sel: 'đang chọn', cand: 'có mục dọn được', prot: 'được bảo vệ', fixed: 'vùng cố định' }[ov] || '') : '') + '</title>' +
-          '<rect class="main" x="' + x + '" y="' + y + '" width="' + ws + '" height="' + hs + '" rx="3" fill="' + fill + '" opacity="' + op + '"/>';
+          '<rect class="tmr" x="' + x + '" y="' + y + '" width="' + ws + '" height="' + hs + '" rx="3" fill="' + fill + '" opacity="' + op + '"/>';
         if (parts) {
           var used = 0, yb = r[1] + .75 + h;
           parts.forEach(function (pt) {
