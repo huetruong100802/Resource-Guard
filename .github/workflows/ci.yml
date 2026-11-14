@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows-ps51:
+    # Mục tiêu hỗ trợ là Windows PowerShell 5.1 (powershell.exe), không cần pwsh.
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check-Syntax (PowerShell parser + node --check)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Check-Syntax.ps1
+
+      - name: Acceptance (sandbox, không đụng dữ liệu thật)
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Acceptance.ps1 | Tee-Object -FilePath acceptance.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # Annotation đọc được công khai qua API, không cần quyền xem log.
+            Select-String -Path acceptance.log -Pattern '^\s+FAIL\s' | ForEach-Object { Write-Host "::error title=FAIL::$($_.Line.Trim())" }
+            Get-Content acceptance.log -Tail 15 | ForEach-Object { Write-Host "::warning title=tail::$_" }
+          }
+          exit $code
+
+      - name: Watcher overhead (chỉ báo cáo, không làm hỏng build)
+        shell: powershell
+        continue-on-error: true
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Bench-Watcher.ps1 -Ticks 5

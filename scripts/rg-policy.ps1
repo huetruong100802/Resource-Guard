@@ -27,6 +27,7 @@ function Get-RgDefaultPolicy {
         priority = @('temp-entry', 'dotnet-artifact', 'cache-aged', 'node_modules', 'process')
         protectPaths = @()
         protectProcesses = @()
+        autonomy = [ordered]@{}       # mức tự chủ L0-L3 theo nhóm (rg-autonomy.ps1); thiếu = L1 (nhóm có category cũ thì kế thừa category)
         updatedUtc = $null
     }
 }
@@ -91,6 +92,7 @@ function ConvertTo-RgPolicy($In) {
     }
     $p.protectPaths = @($pp)
     $p.protectProcesses = @(ConvertTo-RgStringList (& $get 'protectProcesses') 200 80 | ForEach-Object { $_.ToLowerInvariant() })
+    $p.autonomy = ConvertTo-RgAutonomy (& $get 'autonomy')
     $u = & $get 'updatedUtc'; if ($u) { $p.updatedUtc = [string]$u }
     return $p
 }
@@ -116,6 +118,7 @@ function Test-RgPolicyTightening($Old, $New) {
     if ($rank[[string]$New.mode] -gt $rank[[string]$Old.mode]) { return $false }
     $cr = @{ keep = 0; ask = 1; auto = 2 }
     foreach ($k in $script:RgPolicyKinds) { if ($cr[[string]$New.categories[$k]] -gt $cr[[string]$Old.categories[$k]]) { return $false } }
+    if (Test-RgAutonomyRaised $Old $New) { return $false }   # nâng mức tự chủ của bất kỳ nhóm nào = nới lỏng
     $tr = @{ 'off' = 0; 'Critical' = 1; 'Restricted' = 2; 'Caution' = 3 }   # trigger càng sớm (Caution) càng mạnh tay
     if ($tr[[string]$New.diskTrigger] -gt $tr[[string]$Old.diskTrigger]) { return $false }
     $letters = @(@($Old.drives.Keys) + @($New.drives.Keys) | Select-Object -Unique)
@@ -147,6 +150,7 @@ function Get-RgDrivePolicy($Policy, [string]$Drive) {
 }
 
 function Test-RgPolicyNeedsPin($Old, $New) {
+    if (Test-RgAutonomyNeedsPin $Old $New) { return $true }   # nâng một nhóm lên L3 luôn cần PIN, kể cả khi mode chưa 'on'
     if ([string]$New.mode -ne 'on') { return $false }
     return (-not (Test-RgPolicyTightening $Old $New))
 }
@@ -337,6 +341,7 @@ function Get-RgStressInfo($Policy, $Cfg, $Snap) {
 
 # Chọn mục theo chính sách. Trả {selected; skipped}. Không xoá gì.
 function Select-RgAutoItems($Candidates, $Policy, $Stress) {
+    $Policy = Get-RgEffectivePolicy $Policy   # nhóm có mức tự chủ tường minh thì L0/L1/L2/L3 quyết định category (keep/ask/ask/auto)
     $sel = @(); $skip = @()
     $byDrive = @{}; foreach ($d in @($Stress.drives | Where-Object { $_ })) { $byDrive[[string]$d.drive] = $d }
     $legacy = ($byDrive.Count -eq 0)   # Stress dựng tay không có danh sách ổ: giữ cách tính một ổ như cũ
@@ -464,7 +469,11 @@ function Read-RgAutoRunEvents([int]$Days = 14, $Now = $null) {
     for ($d = ([datetime]$Now).AddDays(-$Days).Date; $d -le ([datetime]$Now).Date; $d = $d.AddDays(1)) {
         $f = Join-Path $dir ('rg-{0}.jsonl' -f $d.ToString('yyyyMMdd'))
         if (-not (Test-Path -LiteralPath $f)) { continue }
-        $lines = @(); try { $lines = [RgMetricsReader]::Grep($f, '"event":"auto-run"') } catch { continue }
+        $lines = @()
+        if ('RgMetricsReader' -as [type]) { try { $lines = [RgMetricsReader]::Grep($f, '"event":"auto-run"') } catch { continue } }
+        else {   # rg-insight.ps1 chưa được nạp (job/test độc lập): đọc thẳng, không phụ thuộc kiểu C#
+            try { $lines = @(Get-Content -LiteralPath $f -Encoding UTF8 -ErrorAction Stop | Where-Object { $_ -like '*"event":"auto-run"*' }) } catch { continue }
+        }
         foreach ($l in $lines) { try { $out += ConvertFrom-Json $l } catch { } }
     }
     return @($out)
@@ -618,3 +627,6 @@ function Invoke-RgElevatedClean {
     Write-RgLog 'manual-cleanup' ([ordered]@{ by = $By; elevated = $true; items = $results.Count; refused = $refused.Count; freedBytes = $freed })
     return [pscustomobject]$rec
 }
+
+# Action registry, mức tự chủ L0-L3, banner/anti-lặp, nâng-hạ theo số liệu, dừng khẩn cấp (E1-E4)
+. (Join-Path $PSScriptRoot 'rg-autonomy.ps1')

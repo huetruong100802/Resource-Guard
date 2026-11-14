@@ -21,10 +21,14 @@ try {
     Set-Job 'running' 'đang quét ứng viên'
     $cfg = Get-RgConfig
     $stress = Get-RgStressInfo $policy $cfg (Get-RgSnapshot -SkipCpu)
-    if (-not $Force -and -not ($stress.diskStress -or $stress.ramStress)) { Set-Job 'done' 'không có áp lực'; return }
+    if (-not $Force -and -not ($stress.diskStress -or $stress.ramStress)) { [void](Update-RgAutonomyState $stress 0 $false); Set-Job 'done' 'không có áp lực'; return }
     $cands = @(Get-RgCandidates)
     $real = ([string]$policy.mode -eq 'on') -and -not $DryRun
     $rec = Invoke-RgAutoRun -Candidates $cands -Policy $policy -Real $real -Trigger $Trigger -AssumeStress ([bool]($Force -and -not $real))
+    if ($real) {   # E3: đo lại sau khi dọn thật; vẫn quá mốc thì báo MỘT lần (banner), hết áp lực thì mở khoá cho lần sau; rồi xét hạ mức theo số liệu (E4)
+        try { [void](Update-RgAutonomyState (Get-RgStressInfo $policy $cfg (Get-RgSnapshot -SkipCpu)) ([long]$rec.freedBytes) $true) } catch { Write-RgLog 'autonomy-state-error' ([string]$_) }
+        try { [void](Invoke-RgAutonomyDemote $cfg) } catch { Write-RgLog 'autonomy-demote-error' ([string]$_) }
+    }
     Set-Job 'done' ("{0} mục, giải phóng {1:n1} MB" -f @($rec.items).Count, ($rec.freedBytes / 1MB))
 }
 catch {

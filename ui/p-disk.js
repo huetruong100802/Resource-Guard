@@ -91,7 +91,7 @@
     return 'Khi ổ ' + esc(L) + ': còn dưới <b>' + RG.fmtGB(t) + '</b>, ' + (auto.length ? 'tôi dọn <b>' + esc(listVi(auto)) + '</b> tới khi trống <b>' + RG.fmtGB(d.target) + '</b>, tối đa <b>' + RG.fmtGB(p.maxGBPerRun) + '</b> mỗi lượt.' : 'tôi không tự dọn nhóm nào.');
   }
   function markDirty() {
-    S.dirty = JSON.stringify(S.draft) !== JSON.stringify(S.policy);
+    S.dirty = RG.policyDirty();
     var b = $('#dkSave'); if (b) b.classList.toggle('show', !!S.dirty);
     drawSentence(); schedulePreview();
   }
@@ -115,7 +115,9 @@
       var g = { id: 'step:' + s.id, kind: 'step', ck: s.kind, title: s.title, items: its, risk: s.riskLevel, regen: s.regen, impact: s.impact, agent: s.agent, reaches: s.reachesGoal };
       if (s.minor) minor.push(g); else groups.push(g);
     });
-    if (minor.length) groups.push({ id: 'minor', kind: 'minor', title: minor.length + ' nhóm nhỏ khác', items: minor.reduce(function (x, g) { return x.concat(g.items); }, []), impact: 'Các nhóm dưới 50 MB, gộp lại cho gọn.' });
+    var minorItems = minor.reduce(function (x, g) { return x.concat(g.items); }, []);
+    /* Nhóm gộp chỉ đáng hiện khi thật sự giải phóng được gì: "1 nhóm nhỏ khác · 0 B" chỉ làm rối danh sách. */
+    if (minorItems.some(function (i) { return (i.sizeBytes || 0) > 0; })) groups.push({ id: 'minor', kind: 'minor', title: minor.length === 1 ? minor[0].title : minor.length + ' nhóm nhỏ khác', items: minorItems, impact: 'Các nhóm dưới 50 MB, gộp lại cho gọn.' });
     var rv = {}; (((a && a.review) || {}).keys || []).forEach(function (k) { rv[k] = 1; });
     var review = items.filter(function (i) { return !used[i.key] && rv[i.key] && i.action !== 'report'; }); review.forEach(function (i) { used[i.key] = 1; });
     var rest = items.filter(function (i) { return !used[i.key] && i.action !== 'report' && !i.protected; }); rest.forEach(function (i) { used[i.key] = 1; });
@@ -137,7 +139,7 @@
     var dis = !selectable(i), rec = recFor(i.key), a = actionOf(i);
     var recPill = rec ? ' ' + pill(rec.verdict === 'clean' ? 'auto' : (rec.verdict === 'keep' ? 'keep' : 'ask'), 'Trợ lý AI: ' + ({ clean: 'nên dọn', keep: 'nên giữ', review: 'xem lại' }[rec.verdict] || esc(rec.verdict)), rec.reason + ' (độ tin cậy: ' + rec.confidence + ')') : '';
     return '<div class="dg-r" data-open="' + esc(i.key) + '"><input type="checkbox" data-key="' + esc(i.key) + '"' + (S.selected[i.key] ? ' checked' : '') + (dis ? ' disabled' : '') + ' aria-label="Chọn ' + esc(tgtOf(i)) + '">' +
-      '<span class="dg-n mono" title="' + esc((i.why || i.reason || '') ? tgtOf(i) + ' — ' + (i.why || i.reason) : tgtOf(i)) + '">' + esc(shortOf(i)) + '</span>' + (i.young ? ' ' + pill('ask', 'chưa đủ tuổi', 'Chưa đủ tuổi theo chính sách; không bao giờ tự dọn.') : '') + recPill +
+      '<span class="dg-n mono" title="' + esc((i.why || i.reason || '') ? tgtOf(i) + ' — ' + (i.why || i.reason) : tgtOf(i)) + '">' + esc(shortOf(i)) + '</span>' + (i.young ? ' ' + pill('ask', 'chưa đủ tuổi', 'Chưa đủ tuổi theo chính sách; không bao giờ tự dọn.') : '') + (i.heldBy && i.heldBy.length ? ' ' + pill('ask', 'đang được dùng', 'Đang được mở bởi: ' + i.heldBy.join(', ') + '. Khi dọn, mục này sẽ bị bỏ qua nếu chương trình đó vẫn còn mở file.') : '') + recPill +
       (g.kind === 'report' ? ' ' + pill(a.cls, a.l, a.d) : '') + '<span class="sp"></span><span class="num">' + (i.sizeBytes && i.action !== 'kill' ? RG.fmtBytes(i.sizeBytes) : '–') + '</span><span class="num mut dg-a">' + (i.ageDays ? RG.fmtAge(i.ageDays) : '–') + '</span>' +
       '<button class="icon-btn ' + (i.protected ? 'on' : '') + '" data-prot="' + esc(i.key) + '" aria-pressed="' + !!i.protected + '" aria-label="' + (i.protected ? 'Bỏ bảo vệ' : 'Bảo vệ') + ' ' + esc(tgtOf(i)) + '" title="' + (i.protected ? 'Bỏ bảo vệ' : 'Bảo vệ khỏi dọn') + '">' + RG.icon('shield') + '</button></div>';
   }

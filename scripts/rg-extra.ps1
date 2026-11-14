@@ -2,7 +2,7 @@
 # Dot-source từ rg-common.ps1 (không chạy trực tiếp). Tương thích Windows PowerShell 5.1 và PowerShell 7+.
 # Thông điệp máy-đọc (reasons, blocker) viết bằng tiếng Anh ASCII.
 
-$script:RgArchivableKinds = @('stale-repo', 'large-item')
+$script:RgArchivableKinds = @('stale-repo', 'large-item', 'cluster-file')
 # Thư mục sinh lại được: không tính vào "hoạt động" của repo (chỉ tính vào dung lượng).
 $script:RgRepoSkipDirs = @('node_modules', 'bin', 'obj', '.git', '.vs', '.angular', '.nx', '.gradle')
 
@@ -204,15 +204,41 @@ function Read-RgArchives {
     try { return @(ConvertFrom-Json (Read-RgFileShared $p) | ForEach-Object { $_ }) } catch { return @() }   # ForEach-Object: PS 5.1 không tự bung mảng JSON
 }
 
+# Đọc cho đường GHI: file có nhưng hỏng thì báo lỗi, KHÔNG coi như rỗng (nếu không, lần ghi sau sẽ xoá mất mọi bản nén).
+function Read-RgArchivesStrict {
+    $p = Get-RgArchivesPath
+    if (-not (Test-Path -LiteralPath $p)) { return @() }
+    return @(ConvertFrom-Json (Read-RgFileShared $p) | ForEach-Object { $_ })   # lỗi parse để nổi lên
+}
+
+# Đọc-sửa-ghi archives.json phải đi qua khoá chung: nhiều job khôi phục chạy song song từng làm mất
+# cờ restoredUtc của nhau (ghi sau đè ghi trước).
+function Invoke-RgArchivesLocked([scriptblock]$Body) {
+    $m = New-Object Threading.Mutex($false, 'Local\ResourceGuardArchives')
+    $held = $false
+    try {
+        try { $held = $m.WaitOne(15000) } catch [Threading.AbandonedMutexException] { $held = $true }
+        if (-not $held) { throw 'archives.json đang bị khoá bởi tiến trình khác (quá thời gian chờ).' }
+        return (& $Body)
+    } finally {
+        if ($held) { try { $m.ReleaseMutex() } catch { } }
+        $m.Dispose()
+    }
+}
+
 function Add-RgArchiveRecord($Rec) {
-    $all = @(Read-RgArchives) + @($Rec)
-    Write-RgFileAtomic (Get-RgArchivesPath) (ConvertTo-Json -InputObject @($all) -Depth 4 -Compress)
+    Invoke-RgArchivesLocked {
+        $all = @(Read-RgArchivesStrict) + @($Rec)
+        Write-RgFileAtomic (Get-RgArchivesPath) (ConvertTo-Json -InputObject @($all) -Depth 4 -Compress)
+    }
 }
 
 function Set-RgArchiveRestored([string]$Id) {
-    $all = @(Read-RgArchives)
-    foreach ($a in $all) { if ($a.id -eq $Id) { $a | Add-Member -NotePropertyName restoredUtc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force } }
-    Write-RgFileAtomic (Get-RgArchivesPath) (ConvertTo-Json -InputObject @($all) -Depth 4 -Compress)
+    Invoke-RgArchivesLocked {
+        $all = @(Read-RgArchivesStrict)
+        foreach ($a in $all) { if ($a.id -eq $Id) { $a | Add-Member -NotePropertyName restoredUtc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force } }
+        Write-RgFileAtomic (Get-RgArchivesPath) (ConvertTo-Json -InputObject @($all) -Depth 4 -Compress)
+    }
 }
 
 # Nén $Path thành <cha>\<tên>.zip (entry gốc là tên thư mục để giải nén ra đúng chỗ cũ), KIỂM TRA, rồi mới trả ok.
@@ -314,6 +340,7 @@ function Restore-RgArchive([string]$Id) {
     } catch [System.Management.Automation.RuntimeException] { throw } catch { }
     $isDirRec = -not [bool]$rec.isFile
     $base = $parent.TrimEnd('\') + '\'
+    $jid = Write-RgJournalIntent -Action 'restore' -Kind ([string]$rec.kind) -Target $orig -Extra ([ordered]@{ zip = $zip; archiveId = $Id })   # ghi-trước: không ghi được thì không giải nén
     $rs = [IO.File]::Open($zip, 'Open', 'Read', 'Read')
     try {
         $zr = New-Object IO.Compression.ZipArchive($rs, [IO.Compression.ZipArchiveMode]::Read, $false)
@@ -335,7 +362,8 @@ function Restore-RgArchive([string]$Id) {
                 throw
             }
         } finally { $zr.Dispose() }
-    } finally { $rs.Dispose() }
+    } catch { if ($jid) { Close-RgJournal $jid 'failed' ([string]$_.Exception.Message) }; throw } finally { $rs.Dispose() }
+    Close-RgJournal $jid 'done' "restored $($rec.bytes) bytes" ([long]$rec.bytes)
     Set-RgArchiveRestored $Id
     Write-RgLog 'archive-restored' ([ordered]@{ id = $Id; original = $orig })
     return $rec

@@ -2,6 +2,7 @@
 #   -Mode breakdown  : phân tích MỘT ổ đĩa (-Drive D) theo nhóm nhân tố (C# đa luồng, liệt kê bằng FindFirstFileExW) -> state\scan-breakdown-<ổ>.json
 #                      + cây thư mục state\scan-tree-<ổ>.json + phần vùng cố định state\scan-fixed-<ổ>.json
 #   -Mode candidates : danh sách ứng viên dọn dẹp (Get-RgCandidates)   -> state\scan-candidates.json
+#   -Mode inventory  : kiểm kê METADATA file cá nhân + góc khuất (D1) rồi gom cụm tất định (D2) -> state\inventory.json, state\clusters.json
 # -Scope focus|full (chỉ breakdown, mặc định focus): trên ổ hệ thống, vùng 'fixed' (Windows, Program Files, ProgramData, hồ sơ người dùng khác)
 #   không dọn được và ít đổi; 'focus' bỏ qua vùng đó và lấy số từ lượt quét đầy đủ gần nhất (nhóm gắn carried=true + scannedUtc cũ). 'full' quét hết.
 #   Ổ không phải ổ hệ thống: mọi thứ là 'hot', focus = full.
@@ -10,7 +11,7 @@
 #   và -OutDir <thư mục> (nơi ghi/đọc kết quả + tiến độ thay cho state\).
 # Tiến độ: scan-<mode>.progress.json (đọc bởi server/UI); breakdown có thêm cats = ảnh chụp tạm byte theo nhóm (cập nhật ~1 giây).
 [CmdletBinding()]
-param([ValidateSet('breakdown', 'candidates')][string]$Mode = 'breakdown', [string]$Drive = 'C', [int]$Threads = 0,
+param([ValidateSet('breakdown', 'candidates', 'inventory')][string]$Mode = 'breakdown', [string]$Drive = 'C', [int]$Threads = 0,
     [ValidateSet('focus', 'full')][string]$Scope = 'focus', [string]$RootOverride = '', [string]$OutDir = '')
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rg-common.ps1')
@@ -37,6 +38,12 @@ function Save-Json($Obj, [string]$Path) { Write-RgFileAtomic $Path (ConvertTo-Js
 
 try {
     Write-Prog 'running' 0
+    if ($Mode -eq 'inventory') {
+        . (Join-Path $PSScriptRoot 'rg-policy.ps1')   # cụm nằm trong vùng bảo vệ bị loại ngay khi gom
+        $sum = Invoke-RgAssistantScan (Get-RgConfig)
+        Write-Prog 'done' 100 ([long]$sum.fileCount) 0 '' "$($sum.fileCount) tệp, $(@($sum.clusters).Count) cụm"
+        return
+    }
     if ($Mode -eq 'candidates') {
         $items = @(Get-RgCandidates)
         $out = foreach ($i in $items) {

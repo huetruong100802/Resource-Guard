@@ -8,11 +8,18 @@
 #   rg shortcut [remove]     # lối tắt "Resource Guard" ở Start Menu (thêm -Desktop để tạo cả ngoài màn hình nền)
 #   rg path [remove]         # thêm thư mục này vào PATH của người dùng để gõ "rg" ở bất kỳ đâu (mở terminal mới sau khi thêm)
 #   rg pin                   # đặt PIN cho chế độ tự dọn "Bật" (chỉ ở console tương tác)
+#   rg hooks print [-Heavy]  # IN đoạn JSON hook cho ~/.claude/settings.json (không tự sửa file); -Heavy thêm build/test qua Bash. rg hooks status: lease đang giữ
+#   rg connect [agent]       # cách kết nối một agent (claude, codex, gemini, cursor, vscode...): IN đoạn cấu hình MCP/hook, không tự sửa file. Không tham số: liệt kê agent
+#   rg wrap -Agent X -- lệnh # chạy một lệnh agent bất kỳ trong một phiên được Resource Guard ghi nhận (cho agent không có MCP lẫn hook)
+#   rg mcp                   # chạy MCP server qua stdio (agent tự gọi lệnh này; xem rg connect)
+#   rg version               # phiên bản
+#   rg panic                 # DỪNG KHẨN CẤP: tắt chính sách tự động + huỷ mọi job nền của Resource Guard (không cần PIN; bật lại cần PIN)
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)][ValidateSet('start', 'open', 'stop', 'restart', 'status', 'run', 'autostart', 'shortcut', 'path', 'pin', 'help')][string]$Command = 'help',
+    [Parameter(Position = 0)][ValidateSet('start', 'open', 'stop', 'restart', 'status', 'run', 'autostart', 'shortcut', 'path', 'pin', 'hooks', 'panic', 'connect', 'wrap', 'mcp', 'version', 'help')][string]$Command = 'help',
     [Parameter(Position = 1)][string]$Arg = '',
-    [int]$Port = 8765, [switch]$Force, [switch]$NoOpen, [switch]$Desktop
+    [int]$Port = 8765, [switch]$Force, [switch]$NoOpen, [switch]$Desktop, [switch]$Heavy, [string]$Agent = '',
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest = @()
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -30,6 +37,7 @@ function Get-LiveInfo {
 }
 . (Join-Path $root 'scripts\rg-setup.ps1')   # Set-RgAutostart / Set-RgShortcut: dùng chung với POST /api/setup
 function Get-LnkPaths { Get-RgLnkPaths }
+function Get-RgVersionLite { try { ([IO.File]::ReadAllText((Join-Path $root 'VERSION'))).Trim() } catch { '0.0.0-dev' } }
 function Get-PolicyMode {
     $p = Join-Path (Get-RgHomeDir) 'state\policy.json'
     if (Test-Path -LiteralPath $p) { try { return [string](Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json).mode } catch { } }
@@ -51,6 +59,7 @@ switch ($Command) {
     }
     'run' { & $srv -Port $Port -NoOpen:$NoOpen }
     'status' {
+        "Resource Guard $(Get-RgVersionLite)"
         $i = Get-LiveInfo
         if ($i) {
             $up = [datetime]::UtcNow - [datetime]::Parse([string]$i.startedUtc, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind')
@@ -83,10 +92,70 @@ switch ($Command) {
         }
         if ($has) { 'Đã có trong PATH người dùng.'; return }
         [Environment]::SetEnvironmentVariable('Path', (($parts + $root) -join ';'), 'User')
-        "Đã thêm $root vào PATH người dùng. Mở terminal mới rồi gõ: rg status"
+        "Đã thêm $root vào PATH người dùng. Mở terminal mới rồi gõ: rguard status"
+        # `rg` trùng tên ripgrep: nếu máy có rg.exe thì cảnh báo và chỉ cách dùng `rguard` (luôn đúng là Resource Guard).
+        $rgExe = @(Get-Command rg.exe -CommandType Application -ErrorAction SilentlyContinue | Where-Object { (Split-Path $_.Source -Parent).TrimEnd('\') -ine $root.TrimEnd('\') }) | Select-Object -First 1
+        if ($rgExe) { "Lưu ý: máy có ripgrep ($($rgExe.Source)). Gõ 'rg' trong terminal có thể chạy ripgrep thay vì Resource Guard; hãy dùng lệnh 'rguard' (cùng tham số)." }
     }
     'pin' { & (Join-Path $root 'scripts\resource-manager.ps1') serve setpin }
+    'hooks' {
+        . (Join-Path $root 'scripts\rg-common.ps1')
+        switch ($Arg) {
+            'print' {
+                # stdout chỉ có JSON (để chuyển hướng/ghép); lời nhắc đi qua Write-Host. Resource Guard KHÔNG bao giờ tự sửa settings của bạn.
+                [Console]::Error.WriteLine('Gộp khối "hooks" dưới đây vào ~/.claude/settings.json (hoặc .claude/settings.json của dự án). Resource Guard không tự sửa file này.')
+                Get-RgHooksSnippet $root -Heavy:$Heavy
+            }
+            'status' {
+                $ls = @(Get-RgLeases)
+                if ($ls.Count) { $ls | Format-Table sessionId, agent, token, subagents, reservations, lastSeenUtc -AutoSize | Out-String } else { 'Không có phiên agent nào đang giữ lease.' }
+            }
+            default { 'Dùng: rg hooks print [-Heavy] | rg hooks status' }
+        }
+    }
+    'panic' {
+        . (Join-Path $root 'scripts\rg-common.ps1'); . (Join-Path $root 'scripts\rg-policy.ps1')
+        $pr = Invoke-RgPanic -By 'cli'
+        "Đã dừng khẩn cấp: chính sách tự động trước đó '$($pr.modeBefore)' -> 'off'; huỷ $(@($pr.stopped).Count) job nền" + $(if (@($pr.failed).Count) { "; $(@($pr.failed).Count) việc không dừng được (xem logs)" } else { '' }) + '. Bật lại ở màn Chính sách (cần PIN).'
+    }
+    'version' { "Resource Guard $(Get-RgVersionLite)" }
+    'mcp' { & (Join-Path $root 'scripts\rg-mcp.ps1') -Agent $Agent }
+    'connect' {
+        . (Join-Path $root 'scripts\rg-common.ps1')
+        if (-not $Arg) {
+            'Agent có thể kết nối (rg connect <id>):'
+            Get-RgAgentCatalog | Where-Object { @($_.connect).Count } | ForEach-Object { '  {0,-9} {1,-38} {2}' -f $_.id, $_.label, (@($_.connect) -join ', ') }
+            ''
+            'Agent khác có hỗ trợ MCP: dùng khối mcpServers của "rg connect vscode". Script/CI: POST http://localhost:8765/api/connect/v1/preflight (header X-RG-Client: agent).'
+            return
+        }
+        $g = Get-RgConnectGuide $Arg $root -Heavy:$Heavy
+        [Console]::Error.WriteLine("Kết nối $($g.label) với Resource Guard. Resource Guard KHÔNG tự sửa file cấu hình của bạn: hãy tự dán các đoạn dưới đây.")
+        [Console]::Error.WriteLine($g.status)
+        foreach ($s in $g.steps) {
+            ''
+            "## $($s.title)" + $(if ($s.file) { "  ->  $($s.file)" } else { '' })
+            if ($s.note) { "#  $($s.note)" }
+            $s.text
+        }
+    }
+    'wrap' {
+        # rg wrap -Agent aider -- aider --model x : lập lease cho phiên, chạy lệnh, trả lease khi lệnh thoát (kể cả khi lỗi/Ctrl+C).
+        $cmdLine = @(@($Arg) + @($Rest) | Where-Object { $_ -and $_ -ne '--' })
+        if ($cmdLine.Count -eq 0) { 'Dùng: rg wrap -Agent <tên> -- <lệnh> [tham số...]'; return }
+        . (Join-Path $root 'scripts\rg-common.ps1')
+        $who = $(if ($Agent) { $Agent.ToLowerInvariant() } else { ([IO.Path]::GetFileNameWithoutExtension($cmdLine[0])).ToLowerInvariant() })
+        $sid = "wrap-$PID"
+        try { [void](New-RgLease -SessionId $sid -Agent $who -OwnerPid $PID -Cwd (Get-Location).Path -Source 'wrap') } catch { [Console]::Error.WriteLine("Resource Guard: không ghi nhận được phiên ($($_.Exception.Message)); vẫn chạy lệnh.") }
+        $exit = 0
+        try {
+            $rest2 = @(); if ($cmdLine.Count -gt 1) { $rest2 = @($cmdLine[1..($cmdLine.Count - 1)]) }
+            & $cmdLine[0] @rest2
+            $exit = $(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 })
+        } finally { try { [void](Remove-RgLease -SessionId $sid) } catch { } }
+        exit $exit
+    }
     default {
-        Get-Content -LiteralPath $PSCommandPath -TotalCount 11 -Encoding UTF8 | ForEach-Object { $_ -replace '^#   ?', '  ' -replace '^# ', '' }
+        Get-Content -LiteralPath $PSCommandPath -TotalCount 17 -Encoding UTF8 | ForEach-Object { $_ -replace '^#   ?', '  ' -replace '^# ', '' }
     }
 }

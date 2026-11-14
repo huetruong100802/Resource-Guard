@@ -2,6 +2,8 @@
 #   resource-manager.ps1 status | processes | disk scan | preflight <build|test|subagent|session>
 #   resource-manager.ps1 serve [-Port 8765] [-Detach] [-NoOpen]   # UI realtime trên localhost; serve stop để dừng; serve setpin đặt PIN tự dọn
 #   resource-manager.ps1 register -ProcessId N -Agent claude -Label "dotnet test"
+#   resource-manager.ps1 preflight <build|test|subagent|session> [-Reserve -SessionId S]   # có -Reserve: giữ chỗ cho tác vụ sắp chạy (mã thoát 2 = từ chối, 3 = hoãn)
+#   resource-manager.ps1 lease list | acquire|heartbeat|release -SessionId S [-Token T]    # lease phiên cho agent không có hook
 #   resource-manager.ps1 cleanup plan | show PLAN_ID | approve PLAN_ID (-All | -ItemIds 1,2) | apply PLAN_ID [-DryRun]
 # Thêm -Json để lấy đầu ra máy-đọc.
 [CmdletBinding()]
@@ -11,7 +13,8 @@ param(
     [Parameter(Position = 2)][string]$Arg = '',
     [int]$ProcessId = 0, [string]$Agent = 'unknown', [string]$Label = '', [int]$OwnerPid = 0,
     [int]$Top = 15, [int[]]$ItemIds, [switch]$All, [switch]$DryRun, [switch]$Json,
-    [int]$Port = 8765, [switch]$Detach, [switch]$NoOpen, [switch]$NoToast
+    [int]$Port = 8765, [switch]$Detach, [switch]$NoOpen, [switch]$NoToast,
+    [string]$SessionId = '', [string]$Token = '', [switch]$Reserve
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rg-common.ps1')
@@ -55,14 +58,44 @@ switch ($Command) {
     }
     'preflight' {
         $task = if ($Sub) { $Sub } else { 'session' }
-        $b = Get-RgBudget -Task $task
+        # -Reserve / -SessionId: preflight có giữ chỗ (hai agent đồng thời không cùng thấy một phần RAM trống); không có thì giữ cách cũ.
+        $b = if ($Reserve -or $SessionId) { Invoke-RgPreflight -Task $task -SessionId $SessionId -Reserve:$Reserve } else { Get-RgBudget -Task $task }
         Write-RgLog 'preflight' $b
-        Show $b { "Task=$task decision=$($b.decision) state=$($b.state) heavy=$($b.heavyRunning)/$($b.maxHeavy)"; foreach ($r in $b.reasons) { "  - $r" } }
+        Show $b { "Task=$task decision=$($b.decision) state=$($b.state)$(if ($b.PSObject.Properties['heavyRunning']) { " heavy=$($b.heavyRunning)/$($b.maxHeavy)" })$(if ($b.reservationId) { " reservation=$($b.reservationId)" })"; foreach ($r in $b.reasons) { "  - $r" }; if ($b.PSObject.Properties['warning'] -and $b.warning) { "  ! $($b.warning)" } }
         if ($b.decision -eq 'deny') { exit 2 }
+        if ($b.decision -eq 'defer') { exit 3 }   # chưa nên chạy ngay: hỏi lại sau ít giây
+    }
+    'lease' {   # agent không có hook (Codex...) tự giữ lease: lease acquire|heartbeat|release|list  -SessionId S [-Token T] [-Agent codex] [-OwnerPid N]
+        switch ($Sub) {
+            'list' { $l = @(Get-RgLeases); Show $l { if ($l.Count) { $l | Format-Table sessionId, agent, token, ownerPid, subagents, reservations, lastSeenUtc -AutoSize | Out-String } else { 'Không có lease nào đang hiệu lực.' } } }
+            'acquire' {
+                if (-not $SessionId) { throw '-SessionId is required.' }
+                $l = New-RgLease -SessionId $SessionId -Agent $Agent -OwnerPid $OwnerPid -Source 'cli'
+                Show $l { "Lease cho $SessionId, token $($l.token). Giữ token này để heartbeat/release." }
+            }
+            'heartbeat' {
+                if (-not $SessionId) { throw '-SessionId is required.' }
+                $r = Update-RgLeaseHeartbeat -SessionId $SessionId -Token $(if ($Token) { [long]$Token } else { $null })
+                Show $r { if ($r.ok) { "Heartbeat ok cho $SessionId." } else { "Không làm mới được: $($r.reason)." } }
+                if (-not $r.ok) { exit 1 }
+            }
+            'release' {
+                if (-not $SessionId) { throw '-SessionId is required.' }
+                $r = Remove-RgLease -SessionId $SessionId -Token $(if ($Token) { [long]$Token } else { $null })
+                Show $r { if ($r.ok) { "Đã trả lease $SessionId." } else { "Không trả được: $($r.reason)." } }
+                if (-not $r.ok) { exit 1 }
+            }
+            default { throw "Unknown lease subcommand '$Sub' (list|acquire|heartbeat|release)." }
+        }
     }
     'register' {
         if (-not $ProcessId) { throw '-ProcessId is required.' }
         Register-RgProcess -ProcId $ProcessId -Agent $Agent -Label $Label -OwnerPid $OwnerPid | ConvertTo-Json -Depth 4
+    }
+    'heartbeat' {   # agent còn sống làm mới hạn đăng ký của process đã register
+        if (-not $ProcessId) { throw '-ProcessId is required.' }
+        $ok = Update-RgLedgerHeartbeat -ProcId $ProcessId
+        Show ([pscustomobject]@{ pid = $ProcessId; heartbeat = $ok }) { if ($ok) { "Heartbeat ok for pid $ProcessId." } else { "pid $ProcessId is not in the ledger." } }
     }
     'cleanup' {
         switch ($Sub) {
@@ -76,13 +109,23 @@ switch ($Command) {
             }
             'show' { $plan = Read-RgPlan $Arg; Show $plan { $plan | ConvertTo-Json -Depth 8 } }
             'approve' { $p = Approve-RgPlan -PlanId $Arg -ItemIds $ItemIds -All:$All; Show $p { "Approved items: $(@($p.approval.approvedItemIds) -join ',')" } }
+            'resume' {   # liệt kê plan bị ngắt giữa chừng; 'cleanup resume PLAN_ID' chạy tiếp (revalidate từng mục, mục đã xoá bị bỏ qua)
+                if (-not $Arg) { $rp = @(Get-RgResumablePlans); Show $rp { if ($rp.Count) { $rp | Format-Table -AutoSize | Out-String } else { 'Không có plan nào đang dở.' } } }
+                else {
+                    if (@(Get-RgResumablePlans | Where-Object { $_.planId -eq $Arg }).Count -eq 0) { throw "Plan $Arg is not in the interrupted ('applying') state." }
+                    $r = Invoke-RgApply -PlanId $Arg
+                    Show $r { "$($r.message); freed ~$(MB $r.freedBytes) MB"; $r.results | Format-Table -AutoSize -Wrap | Out-String }
+                    if ($r.code -ne 0) { exit $r.code }
+                    if (-not $r.ok) { exit 1 }
+                }
+            }
             'apply' {
                 $r = Invoke-RgApply -PlanId $Arg -DryRun:$DryRun
                 Show $r { "$($r.message); freed ~$(MB $r.freedBytes) MB"; $r.results | Format-Table -AutoSize -Wrap | Out-String }
                 if ($r.code -ne 0) { exit $r.code }
                 if (-not $r.ok) { exit 1 }
             }
-            default { throw "Unknown cleanup subcommand '$Sub' (plan|show|approve|apply)." }
+            default { throw "Unknown cleanup subcommand '$Sub' (plan|show|approve|apply|resume)." }
         }
     }
     'serve' {   # watcher + UI realtime http://localhost:<port>/ ; 'serve stop' để dừng bản chạy ngầm
@@ -101,5 +144,5 @@ switch ($Command) {
         }
         else { & $srv -Port $Port -Detach:$Detach -NoOpen:$NoOpen -NoToast:$NoToast }
     }
-    default { throw "Unknown command '$Command' (status|processes|disk|preflight|register|cleanup|serve)." }
+    default { throw "Unknown command '$Command' (status|processes|disk|preflight|register|heartbeat|lease|cleanup|serve)." }
 }
