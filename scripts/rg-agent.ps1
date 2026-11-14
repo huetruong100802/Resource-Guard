@@ -1,4 +1,4 @@
-﻿# rg-agent.ps1 - "nhờ agent đánh giá": gửi METADATA (không gửi nội dung file) cho `claude -p` (haiku, effort high), nhận JSON có cấu trúc.
+﻿# rg-agent.ps1 - "nhờ agent đánh giá": gửi METADATA (không gửi nội dung file) cho nhà cung cấp AI đang chọn (rg-agents.ps1), nhận JSON có cấu trúc.
 #   Dot-source: nạp New-RgAgentPayload (UI dùng để xem trước dữ liệu sẽ gửi).
 #   Chạy trực tiếp: rg-agent.ps1 [-TimeoutSec 180] [-MaxBudgetUsd 0.5]   -> state\agent-last.json, tiến độ state\agent.progress.json
 # Agent chỉ GỢI Ý. Tool giữ sự thật; mọi key agent trả về được đối chiếu lại với danh sách ứng viên, key lạ bị loại.
@@ -122,32 +122,16 @@ $PayloadJson
 "@
 }
 
-# Gọi `claude -p` (không tool, không lưu phiên) với prompt + JSON schema; trả { res; bytes }. Ném lỗi nếu vắng claude/hết giờ/không đọc được.
-function Invoke-RgClaudeJson {
-    param([string]$Prompt, [string]$Schema, [int]$TimeoutSec = 180, [double]$MaxBudgetUsd = 0.5, [string]$Model = 'haiku', [string]$Effort = 'high')
-    $prompt = $Prompt
-    $cmd = Get-Command claude -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $cmd) { throw 'Không tìm thấy lệnh `claude` trong PATH.' }
-    $cwd = Join-Path (Initialize-RgHome) 'state\agent-cwd'
-    [void](New-Item -ItemType Directory -Force -Path $cwd)
-    $schemaArg = $Schema.Replace('"', '\"')
-    $args_ = "-p --model $Model --effort $Effort --tools `"`" --output-format json --no-session-persistence --disable-slash-commands --setting-sources project --max-budget-usd $MaxBudgetUsd --json-schema `"$schemaArg`""
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $cmd.Source; $psi.Arguments = $args_; $psi.WorkingDirectory = $cwd
-    $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
-    $p = [Diagnostics.Process]::Start($psi)
-    $outT = $p.StandardOutput.ReadToEndAsync(); $errT = $p.StandardError.ReadToEndAsync()
-    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($prompt)
-    try { $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $p.StandardInput.BaseStream.Flush() } catch { }
-    try { $p.StandardInput.Close() } catch { }
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; throw "claude không trả lời sau $TimeoutSec giây (đã dừng)." }
-    $out = $outT.Result; $err = $errT.Result
-    $res = $null
-    try { $res = ConvertFrom-Json $out } catch { throw ("Không đọc được JSON từ claude (exit $($p.ExitCode)): " + (($err + ' ' + $out).Trim() | Select-Object -First 1).ToString().Substring(0, [math]::Min(300, ($err + ' ' + $out).Trim().Length))) }
-    if ($res.is_error -or -not $res.structured_output) { throw ("claude báo lỗi: " + [string]$res.result) }
-    return [pscustomobject]@{ res = $res; bytes = $bytes.Length }
+# Gọi nhà cung cấp AI đang chọn (rg-agents.ps1: claude | codex | gemini | ollama | API tương thích OpenAI) với prompt + JSON schema.
+# Trả { so; costUsd; durationMs; bytes; provider; label; model; local }. `so` đã qua kiểm dạng; ném lỗi nếu không có nhà cung cấp/hết giờ/sai dạng.
+# -Model/-Effort chỉ là gợi ý cho nhà cung cấp hiểu được (claude); nhà cung cấp khác dùng model khai trong config.
+function Invoke-RgEvaluatorJson {
+    param([string]$Prompt, [string]$Schema, [int]$TimeoutSec = 180, [double]$MaxBudgetUsd = 0.5, [string]$Model = '', [string]$Effort = 'high')
+    $p = Get-RgEvaluator
+    if (-not $p) { throw 'Chưa có nhà cung cấp AI nào dùng được. Xem Cài đặt > Kết nối agent.' }
+    $useModel = $(if ($p.id -eq 'claude' -and $Model -and -not (Read-RgEvaluatorChoice).model) { $Model } else { '' })
+    $r = Invoke-RgLlmJson -Prompt $Prompt -Schema $Schema -Provider $p -TimeoutSec $TimeoutSec -MaxBudgetUsd $MaxBudgetUsd -Effort $Effort -Model $useModel
+    return [pscustomobject]@{ so = $r.data; costUsd = $r.costUsd; durationMs = $r.durationMs; bytes = $r.bytes; provider = $r.provider; label = $r.label; model = $r.model; local = $r.local }
 }
 
 # Đánh giá CỤM (D3): chỉ gửi metadata cụm (không đường dẫn, không tên file). Kết quả đi qua ConvertTo-RgSafeVerdicts rồi được nhớ theo verdictKey.
@@ -171,14 +155,14 @@ Quy tắc bắt buộc:
 DỮ LIỆU:
 $(ConvertTo-Json -InputObject $payload -Depth 5 -Compress)
 "@
-    $r = Invoke-RgClaudeJson -Prompt $prompt -Schema $script:RgClusterSchema -TimeoutSec $TimeoutSec -MaxBudgetUsd $MaxBudgetUsd -Model $Model -Effort $Effort
-    $safe = ConvertTo-RgSafeVerdicts @($r.res.structured_output.verdicts) @($rep.clusters) $cfg
+    $r = Invoke-RgEvaluatorJson -Prompt $prompt -Schema $script:RgClusterSchema -TimeoutSec $TimeoutSec -MaxBudgetUsd $MaxBudgetUsd -Model $Model -Effort $Effort
+    $safe = ConvertTo-RgSafeVerdicts @($r.so.verdicts) @($rep.clusters) $cfg
     $cache = Read-RgVerdictCache
     $byId = @{}; foreach ($c in @($rep.clusters)) { $byId[[string]$c.clusterId] = $c }
     $now = (Get-Date).ToUniversalTime().ToString('o')
     foreach ($v in @($safe.verdicts)) { $cache[[string]$byId[[string]$v.clusterId].verdictKey] = [pscustomobject]@{ verdict = $v.verdict; reason = $v.reason; confidence = $v.confidence; ts = $now } }
     Save-RgVerdictCache $cache
-    return [ordered]@{ ok = $true; asked = @($payload.clusters).Count; accepted = @($safe.verdicts).Count; dropped = $safe.dropped; omitted = $payload.omitted; costUsd = $r.res.total_cost_usd; durationMs = $r.res.duration_ms; payloadBytes = $r.bytes }
+    return [ordered]@{ ok = $true; asked = @($payload.clusters).Count; accepted = @($safe.verdicts).Count; dropped = $safe.dropped; omitted = $payload.omitted; costUsd = $r.costUsd; durationMs = $r.durationMs; payloadBytes = $r.bytes; provider = $r.provider; model = $r.model }
 }
 
 function Invoke-RgAgentEval {
@@ -186,30 +170,9 @@ function Invoke-RgAgentEval {
     $payload = New-RgAgentPayload
     $json = ConvertTo-Json -InputObject $payload -Depth 8 -Compress
     $prompt = Get-RgAgentPrompt $json
-    $cmd = Get-Command claude -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $cmd) { throw 'Không tìm thấy lệnh `claude` trong PATH.' }
-    $cwd = Join-Path (Initialize-RgHome) 'state\agent-cwd'
-    [void](New-Item -ItemType Directory -Force -Path $cwd)
+    $lr = Invoke-RgEvaluatorJson -Prompt $prompt -Schema $script:RgAgentSchema -TimeoutSec $TimeoutSec -MaxBudgetUsd $MaxBudgetUsd -Model $Model -Effort $Effort
 
-    $schemaArg = $script:RgAgentSchema.Replace('"', '\"')
-    $args_ = "-p --model $Model --effort $Effort --tools `"`" --output-format json --no-session-persistence --disable-slash-commands --setting-sources project --max-budget-usd $MaxBudgetUsd --json-schema `"$schemaArg`""
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $cmd.Source; $psi.Arguments = $args_; $psi.WorkingDirectory = $cwd
-    $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
-    $p = [Diagnostics.Process]::Start($psi)
-    $outT = $p.StandardOutput.ReadToEndAsync(); $errT = $p.StandardError.ReadToEndAsync()
-    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($prompt)
-    try { $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $p.StandardInput.BaseStream.Flush() } catch { }
-    try { $p.StandardInput.Close() } catch { }
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; throw "claude không trả lời sau $TimeoutSec giây (đã dừng)." }
-    $out = $outT.Result; $err = $errT.Result
-    $res = $null
-    try { $res = ConvertFrom-Json $out } catch { throw ("Không đọc được JSON từ claude (exit $($p.ExitCode)): " + (($err + ' ' + $out).Trim() | Select-Object -First 1).ToString().Substring(0, [math]::Min(300, ($err + ' ' + $out).Trim().Length))) }
-    if ($res.is_error -or -not $res.structured_output) { throw ("claude báo lỗi: " + [string]$res.result) }
-
-    $so = $res.structured_output
+    $so = $lr.so
     $keys = @{}; foreach ($c in @($payload.cleanupCandidates)) { $keys[[string]$c.key] = $c }
     $kept = @(); $dropped = 0; $keptApplied = 0
     $rawByKey = @{}   # đường dẫn thật (payload đã thay tên tài khoản bằng ~); chỉ lấy từ file quét của tool, không từ agent
@@ -230,8 +193,8 @@ function Invoke-RgAgentEval {
     $curCats = (Get-RgPolicy).categories
     $pol = @($so.policySuggestions | Where-Object { ($script:RgPolicyKinds -contains [string]$_.kind) -and ([string]$curCats[[string]$_.kind] -ne [string]$_.setting) })
     return [ordered]@{
-        ok = $true; finishedUtc = (Get-Date).ToUniversalTime().ToString('o'); model = $Model; effort = $Effort
-        costUsd = $res.total_cost_usd; durationMs = $res.duration_ms; payloadBytes = $bytes.Length
+        ok = $true; finishedUtc = (Get-Date).ToUniversalTime().ToString('o'); provider = $lr.provider; providerLabel = $lr.label; local = $lr.local; model = $lr.model; effort = $Effort
+        costUsd = $lr.costUsd; durationMs = $lr.durationMs; payloadBytes = $lr.bytes
         result = [ordered]@{ summary = $so.summary; severity = $so.severity; findings = @($so.findings); recommendations = $kept; policySuggestions = $pol; droppedUnknownKeys = $dropped; keptApplied = $keptApplied }
     }
 }
@@ -246,17 +209,17 @@ try {
     $cur = Get-RgJobState $jobFile
     if ($cur -and $cur.status -eq 'running' -and [int]$cur.pid -ne $PID) { return }
     if ($Mode -eq 'clusters') {   # D3: verdict theo cụm; không đụng agent-last.json (kết quả đánh giá tổng quát)
-        Set-Job 'running' 'đang hỏi claude về các cụm tệp'
+        Set-Job 'running' ('đang hỏi ' + $($evp = Get-RgEvaluator; if ($evp) { $evp.label } else { 'trợ lý AI' }) + ' về các cụm tệp')
         $r = Invoke-RgClusterAgentEval -TimeoutSec $TimeoutSec -MaxBudgetUsd ([math]::Min($MaxBudgetUsd, 0.3)) -Model $Model -Effort 'medium'
         Write-RgLog 'agent-clusters' $r
         Set-Job 'done' $(if ($r.asked) { "xong: $($r.accepted)/$($r.asked) cụm" } else { [string]$r.message })
         return
     }
-    Set-Job 'running' 'đang gọi claude (haiku, high)'
+    Set-Job 'running' ('đang gọi ' + $($evp = Get-RgEvaluator; if ($evp) { $evp.label } else { 'trợ lý AI' }))
     $r = Invoke-RgAgentEval -TimeoutSec $TimeoutSec -MaxBudgetUsd $MaxBudgetUsd -Model $Model -Effort $Effort
     Write-RgFileAtomic (Join-Path (Initialize-RgHome) 'state\agent-last.json') (ConvertTo-Json -InputObject $r -Depth 8 -Compress)
     Write-RgLog 'agent-eval' ([ordered]@{ ok = $true; costUsd = $r.costUsd; durationMs = $r.durationMs; payloadBytes = $r.payloadBytes; keptApplied = $r.result.keptApplied })
-    Set-Job 'done' ('xong, chi phí $' + $r.costUsd)
+    Set-Job 'done' $(if ($null -ne $r.costUsd) { 'xong, chi phí $' + $r.costUsd } else { 'xong' })
 }
 catch {
     $msg = [string]$_.Exception.Message

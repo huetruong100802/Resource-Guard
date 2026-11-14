@@ -15,7 +15,31 @@
     "Restricted": { "heavy": "allow", "maxHeavy": 1, "subagent": "deny",  "maxSubagents": 0, "cleanup": "approval" },
     "Critical":   { "heavy": "deny",  "maxHeavy": 0, "subagent": "deny",  "maxSubagents": 0, "cleanup": "approval" }
   },
-  "agentCmdRegex": "@anthropic-ai[\\\\/]claude-code|@openai[\\\\/]codex|claude-code|[\\\\/]\\.claude[\\\\/]|[\\\\/]\\.codex[\\\\/]",
+  "ui": { "openAs": "app" },
+  "agents": {
+    "evaluator": { "provider": "auto", "model": "" },
+    "providers": {
+      "claude": { "model": "haiku" },
+      "codex": { "model": "" },
+      "gemini": { "model": "" },
+      "ollama": { "baseUrl": "http://localhost:11434", "model": "" },
+      "openai": { "baseUrl": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY", "model": "", "responseFormat": "json_schema" }
+    },
+    "catalog": {
+      "claude":   { "label": "Claude Code", "kind": "cli", "cli": "claude", "processNames": ["claude"], "cmdRegex": "@anthropic-ai[\\\\/]claude-code|claude-code|[\\\\/]\\.claude[\\\\/]", "connect": ["hooks", "mcp"], "hooks": "claude", "mcpClient": "claude" },
+      "codex":    { "label": "Codex CLI", "kind": "cli", "cli": "codex", "processNames": ["codex"], "cmdRegex": "@openai[\\\\/]codex|[\\\\/]\\.codex[\\\\/]", "connect": ["mcp", "wrapper"], "mcpClient": "codex" },
+      "gemini":   { "label": "Gemini CLI", "kind": "cli", "cli": "gemini", "processNames": ["gemini"], "cmdRegex": "@google[\\\\/]gemini-cli|gemini-cli[\\\\/]", "connect": ["mcp", "hooks", "wrapper"], "hooks": "gemini", "mcpClient": "gemini" },
+      "cursor":   { "label": "Cursor", "kind": "ide", "cli": "cursor-agent", "processNames": ["cursor-agent"], "connect": ["mcp", "hooks"], "hooks": "cursor", "mcpClient": "cursor" },
+      "copilot":  { "label": "GitHub Copilot CLI", "kind": "cli", "cli": "copilot", "processNames": ["copilot"], "cmdRegex": "@github[\\\\/]copilot", "connect": ["mcp", "wrapper"], "mcpClient": "copilot" },
+      "vscode":   { "label": "VS Code (Copilot Chat, Cline, Roo…)", "kind": "ide", "cli": "code", "processNames": [], "connect": ["mcp"], "mcpClient": "visual studio code|vscode|cline|roo" },
+      "windsurf": { "label": "Windsurf", "kind": "ide", "cli": "windsurf", "processNames": [], "connect": ["mcp"], "mcpClient": "windsurf" },
+      "opencode": { "label": "opencode", "kind": "cli", "cli": "opencode", "processNames": ["opencode"], "cmdRegex": "opencode-ai|[\\\\/]opencode[\\\\/]", "connect": ["mcp", "wrapper"], "mcpClient": "opencode" },
+      "goose":    { "label": "Goose", "kind": "cli", "cli": "goose", "processNames": ["goose", "goosed"], "connect": ["mcp", "wrapper"], "mcpClient": "goose" },
+      "aider":    { "label": "Aider", "kind": "cli", "cli": "aider", "processNames": ["aider"], "cmdRegex": "[\\\\/]aider(\\.exe)?\\b|aider[\\\\/]__main__|-m\\s+aider\\b", "connect": ["wrapper"] },
+      "ollama":   { "label": "Ollama (model chạy trên máy)", "kind": "runtime", "cli": "ollama", "processNames": ["ollama", "ollama app", "ollama_llama_server"], "connect": [], "note": "Không phải agent: là nơi chạy model cục bộ, thường ngốn nhiều RAM. Có thể dùng làm nhà cung cấp đánh giá (dữ liệu không rời máy)." }
+    }
+  },
+  "agentCmdRegex":"@anthropic-ai[\\\\/]claude-code|@openai[\\\\/]codex|claude-code|[\\\\/]\\.claude[\\\\/]|[\\\\/]\\.codex[\\\\/]",
   "groups": {
     "agent": ["claude*", "codex*"],
     "infra": ["sqlservr", "docker*", "com.docker*", "vmmem*", "wsl*", "vmwp", "vmcompute"],
@@ -73,7 +97,8 @@
       { "name": "sqlservr", "role": "infra", "title": "SQL Server", "what": "Cơ sở dữ liệu SQL Server cục bộ" },
       { "name": "vmmem*|vmwp|vmcompute", "role": "infra", "title": "Máy ảo (WSL/Docker)", "what": "Bộ nhớ dành cho WSL hoặc Docker" },
       { "name": "docker*|com.docker*|wsl*", "role": "infra", "title": "Docker / WSL", "what": "Dịch vụ container chạy nền" },
-      { "name": "claude*|codex*", "role": "agent", "title": "Trợ lý AI", "what": "Phiên làm việc của trợ lý AI" }
+      { "name": "ollama*", "role": "infra", "title": "Ollama (model AI cục bộ)", "what": "Chạy model AI trên máy này; thường giữ nhiều RAM khi model đang nạp" },
+      { "name": "claude*|codex*|gemini|cursor-agent|copilot|opencode|goose|goosed|aider", "role": "agent", "title": "Trợ lý AI", "what": "Phiên làm việc của trợ lý AI" }
     ]
   },
   "cleanup": {
@@ -82,7 +107,7 @@
     "minAgeDays": { "dotnet-artifact": 14, "node_modules": 30, "temp-entry": 14 },
     "cacheMinInactiveDays": 14,
     "tempRoot": "",
-    "tempExclude": ["claude*"],
+    "tempExclude": ["claude*", "codex*", "gemini*", "cursor*"],
     "tempTop": 30,
     "minCacheMB": 100,
     "youngMinMB": 100,
@@ -116,6 +141,6 @@
     ]
   },
   "protected": {
-    "segments": [".git", ".claude", ".codex", ".ssh", ".aws", ".azure", "Documents", "Desktop", ".agent-resource"]
+    "segments": [".git", ".claude", ".codex", ".gemini", ".cursor", ".copilot", ".codeium", ".ollama", ".ssh", ".aws", ".azure", "Documents", "Desktop", ".agent-resource"]
   }
 }

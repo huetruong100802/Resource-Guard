@@ -62,6 +62,8 @@
     // Tập ổ thay đổi (cắm/rút ổ): nạp lại meta (ngưỡng, chính sách) và vẽ lại trang.
     var changed = S.live && driveSig(S.live.drives) !== driveSig(r.drives);
     S.live = r;
+    /* Có số liệu là đang kết nối: đừng để chấm đỏ "đang kết nối…" khi onopen tới muộn (SSE xếp hàng sau request chậm). */
+    if (!r.stale) { lostAt = 0; $('#lost').classList.remove('on'); $('#dot').className = 'dot on'; }
     if (changed) {
       if (S.driveSel && !(r.drives || []).some(function (d) { return d.drive === S.driveSel; })) S.driveSel = null;
       RG.loadDrives().catch(function () { }).then(function () { var q = RG.pages[RG.cur]; if (q && q.render && (RG.cur === 'home' || RG.cur === 'disk')) RG.go(RG.cur, true); });
@@ -69,7 +71,7 @@
     S.hist.push(r); if (S.hist.length > MAX) S.hist.shift();
     setBadge(r);
     /* r.stale = bản số liệu lần chạy trước server nạp sẵn để có gì hiển thị ngay; tick thật sẽ thay trong vài giây. */
-    var ct = $('#connTxt'); if (ct) { if (r.stale) ct.textContent = 'đang cập nhật…'; else if (ct.textContent === 'đang cập nhật…') ct.textContent = 'trực tiếp'; }
+    var ct = $('#connTxt'); if (ct) { if (r.stale) ct.textContent = 'đang cập nhật…'; else if (ct.textContent !== 'trực tiếp') ct.textContent = 'trực tiếp'; }
     RG.nextAt = Date.now() + (r.intervalSec || 15) * 1000;
     if (S.settings) S.settings.intervalSec = r.intervalSec || S.settings.intervalSec;
     document.title = '[' + RG.human.state(r.state) + '] Resource Guard · ' + RG.pages[RG.cur].title;
@@ -113,6 +115,7 @@
     $('#badge').onclick = function () { RG.statusBadge(); };
     $('#themeBtn').onclick = function () { RG.theme(dark() ? 'light' : 'dark'); };
     $('#quitBtn').onclick = function () { RG.quit(); };
+    RG.api('/api/about').then(function (a) { S.about = a; var v = $('#verTxt'); if (v && a && a.version) { v.textContent = 'Phiên bản ' + a.version; v.title = 'Cài đặt → Giới thiệu'; } }).catch(function () { });
     $('#themeBtn').innerHTML = RG.icon(dark() ? 'sun' : 'moon');
     var t = RG.theme(); if (t !== 'auto') document.documentElement.setAttribute('data-theme', t);
     window.addEventListener('resize', function () { var p = RG.pages[RG.cur]; if (p && p.live) p.live(); });

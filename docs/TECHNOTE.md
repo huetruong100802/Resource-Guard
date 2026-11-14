@@ -118,9 +118,15 @@ UI chỉ gửi **key 12 hex**, không bao giờ gửi đường dẫn. `rg-clean
 - đi qua plan → approve → `Invoke-RgApply` (có allowlist + revalidate);
 - xoá mục đã xong khỏi danh sách ứng viên để UI không hiện lại.
 
-## 6. Agent đánh giá
+## 6. Agent đánh giá và kết nối agent
 
-- Lệnh: `claude -p --model haiku --effort high`, schema qua `--json-schema`, prompt truyền bằng stdin (bytes).
+- Nhà cung cấp (`scripts/rg-agents.ps1`, `Get-RgProviders` / `Invoke-RgLlmJson`): `claude` | `codex` | `gemini` (CLI, mẫu đối số có `{model}`, `{modelArg}`, `{schemaFile}`, `{outFile}`, `{promptFile}`, `{schemaInline}`; prompt qua stdin) và `ollama` | `openai` (HTTP). Mặc định trong code, `agents.providers.<id>` ghi đè từng khoá hoặc khai nhà cung cấp mới. Lựa chọn của người dùng ở `state\agents.json`; `provider = auto` lấy cái đầu tiên `Test-RgProviderReady`.
+  - Shim npm (`claude.cmd`) không chạy thẳng được với `UseShellExecute = false`: `Resolve-RgCli` ưu tiên `.exe`, đọc đích trong `.cmd` (exe hoặc node + js), không giải được thì đi qua `cmd.exe /d /s /c`.
+  - Cửa chung: `Get-RgFirstJsonObject` → `Test-RgJsonShape` (type/required/enum/items) → bộ lọc an toàn có sẵn. Nhà cung cấp không ép được schema thì schema được nhét vào prompt.
+  - Khoá API: chỉ từ biến môi trường `apiKeyEnv`; `local` suy từ host của `baseUrl`, không tin lời khai. Test kiểm khoá không có trong `logs\`/`state\`.
+- Danh mục agent `agents.catalog`: `processNames`, `cmdRegex` (khi tiến trình là node/bun/python…), `connect` (`mcp` | `hooks` | `wrapper`), `hooks` (bảng chuẩn hoá), `mcpClient` (khớp `clientInfo.name` của MCP). `Get-RgAgentOf` dùng chỉ mục dựng một lần cho mỗi đối tượng config.
+- Agent → Resource Guard: `Invoke-RgAgentTool` dùng chung cho MCP (`rg-mcp.ps1`, JSON-RPC 2.0 mỗi dòng một thông điệp, stdout chỉ có JSON) và HTTP `/api/connect/v1/*`. Năm công cụ chỉ đọc/tư vấn/giữ chỗ; lease mở ở `initialize`, trả khi stdin đóng. Hook: `ConvertTo-RgHookPayload` đổi payload của Gemini/Cursor về dạng Claude Code rồi đi vào `Invoke-RgHookEvent` cũ.
+- Lệnh cũ (Claude Code): `claude -p --model haiku --effort high`, schema qua `--json-schema`, prompt truyền bằng stdin (bytes).
 - Payload **chỉ metadata** (tên, kích thước, tuổi, nhóm). Không gửi nội dung file; đường dẫn user profile thay bằng `~`. Có nút xem trước đúng payload sẽ gửi.
 - Hậu xử lý:
   - bỏ mọi recommendation có key không nằm trong ứng viên (chống bịa);
@@ -177,6 +183,10 @@ API thêm trong đợt đổi UX (mọi POST cần `X-RG-Client`):
 | `POST /api/assistant/{scan,ask,act,dismiss}` | Quét kiểm kê nền · nhờ agent đánh giá cụm (vắng `claude` thì dùng luật) · nén/dọn một cụm `{clusterId, action: compress\|clean}` · ẩn cụm |
 | `GET /api/autonomy` · `POST /api/autonomy/{level,snooze}` | Mức tự chủ theo nhóm + banner + đề nghị nâng/hạ + registry; đặt mức `{group, level[, pin]}` (nâng L3 cần PIN: `pin-required`/`pin-wrong`/`pin-locked`/`pin-not-set`; vượt trần `over-cap`); hoãn banner `{hours}` |
 | `POST /api/panic` | Dừng khẩn cấp: `mode=off` + huỷ job nền; không cần PIN |
+| `GET /api/about` | Phiên bản, thư mục dữ liệu/log/cài đặt, chi phí thực đo của watcher |
+| `GET /api/agents` · `GET /api/agents/connect?id=X[&heavy=1]` | Danh mục agent + phát hiện (đã cài/đang chạy/đang giữ lease) + nhà cung cấp; đoạn cấu hình để người dùng tự dán |
+| `POST /api/agents/evaluator {provider, model}` · `POST /api/agents/test {provider}` | Chọn nhà cung cấp (chỉ id có trong config) · thử bằng câu hỏi không kèm dữ liệu máy |
+| `GET /api/connect/v1/status` · `POST /api/connect/v1/{session,preflight,release}` | Kênh cho agent/script/CI, header `X-RG-Client: agent` (header này chỉ mở được nhóm `/api/connect/`) |
 Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-locked` · `pin-not-set`.
 
 ## 9. Bẫy đã gặp (đọc trước khi sửa code)
@@ -191,7 +201,10 @@ Mã lỗi PIN: `pin-required` (không tính lần sai) · `pin-wrong` · `pin-lo
 | `return , @()` làm hàm trả `Object[]` lồng | `ConvertTo-RgStringList` kết thúc bằng `return $out.ToArray()` |
 | Tên hàm trùng alias PowerShell | Đặt tiền tố `Rg` |
 | Lỗi route làm đứt kết nối im lặng | `catch` log `route-error` và trả JSON 500 |
-| `msedge --screenshot` treo vì SSE | Dùng CDP qua node, hoặc Playwright (`channel: 'msedge'`) + `page.route('**/events', …)` để mock luồng SSE |
+| `msedge --screenshot` treo vì SSE (`--virtual-time-budget`), hoặc chụp ngay lúc `load` khi dữ liệu chưa về | Dùng CDP: `msedge --headless=new --remote-debugging-port`, `Page.navigate`, chờ vài giây rồi `Page.captureScreenshot` (`ClientWebSocket` của .NET là đủ, không cần node) |
+| PS 5.1: `$null` truyền vào tham số .NET kiểu `string` thành `""` (`[IO.File]::Replace($a, $b, $null)` luôn lỗi) | `[NullString]::Value` |
+| `HttpListener.GetContext()` chặn nên `$ps.Stop()` của runspace treo | Gọi `listener.Stop()` từ ngoài (giữ listener trong hashtable đồng bộ) |
+| `HttpListener` với prefix `localhost` từ chối request tới `127.0.0.1` (400); prefix `127.0.0.1` cần URL ACL | Server và client cùng dùng `localhost` |
 | `[math]::Min(500, [math]::Max(0.1, x))` chọn overload `int` → 0.1 thành 0 | Dùng hằng double (`500.0`) |
 | PS 5.1: `ConvertFrom-Json` không trải mảng | `| ForEach-Object { $_ }` (đã áp dụng ở `Read-RgLedger`, `Read-RgArchives`) |
 | Máy chỉ có một ổ nên không kiểm được nhiều ổ thật | Test nhiều ổ dùng danh sách ổ giả (khối "nhiều ổ đĩa" trong `tests/Acceptance.ps1`) |

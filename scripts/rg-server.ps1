@@ -60,10 +60,25 @@ if ($argStop) {
     return
 }
 
+# Mở giao diện. cfg.ui.openAs = 'app' (mặc định): cửa sổ ứng dụng riêng của Edge/Chrome (--app, không thanh địa chỉ, có mục riêng trên taskbar);
+# 'browser' hoặc không tìm thấy Edge/Chrome: tab của trình duyệt mặc định.
+function Open-RgUi([string]$Url) {
+    $mode = 'app'
+    try { $c = Get-RgConfig; if ($c.PSObject.Properties['ui'] -and $c.ui -and $c.ui.openAs) { $mode = [string]$c.ui.openAs } } catch { }
+    if ($mode -eq 'app') {
+        foreach ($n in 'msedge.exe', 'chrome.exe') {
+            $exe = $null
+            foreach ($hive in 'HKCU:', 'HKLM:') { try { $v = (Get-ItemProperty -LiteralPath "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$n" -ErrorAction Stop).'(default)'; if ($v -and (Test-Path -LiteralPath $v)) { $exe = $v; break } } catch { } }
+            if ($exe) { try { Start-Process -FilePath $exe -ArgumentList @("--app=$Url", '--window-size=1280,860'); return } catch { } }
+        }
+    }
+    try { Start-Process $Url } catch { }
+}
+
 $existing = Get-RgLiveInfo
 if ($existing) {
     "Resource Guard đã chạy: $($existing.url)  (pid $($existing.pid))"
-    if (-not $argNoOpen -and -not $argDetach) { Start-Process $existing.url }
+    if (-not $argNoOpen) { Open-RgUi $existing.url }   # `rg start` khi app đã chạy: mở lại giao diện
     return
 }
 
@@ -76,7 +91,7 @@ if ($argDetach) {
     for ($k = 0; $k -lt 40; $k++) {
         Start-Sleep -Milliseconds 250
         $i = Get-RgLiveInfo
-        if ($i) { "Resource Guard chạy ngầm: $($i.url)  (pid $($i.pid)). Dừng: nút ""Thoát Resource Guard"" trên giao diện, hoặc rg stop"; if (-not $argNoOpen) { Start-Process $i.url }; return }
+        if ($i) { "Resource Guard chạy ngầm: $($i.url)  (pid $($i.pid)). Dừng: nút ""Thoát Resource Guard"" trên giao diện, hoặc rg stop"; if (-not $argNoOpen) { Open-RgUi $i.url }; return }
     }
     throw 'Server không lên sau 10 giây; xem logs\rg-*.jsonl.'
 }
@@ -99,7 +114,9 @@ function Test-RgRequestAllowed($Ctx, [int]$Port) {
     $okHosts = @("localhost:$Port", "127.0.0.1:$Port")
     if ($okHosts -notcontains [string]$req.Headers['Host']) { return $false }
     if ($req.HttpMethod -ne 'GET') {
-        if ($req.Headers['X-RG-Client'] -ne 'ui') { return $false }
+        $client = [string]$req.Headers['X-RG-Client']
+        # 'agent': chỉ được gọi nhóm /api/connect/ (lease, preflight, nhả giữ chỗ), không chạm được các route của giao diện.
+        if ($client -ne 'ui' -and -not ($client -eq 'agent' -and $req.Url.AbsolutePath.StartsWith('/api/connect/'))) { return $false }
         $o = [string]$req.Headers['Origin']
         if ($o -and (@("http://localhost:$Port", "http://127.0.0.1:$Port") -notcontains $o)) { return $false }
     }
@@ -110,7 +127,34 @@ function Send-RawJson($Ctx, [string]$Json, [int]$Status = 200) {
     Send-Bytes $Ctx $Status 'application/json; charset=utf-8' ([Text.Encoding]::UTF8.GetBytes($Json))
 }
 
-$script:StaticTypes = @{ '.css' = 'text/css; charset=utf-8'; '.js' = 'application/javascript; charset=utf-8'; '.svg' = 'image/svg+xml' }
+$script:StaticTypes = @{ '.css' = 'text/css; charset=utf-8'; '.js' = 'application/javascript; charset=utf-8'; '.svg' = 'image/svg+xml'; '.html' = 'text/html; charset=utf-8' }
+
+# File tĩnh: ETag = thời điểm ghi + kích thước; trình duyệt hỏi lại bằng If-None-Match và nhận 304 (không tải lại ~300 KB js/css mỗi lần mở trang),
+# nhưng vẫn thấy bản mới ngay sau khi cập nhật app (no-cache = luôn kiểm lại).
+function Send-RgStatic($Ctx, [string]$File) {
+    $fi = New-Object IO.FileInfo($File)
+    if (-not $fi.Exists) { Send-Bytes $Ctx 404 'text/plain' ([Text.Encoding]::UTF8.GetBytes('not found')); return }
+    $tag = '"' + $fi.LastWriteTimeUtc.Ticks.ToString('x') + '-' + $fi.Length.ToString('x') + '"'
+    $r = $Ctx.Response
+    $r.Headers['ETag'] = $tag; $r.Headers['Cache-Control'] = 'no-cache'
+    if ([string]$Ctx.Request.Headers['If-None-Match'] -eq $tag) { $r.StatusCode = 304; $r.ContentLength64 = 0; $r.OutputStream.Close(); return }
+    $bytes = [IO.File]::ReadAllBytes($File)
+    $r.StatusCode = 200; $r.ContentType = $script:StaticTypes[$fi.Extension.ToLowerInvariant()]; $r.ContentLength64 = $bytes.Length
+    $r.OutputStream.Write($bytes, 0, $bytes.Length); $r.OutputStream.Close()
+}
+
+# Bộ nhớ đệm phản hồi cho các GET tính toán nặng (bảng tiến trình, insight, kế hoạch, mức tự chủ, thiết lập). Server đơn luồng nên một route chậm
+# chặn mọi route khác; một trang mở ra gọi 10-14 API. Giá trị lưu là CHUỖI JSON đã dựng. Hết hiệu lực khi: quá TTL, sang tick mới (nếu -PerTick),
+# hoặc có bất kỳ request ghi nào (Clear-RgCache sau mỗi POST).
+$script:RgCache = @{}; $script:RgTickGen = 0
+function Clear-RgCache { $script:RgCache = @{} }
+function Get-RgCachedJson([string]$Key, [double]$TtlSec, [scriptblock]$Make, [switch]$PerTick) {
+    $e = $script:RgCache[$Key]
+    if ($e -and ((Get-Date) - $e.at).TotalSeconds -lt $TtlSec -and (-not $PerTick -or $e.gen -eq $script:RgTickGen)) { return $e.json }
+    $json = ConvertTo-Json -InputObject (& $Make) -Depth 6 -Compress
+    $script:RgCache[$Key] = @{ at = (Get-Date); json = $json; gen = $script:RgTickGen }
+    return $json
+}
 
 function Read-RgBody($Req) {
     if ($Req.ContentLength64 -gt 262144) { throw 'Body quá lớn.' }
@@ -207,7 +251,7 @@ Write-Host "  UI realtime : $url" -ForegroundColor Cyan
 Write-Host "  Cài đặt     : ${url}#settings    (chu kỳ lấy mẫu hiện tại: $((Get-RgSettings).intervalSec)s)"
 Write-Host "  Dừng        : nút ""Thoát Resource Guard"" trên giao diện, hoặc Ctrl+C trong terminal này (đóng cửa sổ này cũng dừng app)"
 Write-Host ''
-if (-not $argNoOpen) { try { Start-Process $url } catch { } }
+if (-not $argNoOpen) { Open-RgUi $url }
 
 # ---------- Vòng chính: nhận request + lấy mẫu theo chu kỳ ----------
 
@@ -243,10 +287,7 @@ try {
                 $req = $ctx.Request
                 $path = $req.Url.AbsolutePath
                 if (-not (Test-RgRequestAllowed $ctx $Port)) { Send-Bytes $ctx 403 'text/plain' ([Text.Encoding]::UTF8.GetBytes('forbidden')) }
-                elseif ($path -eq '/' -or $path -eq '/index.html') {
-                    $f = Join-Path $script:UiDir 'index.html'
-                    Send-Bytes $ctx 200 'text/html; charset=utf-8' ([IO.File]::ReadAllBytes($f))
-                }
+                elseif ($path -eq '/' -or $path -eq '/index.html') { Send-RgStatic $ctx (Join-Path $script:UiDir 'index.html') }
                 elseif ($path -eq '/api/shutdown' -and $req.HttpMethod -eq 'POST') {
                     $busyNames = @()
                     if (Test-RgJobRunning 'cleanup.progress.json') { $busyNames += 'dọn dẹp/khôi phục' }
@@ -281,9 +322,10 @@ try {
                 }
                 elseif ($path -eq '/api/autonomy' -and $req.HttpMethod -eq 'GET') {
                     # Mức tự chủ theo nhóm + banner + đề nghị nâng/hạ theo số liệu + danh sách action (E1-E4). Chỉ đọc.
-                    $apol = Get-RgPolicy
-                    Send-Json $ctx ([ordered]@{ mode = $apol.mode; groups = @(Get-RgAutonomyView $apol); banner = (Get-RgAutonomyBanner); advice = (Get-RgAutonomyAdvice (Get-RgConfig) $apol)
-                            actions = @(Get-RgActionList); demotions = @((Read-RgAutonomyState).demotions); pinConfigured = (Test-RgPinConfigured) })
+                    Send-RawJson $ctx (Get-RgCachedJson 'autonomy' 5 {
+                            $apol = Get-RgPolicy
+                            [ordered]@{ mode = $apol.mode; groups = @(Get-RgAutonomyView $apol); banner = (Get-RgAutonomyBanner); advice = (Get-RgAutonomyAdvice (Get-RgConfig) $apol)
+                                actions = @(Get-RgActionList); demotions = @((Read-RgAutonomyState).demotions); pinConfigured = (Test-RgPinConfigured) } })
                 }
                 elseif ($path -eq '/api/autonomy/level' -and $req.HttpMethod -eq 'POST') {
                     try {   # đặt mức một nhóm; nâng lên L3 cần PIN, hạ thì không
@@ -325,7 +367,7 @@ try {
                     else { Start-RgJob 'rg-scan.ps1' @('-Mode', 'inventory'); Send-Json $ctx ([ordered]@{ ok = $true }) }
                 }
                 elseif ($path -eq '/api/assistant/ask' -and $req.HttpMethod -eq 'POST') {
-                    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Máy này không có lệnh claude; trợ lý vẫn dùng luật tất định.' }) 400 }
+                    if (-not (Get-RgEvaluator)) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Chưa có nhà cung cấp AI nào dùng được (xem Cài đặt > Kết nối agent); trợ lý vẫn dùng luật tất định.' }) 400 }
                     elseif (Test-RgJobRunning 'agent.progress.json') { Send-Json $ctx ([ordered]@{ ok = $true; already = $true }) }
                     else { Start-RgJob 'rg-agent.ps1' @('-Mode', 'clusters'); Send-Json $ctx ([ordered]@{ ok = $true }) }
                 }
@@ -347,7 +389,64 @@ try {
                         Send-Json $ctx ([ordered]@{ ok = $true })
                     } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
                 }
-                elseif ($path -eq '/api/history') { Send-Json $ctx @(Read-RgMetricsTail 480) }
+                elseif ($path -eq '/api/about' -and $req.HttpMethod -eq 'GET') {
+                    # Giới thiệu: phiên bản, nơi lưu dữ liệu, chi phí thực đo của chính Resource Guard (để người dùng tự kiểm "có nặng máy không").
+                    $ah = Initialize-RgHome
+                    Send-Json $ctx ([ordered]@{ version = (Get-RgVersion); home = $ah; logs = (Join-Path $ah 'logs'); install = [string](Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+                            powershell = $PSVersionTable.PSVersion.ToString(); pid = $PID; startedUtc = [string](Read-RgServerInfo).startedUtc; port = $Port
+                            overhead = $(if ($live) { $live.overhead } else { $null }); intervalSec = (Get-RgSettings).intervalSec })
+                }
+                elseif ($path -eq '/api/agents' -and $req.HttpMethod -eq 'GET') {
+                    # Kết nối agent (G3): danh mục + phát hiện (đã cài / đang chạy / đang giữ lease) + nhà cung cấp đánh giá. Chỉ đọc.
+                    Send-RawJson $ctx (Get-RgCachedJson 'agents' 15 { Get-RgAgentsView (Get-RgConfig) @($script:RgTableCache) })
+                }
+                elseif ($path -eq '/api/agents/connect' -and $req.HttpMethod -eq 'GET') {
+                    # Hướng dẫn kết nối một agent: đoạn cấu hình để người dùng tự dán. Resource Guard không tự sửa file cấu hình của agent.
+                    try { Send-Json $ctx (Get-RgConnectGuide ([string]$req.QueryString['id']) ([string](Resolve-Path (Join-Path $PSScriptRoot '..')).Path) -Heavy:([string]$req.QueryString['heavy'] -eq '1')) }
+                    catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 404 }
+                }
+                elseif ($path -eq '/api/agents/evaluator' -and $req.HttpMethod -eq 'POST') {
+                    # Chọn nhà cung cấp AI đánh giá. Chỉ nhận id có sẵn trong config (UI không thêm được địa chỉ mới) + tên model.
+                    try { $b = Read-RgBody $req; [void](Set-RgEvaluatorChoice ([string]$b.provider) ([string]$b.model)); Send-Json $ctx ([ordered]@{ ok = $true; view = (Get-RgAgentsView (Get-RgConfig) @($script:RgTableCache)) }) }
+                    catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
+                elseif ($path -eq '/api/agents/test' -and $req.HttpMethod -eq 'POST') {
+                    # Thử một nhà cung cấp bằng câu hỏi nhỏ, KHÔNG kèm dữ liệu máy. Chạy ngay trong request (tối đa 90 giây) vì người dùng đang chờ kết quả.
+                    try { $b = Read-RgBody $req; Send-Json $ctx (Test-RgProviderCall ([string]$b.provider)) }
+                    catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
+                elseif ($path -eq '/api/connect/v1/status' -and $req.HttpMethod -eq 'GET') {
+                    # Kênh HTTP cho agent/script/CI (không cần MCP): trạng thái máy. Dùng số đo của tick gần nhất nên trả lời tức thì.
+                    if (-not $live) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Chưa có số liệu, thử lại sau vài giây.' }) 503 }
+                    else { Send-Json $ctx ([ordered]@{ state = $live.state; availRamGB = $live.availRamGB; totalRamGB = $live.totalRamGB; commitPct = $live.commitPct; drives = @($live.drives); reasons = @($live.reasons); ts = $live.ts; version = (Get-RgVersion) }) }
+                }
+                elseif ($path -match '^/api/connect/v1/(session|preflight|release)$' -and $req.HttpMethod -eq 'POST') {
+                    # { sessionId, agent, [pid], ... }: lease phiên, preflight có giữ chỗ, nhả giữ chỗ. Cùng hàm với MCP (Invoke-RgAgentTool); không có thao tác xoá/kết thúc nào ở đây.
+                    $verb = $Matches[1]
+                    try {
+                        $b = Read-RgBody $req
+                        $csid = [string]$b.sessionId; $cag = ([string]$b.agent).ToLowerInvariant()
+                        if ($csid -notmatch '^[A-Za-z0-9._:-]{1,80}$') { throw 'sessionId cần 1-80 ký tự chữ, số, . _ : -' }
+                        if ($cag -notmatch '^[a-z0-9._-]{0,40}$') { throw 'agent không hợp lệ.' }
+                        if (-not $cag) { $cag = 'unknown' }
+                        $cpid = 0; [void][int]::TryParse([string]$b.pid, [ref]$cpid)
+                        $sess = @{ sessionId = $csid; agent = $cag; ownerPid = $cpid; source = 'http' }
+                        if ($verb -eq 'session') {
+                            switch ([string]$b.action) {
+                                'start' { $l = New-RgLease -SessionId $csid -Agent $cag -OwnerPid $cpid -Cwd '' -Source 'http'; Send-Json $ctx ([ordered]@{ ok = $true; token = $l.token }) }
+                                'heartbeat' { $hb = Update-RgLeaseHeartbeat -SessionId $csid; Send-Json $ctx ([ordered]@{ ok = [bool]$hb.ok; reason = [string]$hb.reason }) }
+                                'end' { $rl = Remove-RgLease -SessionId $csid; Send-Json $ctx ([ordered]@{ ok = [bool]$rl.ok; reason = [string]$rl.reason }) }
+                                default { throw "action chỉ nhận 'start', 'heartbeat' hoặc 'end'." }
+                            }
+                        }
+                        else {
+                            # Dùng bảng tiến trình server đang giữ (làm mới mỗi 30 giây) thay vì truy vấn lại: server đơn luồng, không được chặn lâu.
+                            $csp = $(if ($script:RgTableCache) { { [pscustomobject]@{ snapshot = (Get-RgSnapshot -SkipCpu -Fast); table = @($script:RgTableCache) } } } else { $null })
+                            Send-Json $ctx (Invoke-RgAgentTool -Name $verb -ToolArgs $b -Session $sess -SnapshotProvider $csp)
+                        }
+                    } catch { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 }
+                }
+                elseif ($path -eq '/api/history') { Send-RawJson $ctx (Read-RgMetricsTailJson 480) }
                 elseif ($path -eq '/api/events') {
                     $mx = 30; $mq = 0
                     if ([int]::TryParse([string]$req.QueryString['max'], [ref]$mq) -and $mq -ge 1) { $mx = [math]::Min(200, $mq) }
@@ -355,7 +454,7 @@ try {
                 }
                 elseif ($path -eq '/api/insight' -and $req.HttpMethod -eq 'GET') {
                     if (-not $live) { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Chưa có số liệu, thử lại sau vài giây.' }) 503 }
-                    else { Send-Json $ctx (Get-RgInsight $live @($script:RgTableCache)) }
+                    else { Send-RawJson $ctx (Get-RgCachedJson 'insight' 20 { Get-RgInsight $live @($script:RgTableCache) } -PerTick) }
                 }
                 elseif ($path -eq '/api/drive/history' -and $req.HttpMethod -eq 'GET') {
                     # Dung lượng trống của một ổ, mỗi giờ một điểm (cache 10 phút), để vẽ biểu đồ nhiều ngày. ts là giờ địa phương như metrics.
@@ -371,10 +470,11 @@ try {
                     }
                 }
                 elseif ($path -eq '/api/advice' -and $req.HttpMethod -eq 'GET') {
-                    $dr = if ($live -and $live.drives) { @($live.drives) } else { $null }
-                    $ramIn = $(if ($live -and $null -ne $live.availRamGB) { [pscustomobject]@{ availGB = [double]$live.availRamGB; totalGB = [double]$live.totalRamGB } } else { $null })
-                    $wlIn = @(); try { $wlIn = @(Get-RgLiveWorkloads) } catch { }
-                    Send-Json $ctx (Get-RgAdvice -Drives $dr -Ram $ramIn -Workloads $wlIn)
+                    Send-RawJson $ctx (Get-RgCachedJson 'advice' 20 {
+                            $dr = if ($live -and $live.drives) { @($live.drives) } else { $null }
+                            $ramIn = $(if ($live -and $null -ne $live.availRamGB) { [pscustomobject]@{ availGB = [double]$live.availRamGB; totalGB = [double]$live.totalRamGB } } else { $null })
+                            $wlIn = @(); try { $wlIn = @(Get-RgLiveWorkloads) } catch { }
+                            Get-RgAdvice -Drives $dr -Ram $ramIn -Workloads $wlIn } -PerTick)
                 }
                 elseif ($path -eq '/api/process/history' -and $req.HttpMethod -eq 'GET') {
                     $pn = ([string]$req.QueryString['name']).ToLowerInvariant()
@@ -384,7 +484,8 @@ try {
                     else { Send-Json $ctx (Get-RgProcHistory $pn $pm) }
                 }
                 elseif ($path -eq '/api/settings' -and $req.HttpMethod -eq 'GET') {
-                    Send-Json $ctx ([ordered]@{ intervalSec = (Get-RgSettings).intervalSec; minSec = $script:MinIntervalSec; maxSec = $script:MaxIntervalSec; defaultSec = $script:DefaultIntervalSec; thresholds = (Get-RgThresholds); mode = (Get-RgPolicy).mode; agentAvailable = [bool](Get-Command claude -ErrorAction SilentlyContinue) })
+                    $sev = $null; try { $sev = Get-RgEvaluator } catch { }
+                    Send-Json $ctx ([ordered]@{ intervalSec = (Get-RgSettings).intervalSec; minSec = $script:MinIntervalSec; maxSec = $script:MaxIntervalSec; defaultSec = $script:DefaultIntervalSec; thresholds = (Get-RgThresholds); mode = (Get-RgPolicy).mode; agentAvailable = [bool]$sev; evaluator = $(if ($sev) { [ordered]@{ id = $sev.id; label = $sev.label; local = [bool]$sev.local; model = [string]$sev.model } } else { $null }); version = (Get-RgVersion) })
                 }
                 elseif ($path -eq '/api/settings' -and $req.HttpMethod -eq 'POST') {
                     $body = (New-Object IO.StreamReader($req.InputStream, [Text.Encoding]::UTF8)).ReadToEnd()
@@ -429,11 +530,10 @@ try {
                     } catch { if (-not $replied) { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 } }
                 }
                 elseif ($path -match '^/static/([a-z0-9._-]+\.(css|js|svg))$' -and $req.HttpMethod -eq 'GET') {
-                    $f = Join-Path $script:UiDir $Matches[1]
-                    if (Test-Path -LiteralPath $f) { Send-Bytes $ctx 200 $script:StaticTypes[[IO.Path]::GetExtension($f)] ([IO.File]::ReadAllBytes($f)) }
-                    else { Send-Bytes $ctx 404 'text/plain' ([Text.Encoding]::UTF8.GetBytes('not found')) }
+                    Send-RgStatic $ctx (Join-Path $script:UiDir $Matches[1])
                 }
                 elseif ($path -eq '/api/processes') {
+                  Send-RawJson $ctx (Get-RgCachedJson 'processes' 20 {
                     $pol = Get-RgPolicy
                     $pctx = New-RgProcContext -Policy $pol
                     $tbl = @{}; foreach ($t in @($script:RgTableCache)) { if ($t) { $tbl[[int]$t.Pid] = $t } }
@@ -461,7 +561,7 @@ try {
                                 canEnd = [bool]($ev -and $ev.ok); endNeedsPin = [bool]($ev -and $ev.needsPin); whyNotEnd = $(if ($ev) { [string]$ev.reason } else { 'Chưa đọc được thời điểm khởi động; thử lại sau vài giây.' }) }
                         })
                     $wl = @(Get-RgWorkloads $rows)
-                    Send-Json $ctx ([ordered]@{ ts = $(if ($live) { $live.ts } else { $null }); logical = (Get-RgCpuInfo).logical; procs = $rows; workloads = $wl })
+                    [ordered]@{ ts = $(if ($live) { $live.ts } else { $null }); logical = (Get-RgCpuInfo).logical; procs = $rows; workloads = $wl } } -PerTick)
                 }
                 elseif ($path -eq '/api/process/explain' -and $req.HttpMethod -eq 'GET') {
                     # Giải thích tiến trình (D4): là gì, từ đâu, đang phục vụ việc gì. Chỉ nhận pid (+ start); chỉ đọc, không tốn AI.
@@ -681,7 +781,7 @@ try {
                     } catch { if (-not $replied) { Send-Json $ctx ([ordered]@{ ok = $false; error = [string]$_.Exception.Message }) 400 } }
                 }
                 elseif ($path -eq '/api/setup' -and $req.HttpMethod -eq 'GET') {
-                    Send-Json $ctx (Get-RgSetupInfo)
+                    Send-RawJson $ctx (Get-RgCachedJson 'setup' 60 { Get-RgSetupInfo })   # dò Scheduled Task tốn 0,7-2 giây
                 }
                 elseif ($path -eq '/api/setup' -and $req.HttpMethod -eq 'POST') {
                     try {   # đặt PIN KHÔNG qua đây (chỉ console); chỉ autostart / shortcut / firstRunDone
@@ -747,12 +847,16 @@ try {
                 Write-RgLog 'route-error' ([ordered]@{ path = [string]$path; error = [string]$_ })
                 try { Send-Json $ctx ([ordered]@{ ok = $false; error = 'Lỗi nội bộ: ' + [string]$_.Exception.Message }) 500 } catch { try { $ctx.Response.Abort() } catch { } }
             }
+            try { if ($ctx.Request.HttpMethod -ne 'GET') { Clear-RgCache } } catch { }   # request ghi: mọi phản hồi đã nhớ có thể đã cũ
+            # Còn request đang chờ (một trang mở ra gọi 10-14 API liền nhau): phục vụ hết loạt đó trước rồi mới lấy mẫu, miễn là mẫu chưa trễ quá 2 giây.
+            if ($accept.IsCompleted -and ((Get-Date) - $nextSample).TotalSeconds -lt 2) { continue }
         }
 
         $now = Get-Date
         if ($now -ge $nextSample) {
             try {
                 $rec = Invoke-RgWatchTick -NoToast:$NoToast
+                $script:RgTickGen++
                 $iv = (Get-RgSettings).intervalSec
                 $live = [pscustomobject]@{
                     ts = $rec.ts; state = $rec.state; rawState = $rec.rawState; availRamGB = $rec.availRamGB; totalRamGB = $rec.totalRamGB

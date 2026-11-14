@@ -333,7 +333,8 @@ function Get-RgAssistantReport {
     param($Cfg = $null)
     if (-not $Cfg) { $Cfg = Get-RgConfig }
     $p = Get-RgStatePath 'clusters.json'
-    $agent = [ordered]@{ available = [bool](Get-Command claude -ErrorAction SilentlyContinue) }
+    $evp = $null; try { $evp = Get-RgEvaluator $Cfg } catch { }
+    $agent = [ordered]@{ available = [bool]$evp; provider = $(if ($evp) { [string]$evp.id } else { $null }); label = $(if ($evp) { [string]$evp.label } else { $null }); local = $(if ($evp) { [bool]$evp.local } else { $false }) }
     if (-not (Test-Path -LiteralPath $p)) { return [pscustomobject][ordered]@{ ok = $true; scanned = $false; agent = $agent; clusters = @(); summary = [ordered]@{} } }
     $raw = ConvertFrom-Json (Read-RgFileShared $p)
     $pol = $null; $canProt = [bool](Get-Command Test-RgPathProtected -ErrorAction SilentlyContinue)

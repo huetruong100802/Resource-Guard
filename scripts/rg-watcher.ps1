@@ -16,6 +16,7 @@ $script:ToastCooldownMin = 10    # không toast lặp lại cùng một trạng 
 $script:LowerHoldSec = 45        # hạ trạng thái chỉ khi thấp hơn liên tục ngần này giây (hysteresis, tính theo thời gian)
 $script:KeepMetricsDays = 14
 $script:TableRefreshSec = 30     # bảng process (tốn nhất) làm mới tối đa mỗi ngần này giây
+$script:StatusHtmlSec = 60; $script:RgStatusHtmlAt = [datetime]::MinValue
 $script:DefaultIntervalSec = 15; $script:MinIntervalSec = 2; $script:MaxIntervalSec = 300
 $script:RgTableCache = $null; $script:RgTableAt = [datetime]::MinValue; $script:RgLastReasons = @()
 $script:Palette = @{ Normal = '#2e9e5b'; Caution = '#d9a400'; Restricted = '#e07b00'; Critical = '#d6342c' }
@@ -178,6 +179,20 @@ function Remove-RgOldMetrics {
     $limit = (Get-Date).AddDays(-$script:KeepMetricsDays)
     Get-ChildItem -LiteralPath $dir -Filter 'metrics-*.jsonl' -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt $limit } | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+# Như Read-RgMetricsTail nhưng trả thẳng MẢNG JSON dạng chuỗi (cũ -> mới), không parse từng dòng: /api/history chỉ chuyển tiếp cho trình duyệt.
+# Parse 480 dòng bằng ConvertFrom-Json của PS 5.1 rồi dựng lại tốn 400-600 ms cho mỗi lần mở trang; ghép chuỗi tốn vài ms.
+function Read-RgMetricsTailJson([int]$Max = 480) {
+    $dir = Join-Path (Initialize-RgHome) 'state'
+    $files = @(Get-ChildItem -LiteralPath $dir -Filter 'metrics-*.jsonl' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 3)
+    $parts = New-Object System.Collections.ArrayList; $have = 0
+    foreach ($f in $files) {   # file mới nhất trước; mỗi file lấy đuôi còn thiếu rồi chèn lên đầu để giữ thứ tự thời gian
+        $chunk = @(Get-Content -LiteralPath $f.FullName -Tail ($Max - $have) -Encoding UTF8 | Where-Object { $_.Length -gt 2 -and $_[0] -eq '{' -and $_[$_.Length - 1] -eq '}' })
+        if ($chunk.Count) { $parts.Insert(0, ($chunk -join ',')); $have += $chunk.Count }
+        if ($have -ge $Max) { break }
+    }
+    return ('[' + (@($parts) -join ',') + ']')
 }
 
 function Read-RgMetricsTail([int]$Max = 240) {
@@ -445,7 +460,7 @@ function Invoke-RgWatchTick {
     $tickSw = [Diagnostics.Stopwatch]::StartNew()
     if ($null -eq $script:RgCpuBase) { $pp = [Diagnostics.Process]::GetCurrentProcess(); try { $script:RgCpuBase = $pp.TotalProcessorTime.TotalSeconds; $script:RgWallBase = Get-Date } finally { $pp.Dispose() } }
     $home_ = Initialize-RgHome
-    $snap = Get-RgSnapshot -SkipCpu
+    $snap = Get-RgSnapshot -SkipCpu -Fast
     # Bảng process là phần tốn nhất: dùng cache, chỉ làm mới mỗi TableRefreshSec giây.
     if ($null -eq $script:RgTableCache -or ((Get-Date) - $script:RgTableAt).TotalSeconds -ge $script:TableRefreshSec) {
         $script:RgTableCache = Get-RgProcessTable
@@ -512,7 +527,11 @@ function Invoke-RgWatchTick {
         lastToastState = [string]$st.lastToastState; lastToastUtc = [string]$st.lastToastUtc; lastOrphanKey = $key
     }
     Write-RgWatcherState $newState
-    try { Write-RgStatusHtml $rec $budget $eff.state } catch { Write-RgLog 'status-html-error' ([string]$_) }
+    # status.html là bản dự phòng tự làm mới 30 giây một lần: dựng lại tối đa mỗi StatusHtmlSec (đọc 240 dòng metrics, ~80 ms), hoặc ngay khi trạng thái đổi.
+    if ($changed -or ((Get-Date) - $script:RgStatusHtmlAt).TotalSeconds -ge $script:StatusHtmlSec) {
+        $script:RgStatusHtmlAt = Get-Date
+        try { Write-RgStatusHtml $rec $budget $eff.state } catch { Write-RgLog 'status-html-error' ([string]$_) }
+    }
     Update-RgTickStats $tickSw.Elapsed.TotalMilliseconds
     return $rec
 }

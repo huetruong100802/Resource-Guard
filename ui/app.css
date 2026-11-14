@@ -499,3 +499,12 @@ svg.tm text.hd{font-weight:600;fill:var(--fg)}
 .au-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
 .au-name{flex:1 1 260px;min-width:0}
 .au-adv{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 10px;margin:6px 0;border:1px dashed var(--accent);border-radius:10px}.au-adv>span{flex:1 1 240px}
+/* Cài đặt: thẻ không kéo giãn theo thẻ cao nhất cùng hàng; Kết nối agent; Giới thiệu */
+.set-grid{align-items:start}
+.ag-tbl td,.ag-tbl th{padding:7px 10px;vertical-align:middle}.ag-tbl th{text-align:left;font-size:12px;color:var(--mut);font-weight:600}
+.ag-tbl tr+tr td{border-top:1px solid var(--line)}
+.prov-list{list-style:none;padding:0;margin:10px 0 4px}.prov-list li{display:flex;align-items:center;gap:7px;padding:3px 0;flex-wrap:wrap}
+.prov-list .dot{background:var(--line)}.prov-list .dot.on{background:var(--normal)}
+.cn-step{margin:14px 0}.cn-h{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.about-tbl th{text-align:left;color:var(--mut);font-weight:500;padding:4px 12px 4px 0;white-space:nowrap;vertical-align:top}.about-tbl td{padding:4px 0;word-break:break-all}
+.side-foot .ver{opacity:.75;font-size:11px}

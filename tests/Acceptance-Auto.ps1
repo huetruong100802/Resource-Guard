@@ -315,7 +315,7 @@ try {
     $polP = Get-RgPolicy; $polP.protectProcesses = @('myprotected')
     $pctxP = New-RgProcContext -Policy $polP
     Assert ((EV 5000 'myprotected' 'dev' '' $sess 'devserver' $pctxP).reason -match 'vùng bảo vệ') 'end: tiến trình người dùng đặt vào vùng bảo vệ -> từ chối dù lớp hợp lệ'
-    $cfgBr = Get-RgConfig; $cfgBr.kill.allowedRoles = @('build', 'browser')
+    $cfgBr = Get-RgConfig -Fresh; $cfgBr.kill.allowedRoles = @('build', 'browser')
     $ctxBr = New-RgProcContext -Cfg $cfgBr
     Assert ((EV 5000 'msedge' 'other' '' $sess 'browser' $ctxBr).ok -eq $true -and (EV 5000 'node' 'dev' '' $sess 'devserver' $ctxBr).ok -eq $false) 'end: kill.allowedRoles trong config đổi được allowlist'
     # ledger: chủ còn sống -> cần PIN; chủ chết -> một cú bấm; start lệch -> không tính là ledger
@@ -695,7 +695,7 @@ try {
     $itHeld = New-RgItem -Kind 'temp-entry' -Action 'delete' -Level 1 -Path $dHeld -SizeBytes 3KB -AgeDays 20 -Reason 'c2'
     $blk = Get-RgHeldBlocker $itHeld $cfgNow
     Assert ($blk -match '^in use by .* \(pid \d+\); skipped$') 'Get-RgHeldBlocker: lý do "in use by <tên> (pid N); skipped"'
-    $cfgOff = Get-RgConfig; $cfgOff.cleanup.heldProbe = $false
+    $cfgOff = Get-RgConfig -Fresh; $cfgOff.cleanup.heldProbe = $false
     Assert ($null -eq (Get-RgHeldBlocker $itHeld $cfgOff)) 'cleanup.heldProbe = false -> không kiểm (tắt được bằng config)'
     Assert ($null -eq (Get-RgHeldBlocker (New-RgItem -Kind 'process' -Action 'kill' -Level 1 -ProcId 1 -Name 'x') $cfgNow)) 'mục kill/report không bị kiểm file giữ'
 
@@ -1022,7 +1022,7 @@ try {
 
     # =====================================================================
     Write-Host "`n[E4] Nâng/hạ mức theo số liệu, dừng khẩn cấp"
-    $cfgAdv = Get-RgConfig
+    $cfgAdv = Get-RgConfig -Fresh   # bản riêng để sửa: Get-RgConfig thường trả đối tượng dùng chung, chỉ đọc
     $cfgAdv.autonomy.promoteMinRuns = 3; $cfgAdv.autonomy.promoteMinDays = 0; $cfgAdv.autonomy.demoteRestoreRate = 0.0001; $cfgAdv.autonomy.demoteMinArchives = 2; $cfgAdv.autonomy.demoteFailures = 3
     SetAuto 'dry-run' @{ 'dev-cache' = 'L2' }
     1..2 | ForEach-Object { Write-RgLog 'auto-run' ([ordered]@{ mode = 'dry-run'; items = 1; freedBytes = 0; trigger = 'manual'; byKind = [ordered]@{ 'cache-aged' = [ordered]@{ items = 2; bytes = 1GB } } }) }

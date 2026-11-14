@@ -6,6 +6,17 @@ $script:RgScriptsDir = $PSScriptRoot
 $script:RgStates = @('Normal', 'Caution', 'Restricted', 'Critical')
 . (Join-Path $PSScriptRoot 'rg-extra.ps1')   # repo cũ / mục lớn / app + nén zip tại chỗ + giải nén
 . (Join-Path $PSScriptRoot 'rg-assistant.ps1')   # trợ lý: kiểm kê metadata, cụm tất định, verdict, báo cáo (D1-D3, D5)
+. (Join-Path $PSScriptRoot 'rg-agents.ps1')      # kết nối agent: danh mục, nhà cung cấp LLM, hook nhiều agent, công cụ MCP/HTTP
+
+# Phiên bản sản phẩm: file VERSION ở gốc repo (một dòng, vd. 0.9.0). Thiếu file thì '0.0.0-dev'.
+$script:RgVersion = $null
+function Get-RgVersion {
+    if (-not $script:RgVersion) {
+        $script:RgVersion = '0.0.0-dev'
+        try { $v = ([IO.File]::ReadAllText((Join-Path $script:RgScriptsDir '..\VERSION'))).Trim(); if ($v -match '^\d+\.\d+\.\d+[\w.+-]*$') { $script:RgVersion = $v } } catch { }
+    }
+    return $script:RgVersion
+}
 
 # ---------- Cấu hình / thư mục state ----------
 
@@ -14,9 +25,14 @@ function Get-RgHome {
     return (Join-Path $HOME '.agent-resource')
 }
 
+$script:RgHomeReady = ''
 function Initialize-RgHome {
     $h = Get-RgHome
-    foreach ($d in 'state', 'logs', 'plans') { [void](New-Item -ItemType Directory -Force -Path (Join-Path $h $d)) }
+    # Gọi hàng chục lần mỗi tick: chỉ tạo thư mục một lần cho mỗi giá trị home (test đổi AGENT_RESOURCE_HOME giữa chừng vẫn đúng); thư mục bị xoá thì tạo lại.
+    if ($script:RgHomeReady -ne $h -or -not [IO.Directory]::Exists((Join-Path $h 'state'))) {
+        foreach ($d in 'state', 'logs', 'plans') { [void](New-Item -ItemType Directory -Force -Path (Join-Path $h $d)) }
+        $script:RgHomeReady = $h
+    }
     return $h
 }
 
@@ -50,12 +66,29 @@ function Get-RgUserConfigRaw {
     return (Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
 
+# Dấu vết của một file cấu hình: đường dẫn + thời điểm ghi + kích thước ('' nếu không có). Đổi một trong ba là cache hết hiệu lực.
+function Get-RgFileStamp([string]$Path) {
+    try { $fi = New-Object IO.FileInfo($Path); if ($fi.Exists) { return ('{0}|{1}|{2}' -f $Path, $fi.LastWriteTimeUtc.Ticks, $fi.Length) } } catch { }
+    return ($Path + '|')
+}
+
+# Get-RgConfig được gọi ~10 lần mỗi tick và ở hầu hết request: cache theo dấu vết của config.default.json + config.json.
+# HỢP ĐỒNG: đối tượng trả về dùng chung giữa các lần gọi, CHỈ ĐỌC. Muốn đổi cấu hình thì ghi config.json (cache tự hết hiệu lực);
+# cần một bản riêng để sửa thì gọi Get-RgConfig -Fresh.
+$script:RgCfgKey = $null; $script:RgCfgObj = $null
 function Get-RgConfig {
-    $def = Get-Content -LiteralPath (Get-RgDefaultConfigPath) -Raw -Encoding UTF8 | ConvertFrom-Json
-    $user = $null
-    try { $user = Get-RgUserConfigRaw } catch { Write-RgLog 'config-error' ([string]$_.Exception.Message) }   # config hỏng: dùng default, không làm sập server
-    if ($null -eq $user) { return $def }
-    return (Merge-RgConfigObject $def $user)
+    param([switch]$Fresh)
+    $dp = Get-RgDefaultConfigPath; $up = Join-Path (Get-RgHome) 'config.json'
+    $key = (Get-RgFileStamp $dp) + '*' + (Get-RgFileStamp $up)
+    if ($Fresh -or $script:RgCfgKey -ne $key -or $null -eq $script:RgCfgObj) {
+        $def = Get-Content -LiteralPath $dp -Raw -Encoding UTF8 | ConvertFrom-Json
+        $user = $null
+        try { $user = Get-RgUserConfigRaw } catch { Write-RgLog 'config-error' ([string]$_.Exception.Message) }   # config hỏng: dùng default, không làm sập server
+        $merged = if ($null -eq $user) { $def } else { Merge-RgConfigObject $def $user }
+        if ($Fresh) { return $merged }
+        $script:RgCfgObj = $merged; $script:RgCfgKey = $key
+    }
+    return $script:RgCfgObj
 }
 
 # ---------- Sức khoẻ ghi file (A1): lỗi ghi KHÔNG được bị nuốt ----------
@@ -111,7 +144,9 @@ function Write-RgFileAtomic([string]$Path, [string]$Text) {
         $tmp = "$Path.$PID.tmp"
         try {
             [IO.File]::WriteAllText($tmp, $Text, $enc)
-            if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, $null) } else { [IO.File]::Move($tmp, $Path) }
+            # [NullString]::Value, KHÔNG phải $null: PS 5.1 đổi $null thành "" cho tham số string nên Replace luôn ném "path is not of a legal form"
+            # (trước đây mỗi lần ghi đè tốn ~600 ms thử lại rồi rơi về ghi thẳng, không còn nguyên tử).
+            if ([IO.File]::Exists($Path)) { [IO.File]::Replace($tmp, $Path, [NullString]::Value) } else { [IO.File]::Move($tmp, $Path) }
             return
         } catch { $lastErr = $_.Exception.Message; Start-Sleep -Milliseconds (40 * ($i + 1)) }
     }
@@ -291,6 +326,13 @@ function Read-RgFileShared([string]$Path) {   # đọc file cho phép bên kia �
     try { return (New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)).ReadToEnd() } finally { $fs.Dispose() }
 }
 
+# Toàn bộ stdin dưới dạng chuỗi UTF-8, bỏ BOM. Dùng cho mọi điểm vào nhận JSON từ tiến trình khác (hook, MCP).
+function Read-RgStdinUtf8 {
+    $in = [Console]::OpenStandardInput(); $ms = New-Object IO.MemoryStream
+    try { $in.CopyTo($ms) } finally { $in.Dispose() }
+    return (New-Object Text.UTF8Encoding($false)).GetString($ms.ToArray()).TrimStart([char]0xFEFF)
+}
+
 function Get-RgSha256([string]$Text) {
     $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
     $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
@@ -299,10 +341,37 @@ function Get-RgSha256([string]$Text) {
 
 # ---------- Snapshot RAM / CPU / disk ----------
 
+# RAM + commit bằng một lời gọi Win32 (GetPerformanceInfo, < 1 ms) thay cho CIM Win32_OperatingSystem (~70 ms mỗi tick).
+# Trả cùng đơn vị với CIM (KB) để phần còn lại không đổi; $null nếu không gọi được (người gọi rơi về CIM).
+$script:RgMemApi = $null
+function Get-RgMemoryFast {
+    try {
+        if ($null -eq $script:RgMemApi) {
+            $script:RgMemApi = $false
+            if (-not ('RgNative.Mem' -as [type])) {
+                Add-Type -Namespace RgNative -Name Mem -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct PI { public int cb; public UIntPtr CommitTotal, CommitLimit, CommitPeak, PhysicalTotal, PhysicalAvailable, SystemCache, KernelTotal, KernelPaged, KernelNonpaged, PageSize; public int HandleCount, ProcessCount, ThreadCount; }
+[DllImport("psapi.dll", SetLastError = true)] public static extern bool GetPerformanceInfo(out PI pi, int cb);
+public static double[] Read() { PI p; int n = Marshal.SizeOf(typeof(PI)); if (!GetPerformanceInfo(out p, n)) return null; double kb = (double)p.PageSize.ToUInt64() / 1024.0;
+  return new double[] { p.PhysicalAvailable.ToUInt64() * kb, p.PhysicalTotal.ToUInt64() * kb, p.CommitTotal.ToUInt64() * kb, p.CommitLimit.ToUInt64() * kb }; }
+'@
+            }
+            $script:RgMemApi = $true
+        }
+        if (-not $script:RgMemApi) { return $null }
+        $r = [RgNative.Mem]::Read()
+        if ($null -eq $r -or $r[1] -le 0) { return $null }
+        return [pscustomobject]@{ FreePhysicalMemory = $r[0]; TotalVisibleMemorySize = $r[1]; TotalVirtualMemorySize = $r[3]; FreeVirtualMemory = [math]::Max(0.0, $r[3] - $r[2]) }
+    } catch { $script:RgMemApi = $false; return $null }
+}
+
 function Get-RgSnapshot {
-    param([switch]$SkipCpu)   # watcher đã có CPU từng nhân nên bỏ Win32_Processor (chậm)
+    # -SkipCpu: watcher đã có CPU từng nhân nên bỏ Win32_Processor (chậm). -Fast: đường tick, đọc RAM bằng Win32 và bỏ danh sách pagefile (không ai dùng ở tick).
+    param([switch]$SkipCpu, [switch]$Fast)
     $cfg = Get-RgConfig
-    $os = Get-CimInstance Win32_OperatingSystem
+    $os = $null
+    if ($Fast) { $os = Get-RgMemoryFast }
+    if ($null -eq $os) { $os = Get-CimInstance Win32_OperatingSystem }
     $totalVirt = [double]$os.TotalVirtualMemorySize
     $freeVirt = [double]$os.FreeVirtualMemory
     $commitPct = 0
@@ -316,11 +385,11 @@ function Get-RgSnapshot {
     else { try { $diskFree = [math]::Round((New-Object IO.DriveInfo($drive)).AvailableFreeSpace / 1GB, 2) } catch { } }
 
     $pageFiles = @()
-    try {
+    if (-not $Fast) { try {
         $pageFiles = @(Get-CimInstance Win32_PageFileUsage | ForEach-Object {
                 [pscustomobject]@{ name = $_.Name; allocatedMB = $_.AllocatedBaseSize; usedMB = $_.CurrentUsage }
             })
-    } catch { }
+    } catch { } }
 
     $cpu = $null
     if (-not $SkipCpu) { try { $cpu = [math]::Round((Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average, 0) } catch { } }
@@ -440,9 +509,15 @@ function Get-RgGroup([string]$Name, [string]$Cmd, $Cfg) {
     if ($Cmd -and $Cfg.agentCmdRegex -and (@('node', 'bun', 'python') -contains $Name) -and ($Cmd -match $Cfg.agentCmdRegex)) {
         return 'agent'
     }
+    # Danh mục agent (cfg.agents.catalog): agent chạy trên node/bun/python nhận qua dòng lệnh (phải xét TRƯỚC nhóm 'dev' vì 'node' thuộc dev);
+    # CLI agent có tên riêng (gemini, aider, opencode...) -> 'agent'; runtime LLM cục bộ (ollama) -> 'infra' (xét sau các nhóm khai tay).
+    $ai = Get-RgAgentIndex $Cfg
+    if ($Cmd -and ($script:RgAgentHostNames -contains $Name)) { foreach ($r in $ai.regex) { if ($r.regex.IsMatch($Cmd)) { return 'agent' } } }
     foreach ($g in @('agent', 'infra', 'test', 'build', 'dev')) {
         foreach ($pat in @($Cfg.groups.$g)) { if ($Name -like $pat) { return $g } }
     }
+    if ($ai.cli -contains $Name) { return 'agent' }
+    if ($ai.runtime -contains $Name) { return 'infra' }
     return 'other'
 }
 
@@ -733,6 +808,7 @@ function Get-RgLeaseCfg($Cfg) {
             if ($p -and $p.Value) { $o.agentProcessNames = @($p.Value | ForEach-Object { ([string]$_).ToLowerInvariant() }) }
         }
     } catch { }
+    try { $o.agentProcessNames = @(@($o.agentProcessNames) + @((Get-RgAgentIndex $Cfg).cli) | Select-Object -Unique) } catch { }   # mọi CLI agent trong danh mục đều có thể là chủ phiên
     if ($o.ttlMin -le 0) { $o.ttlMin = 180.0 }
     if ($o.reserveTtlMin -le 0) { $o.reserveTtlMin = 10.0 }
     if ($o.subagentTtlMin -le 0) { $o.subagentTtlMin = 30.0 }

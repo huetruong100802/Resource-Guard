@@ -294,6 +294,16 @@
   };
 
   /* ---------- Chính sách ---------- */
+  /* Bản nháp có khác chính sách đã lưu không. So sánh sau khi chuẩn hoá: `drives` rỗng có thể là {}, [] hoặc null tuỳ nơi tạo
+     (server trả mảng rỗng, màn hình đổi thành object) nên so chuỗi thô sẽ báo "đã đổi" dù người dùng chưa sửa gì. */
+  function normPol(p) {
+    var c = RG.clone(p || {});
+    if (!c.drives || Array.isArray(c.drives) || !Object.keys(c.drives).length) c.drives = {};
+    if (!c.autonomy || Array.isArray(c.autonomy)) c.autonomy = {};
+    delete c.updatedUtc;
+    return JSON.stringify(c);
+  }
+  RG.policyDirty = function () { return !!(S.draft && S.policy) && normPol(S.draft) !== normPol(S.policy); };
   RG.loadPolicy = function () {
     return RG.api('/api/policy').then(function (j) {
       S.policy = j.policy; S.pinConfigured = j.pinConfigured; S.kinds = j.kinds;

@@ -1216,6 +1216,15 @@ if (Test-Path -LiteralPath $autoTest) {
     if ($autoOut -match 'AUTO-RESULT pass=(\d+) fail=(\d+)') { $script:pass += [int]$Matches[1]; $script:fail += [int]$Matches[2] }
     else { $script:fail++; Write-Host '  FAIL  Acceptance-Auto.ps1 không trả kết quả' -ForegroundColor Red }
 }
+# Bộ test kết nối agent (plan-product G3): process riêng, sandbox riêng.
+$agTest = Join-Path $PSScriptRoot 'Acceptance-Agents.ps1'
+if (Test-Path -LiteralPath $agTest) {
+    Write-Host "`n[Acceptance-Agents] kết nối agent"
+    $agOut = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $agTest 2>&1 | Out-String
+    $agOut.TrimEnd() -split "`r?`n" | ForEach-Object { if ($_ -match '^\s+(PASS|FAIL)|^\[|^$') { Write-Host $_ } }
+    if ($agOut -match 'AGENTS-RESULT pass=(\d+) fail=(\d+)') { $script:pass += [int]$Matches[1]; $script:fail += [int]$Matches[2] }
+    else { $script:fail++; Write-Host '  FAIL  Acceptance-Agents.ps1 không trả kết quả' -ForegroundColor Red }
+}
 Write-Host ("`nKết quả: {0} pass, {1} fail" -f $script:pass, $script:fail)
 if ($script:fail -gt 0) { exit 1 }
 exit 0

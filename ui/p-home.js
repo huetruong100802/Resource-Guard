@@ -224,7 +224,7 @@
     var el = $('#hAssist'); if (!el) return;
     var r = A.rep, busyClean = S.jobs.cleanup && S.jobs.cleanup.status === 'running', head, body = '';
     var btns = '<button class="btn sm" id="asScan"' + (scanRunning() ? ' disabled' : '') + '>' + RG.icon('refresh') + ' ' + (scanRunning() ? 'Đang xem…' : (r && r.scanned ? 'Quét lại' : 'Xem máy này')) + '</button>' +
-      (r && r.agent && r.agent.available ? ' <button class="btn sm" id="asAsk" title="Nhờ agent (claude) đánh giá thêm; chỉ gửi mô tả cụm, không gửi tên file hay đường dẫn">Nhờ agent đánh giá</button>' : '');
+      (r && r.agent && r.agent.available ? ' <button class="btn sm" id="asAsk" title="Nhờ trợ lý AI đang chọn đánh giá thêm; chỉ gửi mô tả cụm, không gửi tên file hay đường dẫn">Nhờ agent đánh giá</button>' : '');
     head = '<h2>Báo cáo của trợ lý' + RG.help('Trợ lý xem metadata của Tải xuống, Tài liệu, Màn hình và dữ liệu lớn ở góc khuất (không đọc nội dung tệp), gom thành cụm rồi đề xuất: nén, dọn hoặc giữ. File cá nhân chỉ có thể nén (zip có kiểm tra, khôi phục được), không bao giờ xoá thẳng. Mọi thao tác chờ bạn bấm.') + '<span class="sp"></span>' + btns + '</h2>';
     if (!r || !r.scanned) {
       body = '<div class="small mut" style="margin:8px 0">' + (scanRunning() ? 'Đang xem các thư mục của bạn…' : 'Trợ lý chưa xem máy này. Bấm “Xem máy này”: chỉ đọc tên, dung lượng và ngày sửa, không mở nội dung tệp.') + '</div>';

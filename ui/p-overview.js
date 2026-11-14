@@ -45,7 +45,7 @@
   /* ---------- Tự động hoá nâng cao (chuyển từ p-auto.js) ---------- */
   function tags(list, type) { return '<div class="tags">' + (list.length ? list.map(function (x) { return '<span class="tag"><span class="mono">' + esc(x) + '</span><button data-rm="' + type + '" data-v="' + esc(x) + '" aria-label="Gỡ ' + esc(x) + '">×</button></span>'; }).join('') : '<span class="small mut">Chưa có.</span>') + '</div>'; }
   function setDrive(p, L, key, val) { var o = p.drives[L] || {}; if (val == null) delete o[key]; else o[key] = val; if (Object.keys(o).length) p.drives[L] = o; else delete p.drives[L]; }
-  function markDirty() { S.dirty = JSON.stringify(S.draft) !== JSON.stringify(S.policy); var b = $('#polBar'); if (b) b.classList.toggle('show', !!S.dirty); }
+  function markDirty() { S.dirty = RG.policyDirty(); var b = $('#polBar'); if (b) b.classList.toggle('show', !!S.dirty); }
 
   function drawAdv() {
     var el = $('#polBody'); if (!el) return;
@@ -155,15 +155,18 @@
     title: 'Cài đặt',
     render: function (el) {
       var s = S.settings || { intervalSec: 15, minSec: 2, maxSec: 300, defaultSec: 15 };
-      el.innerHTML = '<div class="grid g2">' + thrCard() + '<div class="card"><h2>Chu kỳ lấy mẫu</h2>' +
+      el.innerHTML = '<div class="grid g2 set-grid">' + thrCard() + '<div class="card"><h2>Chu kỳ lấy mẫu</h2>' +
         '<div class="field"><label for="iv">Lấy mẫu mỗi (giây)</label><input id="iv" type="number" min="' + s.minSec + '" max="' + s.maxSec + '" step="1" value="' + s.intervalSec + '"><button class="btn primary" id="ivSave">Lưu</button></div>' +
         '<div class="field">' + [5, 15, 30, 60].map(function (v) { return '<button class="btn sm" data-v="' + v + '">' + v + 's' + (v === s.defaultSec ? ' (mặc định)' : '') + '</button>'; }).join('') + '</div>' +
         '<p class="hint">Từ ' + s.minSec + ' đến ' + s.maxSec + ' giây, có hiệu lực ngay. Chu kỳ ngắn phản ứng nhanh hơn nhưng tốn CPU hơn một chút.</p><div id="ivMsg" class="small" role="status"></div></div>' +
         '<div class="card"><h2>Khởi động và PIN</h2><div id="setupTog"></div><p class="hint">PIN (để bật tự dọn thật) chỉ đặt được ở terminal: <span class="mono">rg pin</span>. ' + (S.pinConfigured ? '<span class="pill auto">PIN đã đặt</span>' : '<span class="pill ask">chưa đặt PIN</span>') + '</p></div>' +
         '<div class="card"><h2>An toàn</h2><ul class="small" style="margin:0;padding-left:18px"><li>Chỉ nghe <b>localhost</b>; mọi thao tác ghi cần header riêng.</li><li>Giao diện chỉ gửi <b>key</b> của mục dọn; engine kiểm lại allowlist trước khi xoá.</li><li>Không kết thúc ứng dụng của bạn; chỉ hạ ưu tiên CPU (đảo ngược được). Trợ lý AI chỉ nhận metadata.</li></ul></div>' +
         '<div class="card"><h2>Giao diện</h2><div class="field"><label>Chủ đề</label><span class="seg" role="group" aria-label="Chủ đề"><button data-th="auto">Theo hệ thống</button><button data-th="light">Sáng</button><button data-th="dark">Tối</button></span></div></div></div>' +
-        '<div id="autCard" class="mt"></div><h2 class="sec-h">Tự động hoá nâng cao</h2><div id="polBody"></div>';
+        '<div id="autCard" class="mt"></div><h2 class="sec-h">Tự động hoá nâng cao</h2><div id="polBody"></div>' +
+        '<h2 class="sec-h">Kết nối agent</h2><div id="agConn"></div><div id="aboutCard" class="mt"></div>';
       RG.setup.toggles($('#setupTog'));
+      if (RG.connect) RG.connect.render($('#agConn'));
+      if (RG.aboutCard) RG.aboutCard($('#aboutCard'));
       var ts = $('#thrSave'); if (ts) ts.onclick = function () { saveThr(); };
       RG.$$('[data-v]').forEach(function (b) { b.onclick = function () { $('#iv').value = b.dataset.v; }; });
       $('#ivSave').onclick = function () {
