@@ -1,0 +1,13 @@
+# Script Windows luôn CRLF khi checkout hoặc đóng gói (file .cmd dùng LF dễ chạy sai).
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# Không đưa vào gói release (git archive) — chỉ dùng khi phát triển.
+.github/          export-ignore
+.gitignore        export-ignore
+.gitattributes    export-ignore
+tests/            export-ignore
+plan-*.md         export-ignore
+docs/mockup/      export-ignore
+docs/*.pptx       export-ignore
+docs/ui-yeu-cau-va-quyet-dinh.md export-ignore
