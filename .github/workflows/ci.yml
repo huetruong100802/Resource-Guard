@@ -19,7 +19,15 @@ jobs:
 
       - name: Acceptance (sandbox, không đụng dữ liệu thật)
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Acceptance.ps1
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Acceptance.ps1 | Tee-Object -FilePath acceptance.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # Annotation đọc được công khai qua API, không cần quyền xem log.
+            Select-String -Path acceptance.log -Pattern '^\s+FAIL\s' | ForEach-Object { Write-Host "::error title=FAIL::$($_.Line.Trim())" }
+            Get-Content acceptance.log -Tail 15 | ForEach-Object { Write-Host "::warning title=tail::$_" }
+          }
+          exit $code
 
       - name: Watcher overhead (chỉ báo cáo, không làm hỏng build)
         shell: powershell
