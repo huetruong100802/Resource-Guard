@@ -2,6 +2,8 @@
 # Tests\Acceptance.ps1 cũng gọi file này ở cuối. Mọi thứ nằm trong thư mục tạm riêng (AGENT_RESOURCE_HOME); nhà cung cấp AI là lệnh giả và
 # máy chủ HTTP giả trên localhost: không gọi dịch vụ thật nào, không tốn tiền.
 $ErrorActionPreference = 'Stop'
+# Runner CI có thể chạy dưới Normal; tiến trình con kế thừa mức này và làm sai test ưu tiên.
+try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.ProcessPriorityClass]::Normal } catch { }
 $root = Split-Path $PSScriptRoot -Parent
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("rg-agents-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $home_ = Join-Path $sandbox 'home'

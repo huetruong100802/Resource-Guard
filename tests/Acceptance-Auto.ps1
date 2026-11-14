@@ -1,6 +1,8 @@
 ﻿# Test nghiệm thu cho plan-automation (track A-E). Chạy riêng: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Acceptance-Auto.ps1
 # Tests\Acceptance.ps1 cũng gọi file này ở cuối. Mọi thao tác nằm trong thư mục tạm riêng (AGENT_RESOURCE_HOME + fixture); không đụng dữ liệu thật.
 $ErrorActionPreference = 'Stop'
+# Runner CI có thể chạy dưới Normal; tiến trình con kế thừa mức này và làm sai test ưu tiên.
+try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.ProcessPriorityClass]::Normal } catch { }
 $root = Split-Path $PSScriptRoot -Parent
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("rg-auto-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $ws = Join-Path $sandbox 'ws'; $tmp = Join-Path $sandbox 'tmp'; $cache = Join-Path $sandbox 'cache'; $home_ = Join-Path $sandbox 'home'
@@ -661,7 +663,7 @@ try {
     # =====================================================================
     Write-Host "`n[C2] Tiến trình đang giữ file (Restart Manager) + nhóm Tệp tạm & cache"
     function HoldFile([string]$File) {
-        $c = "`$s=[IO.File]::Open('$File','Open','ReadWrite','ReadWrite'); Start-Sleep -Seconds 120"
+        $c = "`$s=[IO.File]::Open('$File','Open','ReadWrite','ReadWrite'); Start-Sleep -Seconds 900"
         $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-Command', $c -WindowStyle Hidden -PassThru
         $script:procs += $p
         for ($i = 0; $i -lt 60; $i++) {

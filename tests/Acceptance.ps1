@@ -1,6 +1,8 @@
 ﻿# Test nghiệm thu Resource Guard. Không cần Pester. Chạy: pwsh -NoProfile -File tests\Acceptance.ps1
 # Mọi thao tác nằm trong thư mục tạm riêng (AGENT_RESOURCE_HOME + fixture); không đụng dữ liệu thật.
 $ErrorActionPreference = 'Stop'
+# Runner CI có thể chạy dưới Normal; tiến trình con kế thừa mức này và làm sai test ưu tiên.
+try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.ProcessPriorityClass]::Normal } catch { }
 $root = Split-Path $PSScriptRoot -Parent
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("rg-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $ws = Join-Path $sandbox 'ws'; $tmp = Join-Path $sandbox 'tmp'; $cache = Join-Path $sandbox 'cache'; $home_ = Join-Path $sandbox 'home'
