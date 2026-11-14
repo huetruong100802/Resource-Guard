@@ -24,8 +24,11 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             # Annotation đọc được công khai qua API, không cần quyền xem log.
-            Select-String -Path acceptance.log -Pattern '^\s+FAIL\s' | ForEach-Object { Write-Host "::error title=FAIL::$($_.Line.Trim())" }
-            Get-Content acceptance.log -Tail 15 | ForEach-Object { Write-Host "::warning title=tail::$_" }
+            # Gộp thành một annotation: GitHub chỉ giữ 10 annotation mỗi mức cho một bước.
+            $fails = @(Select-String -Path acceptance.log -Pattern '^\s+FAIL\s' | ForEach-Object { $_.Line.Trim() -replace '^FAIL\s+', '' })
+            $tail = (Get-Content acceptance.log -Tail 3) -join ' / '
+            Write-Host "::error title=$($fails.Count) test hỏng::$($fails -join ' | ')"
+            Write-Host "::warning title=Cuối log::$tail"
           }
           exit $code
 

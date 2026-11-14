@@ -474,6 +474,8 @@ try {
     function PClass([int]$ProcId) { (Get-Process -Id $ProcId).PriorityClass.ToString() }
     $prA = Start-Process ping -ArgumentList '-n', '300', '127.0.0.1' -WindowStyle Hidden -PassThru; $procs += $prA
     $prB = Start-Process ping -ArgumentList '-n', '300', '127.0.0.1' -WindowStyle Hidden -PassThru; $procs += $prB
+    # Tiến trình con kế thừa mức ưu tiên của cha; runner CI có thể chạy dưới Normal.
+    foreach ($pp in @($prA, $prB)) { try { $pp.PriorityClass = [Diagnostics.ProcessPriorityClass]::Normal } catch { } }
     Start-Sleep -Milliseconds 800
     $sA = StartStamp $prA.Id; $sB = StartStamp $prB.Id
     $priPath = Get-RgProcPriorityPath
