@@ -45,7 +45,7 @@
   /* ---------- Tự động hoá nâng cao (chuyển từ p-auto.js) ---------- */
   function tags(list, type) { return '<div class="tags">' + (list.length ? list.map(function (x) { return '<span class="tag"><span class="mono">' + esc(x) + '</span><button data-rm="' + type + '" data-v="' + esc(x) + '" aria-label="Gỡ ' + esc(x) + '">×</button></span>'; }).join('') : '<span class="small mut">Chưa có.</span>') + '</div>'; }
   function setDrive(p, L, key, val) { var o = p.drives[L] || {}; if (val == null) delete o[key]; else o[key] = val; if (Object.keys(o).length) p.drives[L] = o; else delete p.drives[L]; }
-  function markDirty() { S.dirty = JSON.stringify(S.draft) !== JSON.stringify(S.policy); var b = $('#polBar'); if (b) b.classList.toggle('show', !!S.dirty); }
+  function markDirty() { S.dirty = RG.policyDirty(); var b = $('#polBar'); if (b) b.classList.toggle('show', !!S.dirty); }
 
   function drawAdv() {
     var el = $('#polBody'); if (!el) return;
@@ -102,19 +102,71 @@
     };
   }
 
+  /* ---------- Mức tự chủ của trợ lý (E2/E4) ----------
+     Mỗi nhóm việc có mức L0 Tắt · L1 Đề xuất · L2 Chờ duyệt · L3 Tự động. File cá nhân và tiến trình bị chặn trần L2. Hạ mức luôn được; nâng lên L3 cần PIN.
+     Server là nơi quyết định (cap, PIN); UI chỉ hiện và gửi { group, level, pin }. */
+  var LVN = { L0: 'Tắt', L1: 'Đề xuất', L2: 'Chờ duyệt', L3: 'Tự động' };
+  var AU = { data: null };
+  function loadAut() { return RG.api('/api/autonomy').then(function (j) { AU.data = j; }).catch(function () { }); }
+  function syncDraftAut() { return RG.loadPolicy().then(function () { if (S.draft && S.policy) S.draft.autonomy = RG.clone(S.policy.autonomy || {}); }).catch(function () { }); }
+  function drawAut() {
+    var el = $('#autCard'); if (!el) return;
+    var d = AU.data;
+    if (!d) { el.innerHTML = '<div class="card"><h2>Mức tự chủ của trợ lý</h2><div class="small mut">Đang tải…</div></div>'; return; }
+    var rows = (d.groups || []).map(function (g) {
+      return '<div class="au-row"><div class="au-name"><b>' + esc(g.label) + '</b>' + (g.source === 'legacy' ? ' <span class="pill" title="Chưa chọn mức riêng: đang theo cài đặt nhóm cũ">theo cài đặt cũ</span>' : (g.source === 'default' ? ' <span class="pill" title="Mức mặc định">mặc định</span>' : '')) +
+        '<div class="small mut">' + esc(g.text) + '</div></div><span class="seg sm" role="group" aria-label="Mức của ' + esc(g.label) + '">' +
+        g.levels.map(function (l) { return '<button data-aug="' + esc(g.id) + '" data-alv="' + l.level + '" aria-pressed="' + (g.level === l.level) + '" title="' + esc(l.text) + '">' + LVN[l.level] + '</button>'; }).join('') + '</span></div>';
+    }).join('');
+    var adv = d.advice || { promote: [], demote: [] };
+    var pro = (adv.promote || []).map(function (a) {
+      return '<div class="au-adv"><span>' + RG.icon('spark') + ' Đề nghị nâng <b>' + esc(a.label) + '</b> lên ' + LVN[a.to] + ': ' + esc(a.reason) + '</span><button class="btn sm primary" data-aprom="' + esc(a.group) + '" data-ato="' + a.to + '">Cấp' + (a.needsPin ? ' (cần PIN)' : '') + '</button></div>';
+    }).join('');
+    var dem = (d.demotions || []).slice(-3).map(function (x) { return '<div class="small mut">Đã tự hạ ' + esc(x.group) + ' ' + esc(x.from) + ' → ' + esc(x.to) + ': ' + esc(x.reason) + '</div>'; }).join('');
+    el.innerHTML = '<div class="card"><h2>Mức tự chủ của trợ lý' + RG.help('L0 Tắt: không đụng tới. L1 Đề xuất: chỉ báo cáo. L2 Chờ duyệt: chuẩn bị sẵn, bạn bấm một lần. L3 Tự động: tự làm khi máy có áp lực, trong ngân sách. File cá nhân và tiến trình tối đa L2. Nâng lên L3 cần PIN; hạ thì không.') +
+      '<span class="sp"></span><button class="btn sm danger" id="autPanic" title="Tắt chính sách tự động và huỷ mọi job nền của Resource Guard">Dừng khẩn cấp</button></h2>' +
+      '<p class="hint">Chính sách hiện ' + (d.mode === 'on' ? '<b>Bật</b>' : (d.mode === 'dry-run' ? '<b>Chạy thử</b> (chưa xoá gì)' : '<b>Tắt</b>')) + '. Mức L3 chỉ có hiệu lực khi chính sách đang Bật; ở Chạy thử trợ lý chỉ ghi lại việc SẼ làm.</p>' +
+      pro + '<div class="au-list">' + rows + '</div>' + dem + '</div>';
+    RG.$$('#autCard [data-aug]').forEach(function (b) { b.onclick = function () { if (b.getAttribute('aria-pressed') !== 'true') setLevel(b.dataset.aug, b.dataset.alv); }; });
+    RG.$$('#autCard [data-aprom]').forEach(function (b) { b.onclick = function () { setLevel(b.dataset.aprom, b.dataset.ato); }; });
+    var pb = $('#autPanic'); if (pb) pb.onclick = function () { RG.panic(); };
+  }
+  function setLevel(g, lv, pin) {
+    return RG.api('/api/autonomy/level', { method: 'POST', body: { group: g, level: lv, pin: pin || '' } }).then(function () {
+      RG.toast('Đã đặt mức ' + LVN[lv] + '.', 'ok'); return Promise.all([loadAut(), syncDraftAut()]);
+    }).then(function () { drawAut(); }).catch(function (e) {
+      var c = e.data && e.data.code;
+      if (c === 'pin-required' || c === 'pin-wrong') return RG.askPin(c === 'pin-wrong' ? 'PIN không đúng. Nhập lại:' : 'Nâng lên mức Tự động cần PIN.').then(function (p) { if (p) return setLevel(g, lv, p); });
+      RG.toast(e.message, 'err', 9000);
+    });
+  }
+  /* Dừng khẩn cấp: dùng chung cho Cài đặt và Tổng quan. Tắt chính sách + huỷ job nền; không cần PIN. */
+  RG.panic = function () {
+    return RG.confirm('Dừng khẩn cấp?', '<p>Resource Guard sẽ <b>tắt chính sách tự động</b> và <b>huỷ mọi việc nền đang chạy</b> (quét, dọn, đánh giá). Việc đã dọn xong không bị hoàn tác. Bật lại chính sách cần PIN.</p>', 'Dừng ngay', true).then(function (ok) {
+      if (!ok) return;
+      return RG.api('/api/panic', { method: 'POST', body: {} }).then(function (j) {
+        RG.toast('Đã dừng khẩn cấp: chính sách → Tắt; huỷ ' + ((j.stopped || []).length) + ' việc nền.', 'ok', 8000);
+        return RG.loadPolicy().catch(function () { });
+      }).then(function () { if (RG.pages[RG.cur] && RG.pages[RG.cur].refresh) RG.pages[RG.cur].refresh(); }).catch(function (e) { RG.toast(e.message, 'err', 9000); });
+    });
+  };
+
   RG.pages.settings = {
     title: 'Cài đặt',
     render: function (el) {
       var s = S.settings || { intervalSec: 15, minSec: 2, maxSec: 300, defaultSec: 15 };
-      el.innerHTML = '<div class="grid g2">' + thrCard() + '<div class="card"><h2>Chu kỳ lấy mẫu</h2>' +
+      el.innerHTML = '<div class="grid g2 set-grid">' + thrCard() + '<div class="card"><h2>Chu kỳ lấy mẫu</h2>' +
         '<div class="field"><label for="iv">Lấy mẫu mỗi (giây)</label><input id="iv" type="number" min="' + s.minSec + '" max="' + s.maxSec + '" step="1" value="' + s.intervalSec + '"><button class="btn primary" id="ivSave">Lưu</button></div>' +
         '<div class="field">' + [5, 15, 30, 60].map(function (v) { return '<button class="btn sm" data-v="' + v + '">' + v + 's' + (v === s.defaultSec ? ' (mặc định)' : '') + '</button>'; }).join('') + '</div>' +
         '<p class="hint">Từ ' + s.minSec + ' đến ' + s.maxSec + ' giây, có hiệu lực ngay. Chu kỳ ngắn phản ứng nhanh hơn nhưng tốn CPU hơn một chút.</p><div id="ivMsg" class="small" role="status"></div></div>' +
         '<div class="card"><h2>Khởi động và PIN</h2><div id="setupTog"></div><p class="hint">PIN (để bật tự dọn thật) chỉ đặt được ở terminal: <span class="mono">rg pin</span>. ' + (S.pinConfigured ? '<span class="pill auto">PIN đã đặt</span>' : '<span class="pill ask">chưa đặt PIN</span>') + '</p></div>' +
         '<div class="card"><h2>An toàn</h2><ul class="small" style="margin:0;padding-left:18px"><li>Chỉ nghe <b>localhost</b>; mọi thao tác ghi cần header riêng.</li><li>Giao diện chỉ gửi <b>key</b> của mục dọn; engine kiểm lại allowlist trước khi xoá.</li><li>Không kết thúc ứng dụng của bạn; chỉ hạ ưu tiên CPU (đảo ngược được). Trợ lý AI chỉ nhận metadata.</li></ul></div>' +
         '<div class="card"><h2>Giao diện</h2><div class="field"><label>Chủ đề</label><span class="seg" role="group" aria-label="Chủ đề"><button data-th="auto">Theo hệ thống</button><button data-th="light">Sáng</button><button data-th="dark">Tối</button></span></div></div></div>' +
-        '<h2 class="sec-h">Tự động hoá nâng cao</h2><div id="polBody"></div>';
+        '<div id="autCard" class="mt"></div><h2 class="sec-h">Tự động hoá nâng cao</h2><div id="polBody"></div>' +
+        '<h2 class="sec-h">Kết nối agent</h2><div id="agConn"></div><div id="aboutCard" class="mt"></div>';
       RG.setup.toggles($('#setupTog'));
+      if (RG.connect) RG.connect.render($('#agConn'));
+      if (RG.aboutCard) RG.aboutCard($('#aboutCard'));
       var ts = $('#thrSave'); if (ts) ts.onclick = function () { saveThr(); };
       RG.$$('[data-v]').forEach(function (b) { b.onclick = function () { $('#iv').value = b.dataset.v; }; });
       $('#ivSave').onclick = function () {
@@ -124,9 +176,9 @@
       };
       var cur = RG.theme();
       RG.$$('[data-th]').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.th === cur); b.onclick = function () { RG.theme(b.dataset.th); RG.$$('[data-th]').forEach(function (x) { x.setAttribute('aria-pressed', x.dataset.th === b.dataset.th); }); }; });
-      drawAdv(); this.refresh();
+      drawAdv(); drawAut(); this.refresh();
     },
-    refresh: function () { Promise.all([RG.loadPolicy(), RG.loadDrives().catch(function () { })]).then(function () { if (RG.cur === 'settings') drawAdv(); }).catch(function () { }); },
+    refresh: function () { Promise.all([RG.loadPolicy(), RG.loadDrives().catch(function () { }), loadAut()]).then(function () { if (RG.cur === 'settings') { drawAdv(); drawAut(); } }).catch(function () { }); },
     live: function () { }
   };
 })();

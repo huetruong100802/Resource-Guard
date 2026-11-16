@@ -16,6 +16,7 @@ $script:ToastCooldownMin = 10    # không toast lặp lại cùng một trạng 
 $script:LowerHoldSec = 45        # hạ trạng thái chỉ khi thấp hơn liên tục ngần này giây (hysteresis, tính theo thời gian)
 $script:KeepMetricsDays = 14
 $script:TableRefreshSec = 30     # bảng process (tốn nhất) làm mới tối đa mỗi ngần này giây
+$script:StatusHtmlSec = 60; $script:RgStatusHtmlAt = [datetime]::MinValue
 $script:DefaultIntervalSec = 15; $script:MinIntervalSec = 2; $script:MaxIntervalSec = 300
 $script:RgTableCache = $null; $script:RgTableAt = [datetime]::MinValue; $script:RgLastReasons = @()
 $script:Palette = @{ Normal = '#2e9e5b'; Caution = '#d9a400'; Restricted = '#e07b00'; Critical = '#d6342c' }
@@ -31,10 +32,7 @@ function Read-RgWatcherState {
 }
 
 function Write-RgWatcherState($S) {
-    $p = Get-RgWatcherStatePath
-    $tmp = "$p.tmp"
-    Set-Content -LiteralPath $tmp -Value (ConvertTo-Json -InputObject $S -Depth 4) -Encoding UTF8
-    Move-Item -LiteralPath $tmp -Destination $p -Force
+    Write-RgFileAtomic (Get-RgWatcherStatePath) (ConvertTo-Json -InputObject $S -Depth 4)
 }
 
 # Tăng: áp dụng ngay. Giảm: cần LowerTicksNeeded chu kỳ liên tiếp. Thuần hàm, có test.
@@ -68,10 +66,7 @@ function Set-RgSettings([int]$IntervalSec) {
     if ($IntervalSec -lt $script:MinIntervalSec -or $IntervalSec -gt $script:MaxIntervalSec) {
         throw "intervalSec phải trong khoảng $($script:MinIntervalSec)-$($script:MaxIntervalSec) giây."
     }
-    $p = Get-RgSettingsPath
-    $tmp = "$p.tmp"
-    Set-Content -LiteralPath $tmp -Value (ConvertTo-Json -InputObject ([ordered]@{ intervalSec = $IntervalSec }) -Compress) -Encoding UTF8
-    Move-Item -LiteralPath $tmp -Destination $p -Force
+    Write-RgFileAtomic (Get-RgSettingsPath) (ConvertTo-Json -InputObject ([ordered]@{ intervalSec = $IntervalSec }) -Compress)
     Write-RgLog 'settings-change' ([ordered]@{ intervalSec = $IntervalSec })
     return (Get-RgSettings)
 }
@@ -184,6 +179,20 @@ function Remove-RgOldMetrics {
     $limit = (Get-Date).AddDays(-$script:KeepMetricsDays)
     Get-ChildItem -LiteralPath $dir -Filter 'metrics-*.jsonl' -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt $limit } | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+# Như Read-RgMetricsTail nhưng trả thẳng MẢNG JSON dạng chuỗi (cũ -> mới), không parse từng dòng: /api/history chỉ chuyển tiếp cho trình duyệt.
+# Parse 480 dòng bằng ConvertFrom-Json của PS 5.1 rồi dựng lại tốn 400-600 ms cho mỗi lần mở trang; ghép chuỗi tốn vài ms.
+function Read-RgMetricsTailJson([int]$Max = 480) {
+    $dir = Join-Path (Initialize-RgHome) 'state'
+    $files = @(Get-ChildItem -LiteralPath $dir -Filter 'metrics-*.jsonl' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 3)
+    $parts = New-Object System.Collections.ArrayList; $have = 0
+    foreach ($f in $files) {   # file mới nhất trước; mỗi file lấy đuôi còn thiếu rồi chèn lên đầu để giữ thứ tự thời gian
+        $chunk = @(Get-Content -LiteralPath $f.FullName -Tail ($Max - $have) -Encoding UTF8 | Where-Object { $_.Length -gt 2 -and $_[0] -eq '{' -and $_[$_.Length - 1] -eq '}' })
+        if ($chunk.Count) { $parts.Insert(0, ($chunk -join ',')); $have += $chunk.Count }
+        if ($have -ge $Max) { break }
+    }
+    return ('[' + (@($parts) -join ',') + ']')
 }
 
 function Read-RgMetricsTail([int]$Max = 240) {
@@ -409,10 +418,49 @@ function Get-RgProcRows($Table, [int]$Logical) {
     return @($rows)
 }
 
+# Overhead của chính watcher (A5): thời gian mỗi tick và CPU/RAM của process này, để chứng minh "không nặng máy" bằng số liệu.
+$script:RgTickStats = New-Object System.Collections.ArrayList
+$script:RgWallBase = Get-Date
+$script:RgCpuBase = $null
+
+function Update-RgTickStats([double]$Ms) {
+    [void]$script:RgTickStats.Add($Ms)
+    while ($script:RgTickStats.Count -gt 120) { $script:RgTickStats.RemoveAt(0) }
+}
+
+function Get-RgWatcherOverhead {
+    $xs = @($script:RgTickStats.ToArray() | Sort-Object)
+    $n = $xs.Count
+    $p = [Diagnostics.Process]::GetCurrentProcess()
+    $cpuSec = 0.0
+    try {
+        $cpuSec = $p.TotalProcessorTime.TotalSeconds
+        if ($null -eq $script:RgCpuBase) { $script:RgCpuBase = $cpuSec - 0.0; $script:RgWallBase = Get-Date }
+        $wall = [math]::Max(1.0, ((Get-Date) - $script:RgWallBase).TotalSeconds)
+        $cpuPct = [math]::Round(100.0 * ($cpuSec - $script:RgCpuBase) / $wall, 2)
+        $ws = [math]::Round($p.WorkingSet64 / 1MB, 0)
+    } finally { $p.Dispose() }
+    $avg = $null; $p95 = $null; $max = $null
+    if ($n -gt 0) {
+        $s = 0.0; foreach ($x in $xs) { $s += $x }
+        $avg = [math]::Round($s / $n, 0); $max = [math]::Round($xs[$n - 1], 0)
+        $p95 = [math]::Round($xs[[math]::Min($n - 1, [int][math]::Ceiling(0.95 * $n) - 1)], 0)
+    }
+    $perTick = $null; $est = $null
+    if ($n -gt 0) {
+        $perTick = [math]::Round(($cpuSec - $script:RgCpuBase) / $n, 3)
+        $iv = [math]::Max(1, [int](Get-RgSettings).intervalSec)
+        $est = [math]::Round(100.0 * $perTick / $iv, 2)   # CPU% (một lõi) ước tính ở chu kỳ lấy mẫu hiện tại
+    }
+    return [pscustomobject]@{ samples = $n; avgTickMs = $avg; p95TickMs = $p95; maxTickMs = $max; cpuPctOneCore = $cpuPct; cpuSecPerTick = $perTick; estCpuPctAtInterval = $est; workingSetMB = $ws }
+}
+
 function Invoke-RgWatchTick {
     param([switch]$NoToast)
+    $tickSw = [Diagnostics.Stopwatch]::StartNew()
+    if ($null -eq $script:RgCpuBase) { $pp = [Diagnostics.Process]::GetCurrentProcess(); try { $script:RgCpuBase = $pp.TotalProcessorTime.TotalSeconds; $script:RgWallBase = Get-Date } finally { $pp.Dispose() } }
     $home_ = Initialize-RgHome
-    $snap = Get-RgSnapshot -SkipCpu
+    $snap = Get-RgSnapshot -SkipCpu -Fast
     # Bảng process là phần tốn nhất: dùng cache, chỉ làm mới mỗi TableRefreshSec giây.
     if ($null -eq $script:RgTableCache -or ((Get-Date) - $script:RgTableAt).TotalSeconds -ge $script:TableRefreshSec) {
         $script:RgTableCache = Get-RgProcessTable
@@ -449,7 +497,8 @@ function Invoke-RgWatchTick {
         procTop = @(Get-RgProcTop $procs 12 8 $script:RgWorkloadOf)
     }
     $mf = Join-Path $home_ ('state\metrics-{0}.jsonl' -f (Get-Date -Format 'yyyyMMdd'))
-    Add-Content -LiteralPath $mf -Value (ConvertTo-Json -InputObject $rec -Depth 4 -Compress) -Encoding UTF8
+    try { Add-Content -LiteralPath $mf -Value (ConvertTo-Json -InputObject $rec -Depth 4 -Compress) -Encoding UTF8 }
+    catch { Register-RgIoError 'metrics' $mf $_.Exception.Message; throw }   # đếm lỗi ghi (ổ đầy) rồi để vòng chính ghi 'watcher-error'
 
     $toasted = $false
     if ($changed) {
@@ -478,7 +527,12 @@ function Invoke-RgWatchTick {
         lastToastState = [string]$st.lastToastState; lastToastUtc = [string]$st.lastToastUtc; lastOrphanKey = $key
     }
     Write-RgWatcherState $newState
-    try { Write-RgStatusHtml $rec $budget $eff.state } catch { Write-RgLog 'status-html-error' ([string]$_) }
+    # status.html là bản dự phòng tự làm mới 30 giây một lần: dựng lại tối đa mỗi StatusHtmlSec (đọc 240 dòng metrics, ~80 ms), hoặc ngay khi trạng thái đổi.
+    if ($changed -or ((Get-Date) - $script:RgStatusHtmlAt).TotalSeconds -ge $script:StatusHtmlSec) {
+        $script:RgStatusHtmlAt = Get-Date
+        try { Write-RgStatusHtml $rec $budget $eff.state } catch { Write-RgLog 'status-html-error' ([string]$_) }
+    }
+    Update-RgTickStats $tickSw.Elapsed.TotalMilliseconds
     return $rec
 }
 
@@ -491,11 +545,12 @@ if (-not $Once) {
     if (-not $created) { Write-Host 'Watcher đã chạy.'; exit 0 }
     try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'Idle' } catch { }
     Write-RgLog 'watcher-start' ([ordered]@{ pid = $PID; intervalSec = $IntervalSec; mode = 'monitor-only' })
+    try { [void](Resolve-RgJournalPending) } catch { Write-RgLog 'journal-resolve-error' ([string]$_) }
     $n = 0
     try {
         while ($true) {
             try { [void](Invoke-RgWatchTick -NoToast:$NoToast) } catch { Write-RgLog 'watcher-error' ([string]$_) }
-            if (($n++ % 240) -eq 0) { Remove-RgOldMetrics }
+            if (($n++ % 240) -eq 0) { Remove-RgOldMetrics; try { [void](Invoke-RgRetention) } catch { Write-RgLog 'retention-error' ([string]$_) } }
             $wait = if ($IntervalSec -gt 0) { $IntervalSec } else { (Get-RgSettings).intervalSec }
             Start-Sleep -Seconds $wait
         }

@@ -11,6 +11,7 @@ $ps += @(Get-ChildItem -LiteralPath (Join-Path $root 'scripts') -Filter '*.ps1' 
 $ps += @(Get-ChildItem -LiteralPath (Join-Path $root 'tests') -Filter '*.ps1' -File)
 $rg = Join-Path $root 'rg.ps1'
 if (Test-Path -LiteralPath $rg) { $ps += Get-Item -LiteralPath $rg }
+foreach ($n in 'install.ps1', 'uninstall.ps1') { $f = Join-Path $root $n; if (Test-Path -LiteralPath $f) { $ps += Get-Item -LiteralPath $f } }
 
 foreach ($f in $ps) {
     $tokens = $null; $errs = $null

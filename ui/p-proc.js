@@ -1,5 +1,6 @@
-/* p-proc.js - Bộ nhớ & tiến trình (#mem): ai đang dùng RAM theo việc đang làm, chi tiết bên phải, "nếu đóng", hạ ưu tiên (đảo ngược được).
-   Không có nút kết thúc tiến trình. Phần CPU theo thời gian, từng nhân, thông tin máy gập sẵn ở cuối. Giữ alias RG.pages.cpu. */
+/* p-proc.js - Bộ nhớ & tiến trình (#mem): ai đang dùng RAM theo việc đang làm, chi tiết bên phải, "nếu đóng", hạ ưu tiên (đảo ngược được)
+   và Kết thúc tiến trình (B1): chỉ hiện nút cho lớp tiến trình được phép (server quyết định, canEnd/whyNotEnd), có hộp xác nhận trước → sau;
+   tiến trình đang do trợ lý AI giữ thì cần PIN. Phần CPU theo thời gian, từng nhân, thông tin máy gập sẵn ở cuối. Giữ alias RG.pages.cpu. */
 (function () {
   'use strict';
   var RG = window.RG, S = RG.S, esc = RG.esc, $ = RG.$, V = RG.viz, MB = 1048576;
@@ -141,6 +142,45 @@
       return '<tr><td><span class="mono">' + esc(m.name) + '</span> <span class="mut small">PID ' + m.pid + '</span></td><td class="r num">' + RG.fmtPct(m.cpu) + '</td><td class="r num">' + RG.fmtBytes(m.ramMB * MB) + '</td><td>' + (m.lowered ? '<span class="pill ask">đang hạ</span> ' : '') + act + '</td></tr>';
     }).join('') + (busy.length > 8 ? '<tr><td colspan="4" class="small mut">… và ' + (busy.length - 8) + ' tiến trình khác (chọn riêng ở chế độ “Từng tiến trình”)</td></tr>' : '');
   }
+  /* Kết thúc tiến trình: tối đa 8 tiến trình lớn nhất của mục đang chọn; nút chỉ hiện khi server nói canEnd, nếu không thì nêu lý do. */
+  function endTable(si) {
+    var ms = si.ms.slice().sort(function (a, b) { return b.ramMB - a.ramMB; }), shown = ms.slice(0, 8);
+    var rows = shown.map(function (m) {
+      var act = m.canEnd ? '<button class="btn sm danger" data-end="1" data-pid="' + m.pid + '" data-start="' + esc(m.start) + '">Kết thúc' + (m.endNeedsPin ? ' (cần PIN)' : '') + '</button>' :
+        '<span class="small mut" title="' + esc(m.whyNotEnd) + '">' + RG.icon('info') + ' ' + esc(m.whyNotEnd || 'Không kết thúc được') + '</span>';
+      return '<tr><td><span class="mono">' + esc(m.name) + '</span> <span class="mut small">PID ' + m.pid + '</span></td><td class="r num">' + RG.fmtBytes(m.ramMB * MB) + '</td><td>' + act + '</td></tr>';
+    }).join('');
+    return rows + (ms.length > 8 ? '<tr><td colspan="3" class="small mut">… và ' + (ms.length - 8) + ' tiến trình nhỏ hơn (chọn riêng ở chế độ “Từng tiến trình”)</td></tr>' : '');
+  }
+  /* Hộp xác nhận trước → sau, rồi (nếu cần) hỏi PIN, rồi gọi server. Server kiểm lại mọi điều kiện lúc thực thi. */
+  function endProc(btn) {
+    var pid = +btn.dataset.pid, start = btn.dataset.start, m = procBy(pid, start);
+    if (!m) { RG.toast('Tiến trình không còn trong danh sách. Hãy tải lại.', 'err'); return; }
+    var l = S.live, free = l ? l.availRamGB : null, gain = m.ramMB / 1024;
+    var html = '<p>Kết thúc <b>' + esc(m.name) + '</b> (PID ' + pid + ')? Việc chưa lưu trong tiến trình này sẽ mất; cửa sổ (nếu có) được yêu cầu đóng êm trước, không đóng thì buộc dừng.</p>' +
+      (free != null ? '<p>RAM trống: <b>' + RG.fmtGB(free) + ' → ' + RG.fmtGB(free + gain) + '</b> <span class="mut small">(ước tính theo bộ nhớ đang dùng)</span></p>' : '') +
+      (m.endNeedsPin ? '<p class="hint">Tiến trình này đang do trợ lý AI giữ nên cần PIN.</p>' : '') +
+      '<p class="mut small">Các tiến trình con thuộc nhóm build/test/dev của nó cũng được kết thúc; việc kết thúc được ghi vào nhật ký.</p>';
+    RG.confirm('Kết thúc tiến trình?', html, 'Kết thúc', true).then(function (ok) {
+      if (!ok) return;
+      var send = function (pin) {
+        btn.disabled = true;
+        RG.api('/api/process/end', { method: 'POST', body: { pid: pid, start: start, pin: pin || '' } }).then(function (j) {
+          var kids = Math.max(0, (j.tree || []).length - 1);
+          RG.toast('Đã kết thúc ' + (j.name || m.name) + ' (PID ' + pid + ')' + (kids ? ' và ' + kids + ' tiến trình con' : '') + '. Đã xác minh tiến trình thoát.', 'ok', 7000);
+          RG.loadEvents().catch(function () { }).then(function () { drawLow(); });
+          fetchProcs();
+        }).catch(function (e) {
+          var c = e.data && e.data.code;
+          if (c === 'pin-required' || c === 'pin-wrong') {
+            btn.disabled = false;
+            RG.askPin(c === 'pin-wrong' ? 'PIN không đúng. Nhập lại:' : 'Tiến trình này do trợ lý AI giữ nên cần PIN.').then(function (p) { if (p) send(p); });
+          } else { RG.toast(e.message, 'err', 9000); btn.disabled = false; fetchProcs(); }
+        });
+      };
+      if (m.endNeedsPin) RG.askPin('Tiến trình này do trợ lý AI giữ nên cần PIN.').then(function (p) { if (p) send(p); }); else send('');
+    });
+  }
   function protButtons(si) {
     var names = [], seen = {}; si.ms.forEach(function (m) { if (!seen[m.name]) { seen[m.name] = 1; names.push(m); } });
     return names.slice(0, 6).map(function (m) {
@@ -155,12 +195,36 @@
     var ram = sumRam(si.ms), ledger = si.ms.some(function (m) { return m.agent; }), ch = si.id.closeHint;
     return '<p>Đóng ' + (si.ms.length > 1 ? 'cả nhóm' : 'tiến trình này') + ' có thể giải phóng khoảng <b>' + RG.fmtBytes(ram * MB) + '</b> RAM <span class="mut small">(ước tính theo bộ nhớ đang dùng; số thực tế có thể khác)</span>.</p>' +
       (ch ? '<blockquote class="mm-hint">' + esc(ch) + '</blockquote>' : '') +
-      '<p class="hint">Resource Guard không tự đóng ứng dụng' + (ledger ? ' (chỉ tiến trình agent đã đăng ký và mất chủ mới có thể bị dọn, qua màn Ổ đĩa)' : '') + ': muốn giải phóng RAM, hãy tự đóng sau khi lưu việc đang làm.</p>';
+      '<p class="hint">Resource Guard không tự đóng ứng dụng' + (ledger ? ' của bạn (tiến trình agent đã đăng ký và mất chủ có thể dọn ở màn Ổ đĩa)' : '') + '. Có thể kết thúc từ mục “Kết thúc tiến trình” bên dưới với các loại an toàn (build, test, máy chủ dev…); còn lại hãy tự đóng sau khi lưu việc đang làm.</p>';
   }
   function cmdHtml(si) {
     var c = si.rep.cmd || ''; if (!c) return '<span class="mut small">Không đọc được dòng lệnh.</span>';
     var long = c.length > 140;
     return '<code class="mono mm-cmd' + (P.cmdOpen ? ' open' : '') + '">' + esc(P.cmdOpen || !long ? c : c.slice(0, 140) + '…') + '</code>' + (long ? ' <button class="btn sm" id="mCmdBtn" aria-expanded="' + !!P.cmdOpen + '">' + (P.cmdOpen ? 'Thu gọn' : 'Xem đủ') + '</button>' : '');
+  }
+  /* Giải thích tiến trình (D4): server dựng từ luật + cây tiến trình + file cài đặt + chữ ký số + ledger/lease; không dùng AI, chỉ đọc. */
+  P.expl = P.expl || {};
+  function explKey(si) { return si.rep.pid + '|' + (si.rep.start || ''); }
+  function explainHtml(si) {
+    var e = P.expl[explKey(si)];
+    if (!si.rep.start) return '<span class="mut small">Chưa đọc được thời điểm khởi động; thử lại sau vài giây.</span>';
+    if (!e) return '<button class="btn sm" id="mExplBtn">' + RG.icon('info') + ' Giải thích đầy đủ</button> <span class="small mut">đọc từ máy, không gửi đi đâu</span>';
+    if (e.err) return '<span class="small" style="color:var(--bad)">' + esc(e.err) + '</span> <button class="btn sm" id="mExplBtn">Thử lại</button>';
+    if (e.loading) return '<span class="small mut">Đang đọc…</span>';
+    var sv = e.serving || {}, ins = e.install || {};
+    return '<p class="mm-expl">' + esc(e.text) + '</p>' +
+      (sv.kind && sv.kind !== 'none' ? '<div class="small"><span class="pill ask">đang phục vụ trợ lý AI</span> ' + esc(sv.detail) + '</div>' : '') +
+      (ins.dir ? '<div class="small mut">Vị trí: <code class="mono">' + esc(ins.dir) + '</code>' + (ins.company ? ' · ' + esc(ins.company) : '') + ' · ' + (ins.signed ? 'có chữ ký số hợp lệ' : 'không xác minh được chữ ký số') + '</div>' : '') +
+      '<div class="small mut">Nguồn: ' + esc((e.sources || []).join(', ')) + '</div>';
+  }
+  function loadExplain(si) {
+    var k = explKey(si); P.expl[k] = { loading: true };
+    var el = $('#mExpl'); if (el) el.innerHTML = explainHtml(si);
+    RG.api('/api/process/explain?pid=' + encodeURIComponent(si.rep.pid) + '&start=' + encodeURIComponent(si.rep.start || '')).then(function (j) {
+      P.expl[k] = j;
+    }).catch(function (err) { P.expl[k] = { err: err.message || 'Không giải thích được tiến trình này.' }; }).then(function () {
+      var s2 = selInfo(), el2 = $('#mExpl'); if (el2 && s2 && explKey(s2) === k) { el2.innerHTML = explainHtml(s2); var b = $('#mExplBtn'); if (b) b.onclick = function () { loadExplain(s2); }; }
+    });
   }
   function drawDetail() {
     var el = $('#mDetail'); if (!el) return;
@@ -173,17 +237,20 @@
       '<div class="small mut" id="mSum">' + summaryHtml(si) + '</div>' +
       '<dl class="kv mm-kv"><dt>Là gì</dt><dd>' + esc(id.what || 'Chưa nhận diện được') + (guess ? ' <span class="pill ask" title="Suy đoán từ tên và vị trí, không chắc chắn">phỏng đoán</span>' : '') + '</dd>' +
       '<dt>Của ai</dt><dd>' + own + (id.project ? '<div class="small mut">Dự án: ' + esc(id.project) + '</div>' : '') + '</dd>' +
+      '<dt>Giải thích</dt><dd id="mExpl">' + explainHtml(si) + '</dd>' +
       '<dt>Dòng lệnh</dt><dd id="mCmd">' + cmdHtml(si) + '</dd></dl>' +
       '<h4 class="dh">Theo thời gian <span class="seg sm" role="group" aria-label="Khoảng thời gian">' + [[60, '1 giờ'], [360, '6 giờ'], [1440, '24 giờ']].map(function (x) { return '<button data-min="' + x[0] + '" aria-pressed="' + (P.minutes === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</span></h4>' +
       '<div class="small mut">CPU (%) · ' + esc(si.rep.name) + '</div><svg id="dCpu" class="chart" style="height:80px" role="img" aria-label="CPU của ' + esc(si.rep.name) + ' theo thời gian"></svg>' +
       '<div class="small mut">RAM (MB)</div><svg id="dRam" class="chart" style="height:80px" role="img" aria-label="RAM của ' + esc(si.rep.name) + ' theo thời gian"></svg><div class="small mut" id="dNote"></div>' +
       '<h4 class="dh">Nếu đóng</h4><div id="mWhat">' + whatHtml(si) + '</div>' +
       '<h4 class="dh">Ưu tiên CPU' + RG.help('Hạ ưu tiên nhường CPU cho việc khác, không giải phóng RAM. Hoàn tác bất cứ lúc nào bằng “Trả về bình thường”.') + '</h4><table class="small"><thead><tr><th>Tiến trình</th><th class="r">CPU</th><th class="r">RAM</th><th></th></tr></thead><tbody id="mMem">' + memberTable(si) + '</tbody></table>' +
+      '<h4 class="dh">Kết thúc tiến trình' + RG.help('Chỉ hiện nút cho loại an toàn: build, test, máy chủ dev, trình quản lý gói… Hệ thống, bảo mật, dịch vụ, Docker/SQL, vùng bạn bảo vệ và chính Resource Guard thì không bao giờ. Có hộp xác nhận trước khi thực hiện.') + '</h4><table class="small"><thead><tr><th>Tiến trình</th><th class="r">RAM</th><th></th></tr></thead><tbody id="mEnd">' + endTable(si) + '</tbody></table>' +
       '<h4 class="dh">Bảo vệ khỏi tự dọn' + RG.help('Tiến trình được bảo vệ không bao giờ bị tự dọn, kể cả khi nhóm đặt “Tự động”.') + '</h4><div id="mProt">' + protButtons(si) + '</div>';
     bindDetail(si); loadHistory(si.rep.name);
   }
   function bindDetail(si) {
     RG.$$('#mDetail [data-min]').forEach(function (b) { b.onclick = function () { P.minutes = +b.dataset.min; RG.$$('#mDetail [data-min]').forEach(function (x) { x.setAttribute('aria-pressed', x === b); }); var s = selInfo(); if (s) loadHistory(s.rep.name); }; });
+    var xb = $('#mExplBtn'); if (xb) xb.onclick = function () { loadExplain(si); };
     var cb = $('#mCmdBtn'); if (cb) cb.onclick = function () { P.cmdOpen = !P.cmdOpen; var s = selInfo(); if (s) { $('#mCmd').innerHTML = cmdHtml(s); bindDetail(s); } };
     bindDyn();
   }
@@ -198,13 +265,16 @@
         }).catch(function (e) { RG.toast(e.message, 'err', 8000); b.disabled = false; });
       };
     });
+    RG.$$('#mDetail [data-end]').forEach(function (b) { b.onclick = function () { endProc(b); }; });
     RG.$$('#mDetail [data-prot]').forEach(function (b) { b.onclick = function () { RG.toggleProtect('process', b.dataset.prot, b.getAttribute('aria-pressed') !== 'true').then(function () { fetchProcs(); }).catch(function () { }); }; });
   }
   // Mỗi lần có dữ liệu mới chỉ làm mới phần số, không vẽ lại biểu đồ.
   function updateDyn() {
     var si = selInfo(); if (!si) { if (P.sel) { P.sel = null; drawDetail(); } return; }
     var a = $('#mSum'); if (!a) { drawDetail(); return; }
-    a.textContent = summaryHtml(si); $('#mMem').innerHTML = memberTable(si); $('#mWhat').innerHTML = whatHtml(si); $('#mProt').innerHTML = protButtons(si); bindDyn();
+    a.textContent = summaryHtml(si); $('#mMem').innerHTML = memberTable(si); $('#mWhat').innerHTML = whatHtml(si); $('#mProt').innerHTML = protButtons(si);
+    var me = $('#mEnd'); if (me) me.innerHTML = endTable(si);
+    bindDyn();
   }
   function loadHistory(name) {
     RG.api('/api/process/history?name=' + encodeURIComponent(name) + '&min=' + P.minutes).then(function (j) {

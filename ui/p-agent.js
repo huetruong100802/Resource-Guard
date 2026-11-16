@@ -1,4 +1,4 @@
-/* p-agent.js - "Hỏi trợ lý": ngăn kéo (mở từ nhóm Cần bạn xem lại ở trang Ổ đĩa). Xem trước dữ liệu gửi đi, chạy claude (haiku, high), hiện tóm tắt + phát hiện.
+/* p-agent.js - "Hỏi trợ lý": ngăn kéo (mở từ nhóm Cần bạn xem lại ở trang Ổ đĩa). Xem trước dữ liệu gửi đi, chạy nhà cung cấp AI đang chọn (Cài đặt → Trợ lý AI đánh giá), hiện tóm tắt + phát hiện.
    Đánh giá từng mục hiện ngay ở trang Ổ đĩa dưới nhãn "Trợ lý AI". Không có trang riêng. */
 (function () {
   'use strict';
@@ -14,7 +14,7 @@
     var j = S.jobs.agent, run = j && j.status === 'running', l = S.agent;
     var h = '<p style="margin:0 0 10px">Máy đã đo toàn bộ sự thật (dung lượng, tuổi file, tiến trình) và lập kế hoạch. Trợ lý AI chỉ <b>đọc bản tóm tắt</b>, đánh giá các mục máy không tự quyết được và nói <b>nên làm gì trước, vì sao</b>. <b>Bạn quyết định</b>: không có gì bị xoá ở đây.</p>' +
       '<div class="field" style="margin:0"><button class="btn primary" id="agRun"' + (run ? ' disabled' : '') + '>' + RG.icon('spark') + ' Hỏi trợ lý</button>' +
-      '<button class="btn" id="agPrev">' + RG.icon('eye') + ' ' + (A.showPreview ? 'Ẩn' : 'Xem trước') + ' dữ liệu sẽ gửi</button>' + (run ? '<span class="spin"></span><span class="small mut">đang chờ claude… (thường 10–40 giây)</span>' : '') + '</div>' +
+      '<button class="btn" id="agPrev">' + RG.icon('eye') + ' ' + (A.showPreview ? 'Ẩn' : 'Xem trước') + ' dữ liệu sẽ gửi</button>' + (run ? '<span class="spin"></span><span class="small mut">đang chờ ' + esc(S.settings && S.settings.evaluator ? S.settings.evaluator.label : 'trợ lý AI') + '… (thường 10–40 giây)</span>' : '') + '</div>' +
       '<p class="hint">Chỉ gửi metadata: tên mục, kích thước, số ngày không dùng, số liệu RAM/CPU/ổ đĩa, tên tiến trình, tóm tắt chính sách và kế hoạch. Không gửi nội dung file; đường dẫn đã thay tên tài khoản bằng “~”.</p>' +
       (A.showPreview ? '<pre class="json" id="agJson">' + (A.preview ? esc(A.preview) : 'Đang tạo bản xem trước…') + '</pre>' : '');
     if (j && j.status === 'error' && !run) h += '<div class="alert warn" style="margin-top:10px"><div><b>Trợ lý lỗi:</b> ' + esc(j.message) + '</div></div>';
@@ -53,7 +53,7 @@
       if (A.showPreview) RG.api('/api/agent/payload').then(function (j) { A.preview = JSON.stringify(j.payload, null, 2) + '\n\n// ' + RG.fmtBytes(j.bytes) + ' sẽ được gửi'; draw(); }).catch(function (e) { A.preview = 'Lỗi: ' + e.message; draw(); });
     };
     RG.$$('.drawer [data-ps]').forEach(function (x) { x.onclick = function () {
-      var p = S.agent.result.policySuggestions[+x.dataset.ps]; if (!S.draft) return; S.draft.categories[p.kind] = p.setting; S.dirty = JSON.stringify(S.draft) !== JSON.stringify(S.policy);
+      var p = S.agent.result.policySuggestions[+x.dataset.ps]; if (!S.draft) return; S.draft.categories[p.kind] = p.setting; S.dirty = RG.policyDirty();
       RG.toast('Đã áp vào bản nháp. Sang Cài đặt để lưu.', 'ok'); x.disabled = true;
     }; });
   }
@@ -63,9 +63,9 @@
     if (!cj || !bj) RG.confirm('Dữ liệu chưa đầy đủ', '<p>' + (!bj ? 'Chưa quét phân bố ổ đĩa. ' : '') + (!cj ? 'Chưa quét các mục có thể dọn. ' : '') + 'Trợ lý vẫn chạy được nhưng đánh giá sẽ thiếu. Tiếp tục?</p>', 'Vẫn gửi', false).then(function (ok) { if (ok) go(); });
     else go();
   }
-  /* Mở ngăn kéo. Không có `claude` trong PATH thì không mở: kế hoạch tất định vẫn đầy đủ. */
+  /* Mở ngăn kéo. Không có nhà cung cấp AI nào dùng được thì không mở: kế hoạch tất định vẫn đầy đủ. */
   RG.askAgent = function () {
-    if (S.settings && S.settings.agentAvailable === false) { RG.toast('Không tìm thấy lệnh claude trong PATH nên không dùng được Trợ lý AI. Kế hoạch dọn của máy vẫn đầy đủ.', 'err', 8000); return; }
+    if (S.settings && S.settings.agentAvailable === false) { RG.toast('Chưa có nhà cung cấp AI nào dùng được (Claude Code, Codex, Gemini, Ollama…). Chọn ở Cài đặt → Trợ lý AI đánh giá. Kế hoạch dọn của máy vẫn đầy đủ.', 'err', 9000); return; }
     A.dr = RG.drawer({ title: 'Hỏi trợ lý AI', html: '', actions: [{ label: 'Đóng' }], onClose: function () { if (A.timer) { clearInterval(A.timer); A.timer = null; } } });
     A.dr.el.classList.add('wide');
     draw();

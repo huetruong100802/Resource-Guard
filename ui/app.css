@@ -107,6 +107,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:po
 .alert.warn b{color:var(--critical)}
 .alert.info{background:var(--accent-soft);border-color:transparent}
 .alert.ok{background:var(--normal-soft);border-color:transparent}
+/* Cỡ mặc định cho mọi biểu tượng RG.icon: không có thì SVG giãn kín khung cha. Các luật `.btn svg`, `.empty svg`… cụ thể hơn nên vẫn thắng. */
+:where(svg.ic){width:1.1em;height:1.1em;flex:none;vertical-align:-.2em}
 .empty{text-align:center;padding:36px 16px;color:var(--mut)}
 .empty h3{margin:8px 0 4px;color:var(--fg);font-size:16px}
 .empty svg{width:42px;height:42px;opacity:.6}
@@ -379,7 +381,7 @@ button.badge:hover{filter:brightness(1.08)}
 .rb-mk.top:hover .mk-s,.rb-mk.top:focus-within .mk-s,.rb-mk.top.on .mk-s{display:none}
 .rb-mk.top .rb-lab{z-index:3;background:var(--panel)}
 .rb-mk.top .rb-knob{z-index:3}
-svg.tm .tile.ftile rect.main{stroke:var(--mut);stroke-width:1.5;stroke-dasharray:6 4}
+svg.tm .tile.ftile rect.tmr{stroke:var(--mut);stroke-width:1.5;stroke-dasharray:6 4}
 .hatch{background-image:repeating-linear-gradient(45deg,transparent 0 4px,var(--panel) 4px 7px)}
 .donut{position:relative;display:inline-block;flex:none}
 .donut .dseg{cursor:pointer;transition:opacity .15s}
@@ -395,11 +397,11 @@ svg.tm .tile.ftile rect.main{stroke:var(--mut);stroke-width:1.5;stroke-dasharray
 .legend .lg .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .legend .lg .v{color:var(--mut)}
 svg.tm{--tm-fill:color-mix(in srgb,var(--accent) 62%,var(--panel))}
-svg.tm .tile rect.main{stroke:var(--panel);stroke-width:2}
+svg.tm .tile rect.tmr{stroke:var(--panel);stroke-width:2}
 svg.tm.hl-on .tile:not(.hl){opacity:.72}
-svg.tm .tile.hl rect.main{stroke:var(--accent);stroke-width:3}
-svg.tm .tile.sel rect.main{stroke:var(--accent);stroke-width:3.5}
-svg.tm .tile.parent rect.main{stroke:var(--panel);stroke-width:1}
+svg.tm .tile.hl rect.tmr{stroke:var(--accent);stroke-width:3}
+svg.tm .tile.sel rect.tmr{stroke:var(--accent);stroke-width:3.5}
+svg.tm .tile.parent rect.tmr{stroke:var(--panel);stroke-width:1}
 svg.tm text.hd{font-weight:600;fill:var(--fg)}
 .chart-empty{margin:4px 0}
 
@@ -485,3 +487,24 @@ svg.tm text.hd{font-weight:600;fill:var(--fg)}
 .dk-auto>b{font-size:var(--font-size-2)}.dk-auto .dk-sent{flex:1;min-width:200px}
 .dg-more{border:0;background:transparent;color:var(--accent);font-weight:600;cursor:pointer;font-size:var(--font-size-2);padding:2px 0;margin-left:auto}
 .dg-more:hover{text-decoration:underline}
+.as-list{display:flex;flex-direction:column;gap:6px;margin:6px 0}
+.as-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.as-main{flex:1 1 280px;min-width:0}.as-ttl{font-weight:600;overflow-wrap:anywhere}.as-smp{overflow-wrap:anywhere}
+.as-side{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-left:auto}.as-gain{min-width:90px;text-align:right}
+.as-acts{display:flex;gap:6px}
+.as-more{margin-top:8px}.as-more>summary{cursor:pointer;padding:2px 0}
+.mm-expl{margin:0 0 4px;line-height:1.5}
+.as-banner{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-color:var(--caution);background:var(--caution-soft)}
+.au-list{display:flex;flex-direction:column;gap:8px;margin:8px 0}
+.au-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.au-name{flex:1 1 260px;min-width:0}
+.au-adv{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 10px;margin:6px 0;border:1px dashed var(--accent);border-radius:10px}.au-adv>span{flex:1 1 240px}
+/* Cài đặt: thẻ không kéo giãn theo thẻ cao nhất cùng hàng; Kết nối agent; Giới thiệu */
+.set-grid{align-items:start}
+.ag-tbl td,.ag-tbl th{padding:7px 10px;vertical-align:middle}.ag-tbl th{text-align:left;font-size:12px;color:var(--mut);font-weight:600}
+.ag-tbl tr+tr td{border-top:1px solid var(--line)}
+.prov-list{list-style:none;padding:0;margin:10px 0 4px}.prov-list li{display:flex;align-items:center;gap:7px;padding:3px 0;flex-wrap:wrap}
+.prov-list .dot{background:var(--line)}.prov-list .dot.on{background:var(--normal)}
+.cn-step{margin:14px 0}.cn-h{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.about-tbl th{text-align:left;color:var(--mut);font-weight:500;padding:4px 12px 4px 0;white-space:nowrap;vertical-align:top}.about-tbl td{padding:4px 0;word-break:break-all}
+.side-foot .ver{opacity:.75;font-size:11px}

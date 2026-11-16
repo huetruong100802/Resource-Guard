@@ -4,9 +4,11 @@
 
 **Giám sát RAM, CPU, ổ đĩa theo thời gian thực và dọn dẹp máy dev Windows một cách an toàn — con người luôn là bên quyết định.**
 
-[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-5391FE?logo=powershell&logoColor=white)](#yêu-cầu)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#yêu-cầu)
-[![Tests](https://img.shields.io/badge/acceptance%20tests-132%20passing-2EA44F)](#kiểm-thử)
+[![Version](https://img.shields.io/badge/version-0.9.0-2f6fdb)](CHANGELOG.md)
+[![PowerShell](https://img.shields.io/badge/Windows%20PowerShell-5.1-5391FE?logo=powershell&logoColor=white)](#yêu-cầu)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](#yêu-cầu)
+[![Tests](https://img.shields.io/badge/acceptance%20tests-796%20passing-2EA44F)](#kiểm-thử)
+[![Agents](https://img.shields.io/badge/agents-MCP%20%7C%20hooks%20%7C%20HTTP-8A63D2)](#kết-nối-agent)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#điểm-nổi-bật)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -38,7 +40,8 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 | 🥧 **Phân tích ổ đĩa** | Treemap đào sâu (chuột/bàn phím) với lớp phủ: mục dọn được, đang chọn, được bảo vệ, vùng cố định. **Quét nhanh** chỉ quét phần dọn được; **quét đầy đủ** quét hết. Chạy nền, kết quả hiện dần. |
 | 🧹 **Dọn dẹp có kiểm soát** | File tạm, `bin/obj`, `node_modules`, cache dev, repo cũ đã đồng bộ remote, mục lớn lâu không đụng, tiến trình mồ côi của agent. |
 | 🤖 **Tự động hoá theo chính sách** | Chế độ Tắt / Chạy thử / Bật; ngưỡng kích hoạt, cooldown, giới hạn GB mỗi lượt, thứ tự ưu tiên, vùng bảo vệ. |
-| 🧠 **Agent đánh giá (tuỳ chọn)** | `claude -p --model haiku --effort high` đọc **metadata** và gợi ý nên dọn/giữ gì; “nên dọn” chỉ chọn sẵn ô, con người xác nhận; “nên giữ” (tin cậy cao) tự bảo vệ có thời hạn. |
+| 🔌 **Kết nối mọi coding agent** | MCP server, hook và HTTP cho Claude Code, Codex, Gemini CLI, Cursor, Copilot, VS Code, Windsurf, opencode, Goose, Aider…: agent hỏi trước khi chạy việc nặng, không bao giờ tự xoá. |
+| 🧠 **Trợ lý AI đánh giá (tuỳ chọn)** | Claude Code, Codex, Gemini, Ollama (chạy trên máy) hoặc API tương thích OpenAI đọc **metadata** và gợi ý nên dọn/giữ gì; “nên dọn” chỉ chọn sẵn ô, con người xác nhận; “nên giữ” (tin cậy cao) tự bảo vệ có thời hạn. |
 | 🗜️ **Nén trước khi xoá** | Repo cũ và mục lớn có thể được nén zip, xác minh từng file rồi mới xoá bản gốc; có nút giải nén về chỗ cũ. |
 | 🔒 **Bảo mật theo thiết kế** | Chỉ nghe `localhost`, chống DNS-rebinding/CSRF, PIN dạng PBKDF2, xoá bằng quyền admin chỉ qua UAC và tự kiểm lại độc lập. |
 | 📦 **Không phụ thuộc** | Chỉ PowerShell + HTML/JS thuần (SVG), không cần cài module, không cần mạng, không gọi LLM khi chạy lõi. |
@@ -47,12 +50,12 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/img/cleanup.png" alt="Trang Dọn dẹp: nhóm theo bước, tác động nếu dọn"><br><sub><b>Dọn dẹp</b> — mục dọn được xếp theo bước an toàn; ô bên phải cho thấy tác động trước khi xác nhận.</sub></td>
+    <td width="50%"><img src="docs/img/cleanup.png" alt="Ô Việc có thể làm trên trang Ổ đĩa"><br><sub><b>Việc có thể làm</b> — trên trang Ổ đĩa: chọn mục rủi ro thấp, bật Tắt / Chạy thử / Bật cho tự động hoá. Ô trống khi chưa có mục nào để dọn.</sub></td>
     <td width="50%"><img src="docs/img/disk-light.png" alt="Phân tích ổ đĩa"><br><sub><b>Ổ đĩa</b> — phân bố theo nhóm và treemap thư mục (bấm đúp để đào sâu).</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/img/cpu.png" alt="Tiến trình và RAM theo thời gian"><br><sub><b>Tiến trình</b> — ai đang chiếm RAM theo thời gian, đồ thị CPU, bảng tiến trình gộp theo tên/PID.</sub></td>
-    <td width="50%"><img src="docs/img/automation.png" alt="Trang Tự động hoá"><br><sub><b>Tự động hoá</b> — câu mô tả việc sẽ làm, kéo ngưỡng kích hoạt, chọn Tắt / Chạy thử / Bật theo từng nhóm.</sub></td>
+    <td width="50%"><img src="docs/img/automation.png" alt="Mốc tự dọn trên thanh dung lượng ổ đĩa"><br><sub><b>Tự động hoá</b> — kéo mốc "tự dọn tại mốc này" trên thanh dung lượng ổ đĩa; công tắc theo nhóm nằm ở ô Việc có thể làm.</sub></td>
   </tr>
   <tr>
     <td colspan="2"><img src="docs/img/settings.png" alt="Cài đặt"><br><sub><b>Cài đặt</b> — chu kỳ lấy mẫu, ngưỡng trạng thái, khởi động cùng Windows, giao diện sáng/tối.</sub></td>
@@ -64,13 +67,27 @@ Mọi thao tác xoá/kết thúc tiến trình đều đi qua một quy trình `
 ## Yêu cầu
 
 - Windows 10/11
-- Windows PowerShell 5.1 **hoặc** PowerShell 7+
-- (Tuỳ chọn) [Claude Code CLI](https://claude.com/claude-code) trong `PATH` để dùng tính năng *Agent đánh giá*
+- Windows PowerShell 5.1 (có sẵn trên Windows; không cần cài `pwsh`, không cần quyền admin)
+- Microsoft Edge hoặc Chrome để mở giao diện dạng cửa sổ ứng dụng (không có thì mở tab trình duyệt mặc định)
+- (Tuỳ chọn) một nhà cung cấp AI cho tính năng *Trợ lý AI đánh giá*: Claude Code, Codex CLI, Gemini CLI, Ollama chạy trên máy, hoặc API tương thích OpenAI. Xem [Kết nối agent](#kết-nối-agent).
 
-## Bắt đầu nhanh
+## Cài đặt
 
 ```powershell
 git clone https://github.com/huetruong100802/Resource-Guard.git
+cd Resource-Guard
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Autostart -AddToPath
+```
+
+Trình cài chép app vào `%LOCALAPPDATA%\Programs\ResourceGuard`, tạo lối tắt Start Menu (`-Desktop` để thêm ở màn hình nền), đăng ký trong **Settings → Apps** và mở app trong cửa sổ riêng. `-Autostart` cho app chạy ngầm mỗi lần đăng nhập; `-AddToPath` thêm lệnh `rguard`. Chạy lại `install.ps1` để cập nhật: dữ liệu và cấu hình (`~/.agent-resource`) giữ nguyên.
+
+Gỡ: **Settings → Apps → Resource Guard → Uninstall**, hoặc `uninstall.ps1` (thêm `-PurgeData` để xoá cả dữ liệu).
+
+> Lệnh `rg` trùng tên với [ripgrep](https://github.com/BurntSushi/ripgrep). Nếu máy có ripgrep, dùng **`rguard`** (cùng tham số); `rg path` sẽ cảnh báo khi phát hiện xung đột.
+
+## Bắt đầu nhanh (chạy thẳng từ thư mục clone)
+
+```powershell
 cd Resource-Guard
 
 .\rg start           # chạy ngầm (nếu chưa chạy) và mở giao diện http://localhost:8765/
@@ -111,12 +128,12 @@ Thêm `-Json` vào lệnh để lấy đầu ra máy-đọc. Các script lẻ (`
 
 | Tab | Chức năng |
 |---|---|
-| **Trang chủ** | Một câu trạng thái; “Sẵn sàng cho” build/test/agent (thiếu bao nhiêu GB); mỗi ổ một thanh tác động + dự báo ngày đầy; **kế hoạch đề xuất** theo bước (rê vào bước thì thanh ảnh hưởng đổi); biểu đồ “Resource Guard đã làm gì” với điểm đánh dấu bấm được để mở *biên lai*; nút **Hỏi trợ lý** (ngăn kéo, ẩn nếu không có `claude` trong PATH). |
+| **Trang chủ** | Một câu trạng thái; “Sẵn sàng cho” build/test/agent (thiếu bao nhiêu GB); mỗi ổ một thanh tác động + dự báo ngày đầy; **kế hoạch đề xuất** theo bước (rê vào bước thì thanh ảnh hưởng đổi); biểu đồ “Resource Guard đã làm gì” với điểm đánh dấu bấm được để mở *biên lai*; nút **Hỏi trợ lý** (ngăn kéo, ẩn nếu không có `claude` trong PATH); khối **Báo cáo của trợ lý** (cụm tệp nên nén / dọn / giữ, mỗi cụm có lý do, nguồn *luật* hay *agent* và ước tính giải phóng); banner khi tự dọn xong mà ổ vẫn thiếu chỗ; nút **Dừng khẩn cấp**. |
 | **Dọn dẹp** | Các bước của kế hoạch dưới dạng nhóm mở được; tick cả nhóm hoặc từng mục; thanh ảnh hưởng `trước → sau` đổi tức thì; hộp xác nhận cho thấy cả hành động lẫn ảnh hưởng; sau khi dọn có **dự kiến / thực tế**. UI chỉ gửi *key*, không bao giờ gửi đường dẫn. Vẫn có khối Bản nén đã tạo, Cần quyền admin, Agent đang giữ. |
 | **Ổ đĩa** | Thanh phân bố theo nhóm (hiện dần khi đang quét), **treemap** đào sâu bằng chuột hoặc Enter (Esc/Backspace để lùi), tab *Top lớn nhất*, ngăn kéo cho từng thư mục (bảo vệ thư mục, chọn mục dọn). **Quét nhanh** / **Quét đầy đủ**. |
-| **Tiến trình** | Biểu đồ RAM xếp chồng theo tiến trình, CPU kèm điểm đánh dấu khi hạ ưu tiên, bảng tiến trình. Ngăn kéo từng tiến trình: lịch sử, “nếu đóng ứng dụng này sẽ giải phóng bao nhiêu” (ước tính), **hạ ưu tiên / hoàn tác**, bảo vệ. Không có nút kết thúc tiến trình. |
+| **Tiến trình** | Biểu đồ RAM xếp chồng theo tiến trình, CPU kèm điểm đánh dấu khi hạ ưu tiên, bảng tiến trình. Ngăn kéo từng tiến trình: lịch sử, “nếu đóng ứng dụng này sẽ giải phóng bao nhiêu” (ước tính), **hạ ưu tiên / hoàn tác**, bảo vệ, **Giải thích** (là gì, mở bởi ai, dịch vụ, nơi cài đặt, chữ ký số, đang phục vụ phiên agent nào; đọc từ máy, không dùng AI) và **Kết thúc** (chỉ hiện nút cho build/test/máy chủ dev…, có hộp xác nhận trước → sau; tiến trình do agent đang giữ cần thêm PIN). |
 | **Tự động hoá** | Một câu mô tả chính sách; **kéo vạch ngưỡng** trên biểu đồ ổ (hoặc dùng phím mũi tên) để đổi; xem trước (số lần chạm trong 14 ngày, mục sẽ bị chọn) trước khi Lưu; 3 mức điền sẵn; mục Nâng cao (ngưỡng RAM, thứ tự, vùng bảo vệ) thu gọn. Lưu khi *Bật* hoặc nới lỏng vẫn cần PIN. |
-| **Cài đặt** | Chu kỳ lấy mẫu (2–300 giây), ngưỡng, giao diện sáng/tối/theo hệ thống, công tắc **chạy cùng Windows** và **lối tắt Start Menu**. |
+| **Cài đặt** | Chu kỳ lấy mẫu (2–300 giây), ngưỡng, giao diện sáng/tối/theo hệ thống, công tắc **chạy cùng Windows** và **lối tắt Start Menu**, **Mức tự chủ của trợ lý** theo từng nhóm việc (L0–L3, xem bên dưới). |
 
 Lần đầu mở, một hộp 3 bước giới thiệu app, bật chạy cùng Windows/lối tắt và chọn chế độ tự động (mặc định **Chạy thử**). Có thể bỏ qua; mọi thứ đổi lại được ở Cài đặt và Tự động hoá. Đặt PIN vẫn chỉ ở console (`rg pin`).
 
@@ -171,14 +188,72 @@ Bộ quét dùng Win32 `FindFirstFileExW` đa luồng, ưu tiên thấp (BelowNo
 
 **Tự làm mới nền:** khi máy rảnh (CPU dưới `scan.cpuMaxPct`, mặc định 40%), kết quả quét cũ hơn `scan.autoRefreshHours` (mặc định 6; `0` = tắt) (và không có tác vụ nền nào đang chạy) thì server tự chạy một lượt ở ổ có số liệu cũ nhất, hoặc quét mục có thể dọn nếu nó cũ hơn. Mặc định là quét nhanh; lượt đầy đủ gần nhất cũ hơn 7 ngày thì quét đầy đủ. Hai lượt tự chạy cách nhau ít nhất 10 phút, mỗi lần một việc, ghi `scan-auto` vào log.
 
-## Agent đánh giá
+## Kết nối agent
 
-- Gọi `claude -p --model haiku --effort high`, chi phí thực tế khoảng **$0.006 / lần**.
+Resource Guard làm việc với nhiều coding agent, không riêng Claude Code. Có ba đường, đều **chỉ đọc và tư vấn**: agent hỏi trước khi chạy việc nặng, được báo khi máy sắp cạn RAM hoặc ổ đĩa, xem được danh sách có thể dọn. Không agent nào xoá file hay kết thúc tiến trình được; mọi lần dọn vẫn do bạn duyệt.
+
+| Đường | Dành cho | Cách dùng |
+|---|---|---|
+| **MCP server** (`scripts/rg-mcp.ps1`, stdio) | mọi agent hỗ trợ MCP | công cụ `resource_status`, `preflight`, `release`, `cleanup_candidates`, `explain_process` |
+| **Hook** (`scripts/rg-hook.ps1 -Agent <id>`) | Claude Code, Gemini CLI, Cursor | chặn chắc chắn subagent/build khi máy Nguy cấp, không phụ thuộc model |
+| **HTTP** `POST /api/connect/v1/{session,preflight,release}`, `GET /api/connect/v1/status` | script, CI, agent tự viết | header `X-RG-Client: agent`; chỉ nghe localhost |
+| **Bọc lệnh** `rguard wrap -Agent aider -- aider …` | agent không có MCP lẫn hook | ghi nhận phiên trong lúc lệnh chạy |
+
+Lấy đoạn cấu hình: **Cài đặt → Kết nối agent → Cách kết nối** (có nút Sao chép), hoặc `rguard connect <agent>`. Resource Guard chỉ **in** đoạn cấu hình, không tự sửa file của bạn.
+
+| Agent | MCP | Hook | Bọc lệnh | Mức đã kiểm |
+|---|---|---|---|---|
+| Claude Code | ✓ | ✓ | | chạy trên máy thật |
+| Codex CLI | ✓ | | ✓ | client MCP thử theo giao thức |
+| Gemini CLI | ✓ | ✓ | ✓ | client MCP thử; hook theo tài liệu công khai |
+| Cursor | ✓ | ✓ | | client MCP thử; hook theo tài liệu công khai |
+| GitHub Copilot CLI, VS Code (Copilot Chat, Cline, Roo), Windsurf, opencode, Goose | ✓ | | (✓) | client MCP thử theo giao thức |
+| Aider | | | ✓ | |
+
+Danh mục agent nằm trong `config.default.json` (`agents.catalog`): tên tiến trình, regex dòng lệnh, thư mục cấu hình được bảo vệ, cách kết nối. Thêm agent mới bằng cách thêm một mục trong `config.json`, không cần sửa code. Ollama được nhận diện là runtime model cục bộ (nhóm hạ tầng, thường giữ nhiều RAM).
+
+## Trợ lý AI đánh giá
+
+Chọn nhà cung cấp ở **Cài đặt → Trợ lý AI đánh giá** (có nút *Thử kết nối*, câu hỏi thử không kèm dữ liệu máy):
+
+| Nhà cung cấp | Kiểu | Ghi chú |
+|---|---|---|
+| Claude Code | CLI | mặc định `haiku`, khoảng **$0.006 / lần**; đã kiểm trên máy thật |
+| Codex CLI, Gemini CLI | CLI | cờ dòng lệnh nằm trong `agents.providers.<id>.args`, chỉnh được nếu bản CLI của bạn khác |
+| Ollama | HTTP cục bộ | dữ liệu không rời máy; tự chọn model đầu tiên nếu chưa khai |
+| API tương thích OpenAI | HTTP | OpenAI, OpenRouter, LM Studio, vLLM…: khai `baseUrl` + `model`; khoá API chỉ đọc từ biến môi trường `apiKeyEnv`, không ghi vào file hay log |
+
+Mọi câu trả lời đi qua cùng một cửa: tách khối JSON, kiểm theo schema, rồi tới bộ lọc an toàn. Nhà cung cấp trả sai dạng thì kết quả bị bỏ. Codex, Gemini, Ollama và API OpenAI mới được kiểm bằng lệnh/máy chủ giả đúng hợp đồng, chưa chạy với dịch vụ thật.
+
+- Agent chỉ nhận **metadata**: tên thư mục, kích thước, số ngày không dùng, số liệu RAM/CPU/ổ đĩa, tên tiến trình, tóm tắt chính sách. **Không gửi nội dung file**; đường dẫn đã thay tên tài khoản bằng `~`.
 - Agent chỉ nhận **metadata**: tên thư mục, kích thước, số ngày không dùng, số liệu RAM/CPU/ổ đĩa, tên tiến trình, tóm tắt chính sách. **Không gửi nội dung file**; đường dẫn đã thay tên tài khoản bằng `~`.
 - Có nút *Xem trước dữ liệu sẽ gửi* để kiểm tra chính xác payload.
 - Kết quả là JSON có cấu trúc; key do agent bịa ra bị loại. Verdict **nên dọn** chỉ **chọn sẵn ô**, con người xác nhận mới xoá.
-- Trợ lý không còn là tab riêng: nút **Hỏi trợ lý** ở Trang chủ mở ngăn kéo; `#agent` trên URL mở Trang chủ kèm ngăn kéo. Không có `claude` trong PATH thì nút ẩn đi, kế hoạch tất định vẫn đầy đủ. Payload mang cả kế hoạch đề xuất và danh sách “cần xem lại”; agent được yêu cầu đánh giá các mục cần xem lại trước và để phần tóm tắt trả lời “nên làm gì trước”.
+- Trợ lý không còn là tab riêng: nút **Hỏi trợ lý** ở Trang chủ mở ngăn kéo; `#agent` trên URL mở Trang chủ kèm ngăn kéo. Không có nhà cung cấp nào dùng được thì nút ẩn đi, kế hoạch tất định vẫn đầy đủ. Payload mang cả kế hoạch đề xuất và danh sách “cần xem lại”; agent được yêu cầu đánh giá các mục cần xem lại trước và để phần tóm tắt trả lời “nên làm gì trước”.
 - Verdict **nên giữ** với độ tin cậy cao được **tự bảo vệ 30 ngày** (chỉ áp cho thư mục/file, không áp cho tiến trình): mục đó ẩn khỏi danh sách dọn và không bao giờ bị tự dọn. Khối “Agent đang giữ” ở tab Dọn dẹp cho xem lý do, ngày hết hạn và bỏ giữ từng mục. Agent chỉ thêm được bảo vệ, không gỡ được; dữ liệu ở `state\agent-keep.json`.
+
+## Trợ lý tự động hoá
+
+Trợ lý quản lý máy theo ba lớp, **lớp nào cũng chạy được khi tắt AI** (đường tất định luôn có):
+
+1. **Hiểu máy (chỉ đọc).** `rg-assistant.ps1` kiểm kê *metadata* (đường dẫn, kích thước, ngày sửa, ngày truy cập nếu bật, cờ tải từ web `Zone.Identifier`) của `Downloads`, `Documents`, `Desktop` và dữ liệu lớn ở góc khuất (`*.db`, `*.sqlite`, `*.bak`… dưới AppData; góc khuất **chỉ báo cáo**, không bao giờ đụng tới). Không mở nội dung tệp. Tệp được gom thành **cụm** theo thư mục cha, họ tệp và bậc tuổi (“25 tệp bảng tính (xlsx) trong Downloads, 40 MB, chưa đụng 120 ngày”). Thư mục repo (`.git`), `node_modules` và vùng bảo vệ (kể cả `Documents`/`Desktop` mặc định trong `protected.segments`) không thành cụm.
+2. **Đề xuất (verdict).** Mỗi cụm có `keep | compress | clean`, lý do tiếng Việt, độ tin cậy và nguồn. Luật tất định trả lời mọi cụm: bộ cài tải từ web ≥ 30 ngày → *dọn*; file tạm ≥ 14 ngày → *dọn*; tệp cá nhân ≥ 90 ngày → *nén*; còn lại *giữ*. **Tệp cá nhân tối đa là nén** (zip có kiểm tra, khôi phục được), không bao giờ xoá thẳng. Nút *Nhờ agent đánh giá* gửi `claude` chỉ mô tả cụm (họ tệp, số tệp, MB, số ngày, tên thư mục cuối, % tải từ web) — **không** đường dẫn đầy đủ, **không** tên tệp; kết quả đi qua bộ lọc (cụm bịa bị loại, `clean` trên tệp cá nhân bị hạ thành `compress`, agent không tự cấp quyền tự động) và được nhớ 30 ngày theo `verdictKey` ở `state\verdicts.json`.
+3. **Hành động.** UI chỉ gửi `clusterId` + `compress|clean`; server tự giải ra tệp từ kiểm kê và mỗi tệp đi qua `plan → approve → apply` (allowlist `cluster-file`, kiểm lại ngay trước khi làm, vùng bảo vệ, tệp đang được tiến trình khác giữ thì bỏ qua, journal).
+
+**Action registry và mức tự chủ.** Mọi việc tự động hoá đi qua một cửa duy nhất, `Invoke-RgAction` (`scripts\rg-autonomy.ps1`): `clean-cache`, `archive-cluster`, `clean-cluster`, `lower-priority`, `end-process`. Mỗi action có schema tham số, nhóm và mức yêu cầu; agent chỉ **chọn id** và tham số hợp lệ, không phát lệnh shell. Mỗi nhóm việc có một mức trong `policy.json` → `autonomy`:
+
+| Mức | Ý nghĩa |
+|---|---|
+| **L0 Tắt** | Không đụng tới, không nhắc. |
+| **L1 Đề xuất** | Chỉ báo cáo. Mặc định cho nhóm mới. |
+| **L2 Chờ duyệt** | Trợ lý chuẩn bị sẵn, bạn bấm một lần. |
+| **L3 Tự động** | Tự làm khi có áp lực, trong ngân sách của chính sách (`maxGBPerRun`, ổ đích, vùng bảo vệ), có biên lai. |
+
+Nhóm chạm vào **tệp cá nhân, tiến trình hoặc thư mục build** bị chặn trần **L2**; chỉ cache dev đủ tuổi và tệp tạm có thể lên L3. Hạ mức luôn được; **nâng lên L3 cần PIN**. Nhóm chưa đặt mức tường minh giữ hành vi cũ (kế thừa category `auto/ask/keep`). Mục `young`, mục chỉ-báo-cáo và mục agent đang giữ không bao giờ tự dọn ở bất kỳ mức nào. Sau mỗi lượt dọn thật trợ lý **đo lại**: vẫn thiếu chỗ thì báo **một lần** (banner ở Trang chủ, có nút Hoãn); chỉ báo lại khi máy đã xuống dưới mốc rồi vượt lại, hoặc hết hạn hoãn. Trợ lý **đề nghị nâng** mức khi đủ số lượt chạy thử không lỗi (`autonomy.promoteMinRuns`, `promoteMinDays`) và **tự hạ** khi bản nén bị khôi phục nhiều hoặc dọn lỗi nhiều lần (`demoteRestoreRate`, `demoteFailures`).
+
+**Dừng khẩn cấp:** nút ở Trang chủ/Cài đặt, `POST /api/panic` hoặc `rg panic` — tắt chính sách tự động và huỷ mọi job nền của Resource Guard (xác minh dòng lệnh khớp `rg-*.ps1` trước khi dừng). Không cần PIN; bật lại chính sách thì cần PIN.
+
+**Phiên agent (lease) và hook.** `rg hooks print [-Heavy]` in đoạn JSON hook cho `~/.claude/settings.json` (Resource Guard **không tự sửa** file của bạn). Hook ghi lease cho phiên, giữ chỗ RAM cho build/test (preflight), đếm subagent đang chạy và chặn khi tài nguyên cạn; hook **không bao giờ lưu prompt, transcript hay tin nhắn cuối**. Lỗi nội bộ của hook luôn thoát 0 (không làm hỏng phiên làm việc). Tiến trình build/test/dev trong cây tiến trình của phiên giữ lease cũng được nhận ra (ledger quan sát) để kết thúc/giải thích đúng chủ.
 
 ## Kiến trúc
 
@@ -192,7 +267,9 @@ rg-server.ps1  ── vòng lặp đơn luồng: lấy mẫu → ghi state\live.
    │      rg-scan.ps1     quét đĩa / ứng viên dọn
    │      rg-cleanup.ps1  dọn mục người dùng tick
    │      rg-auto.ps1     một lượt dọn tự động theo chính sách
-   │      rg-agent.ps1    gọi claude để đánh giá
+   │      rg-agent.ps1    gọi claude để đánh giá (mục dọn, hoặc cụm tệp với -Mode clusters)
+   │      rg-assistant-act.ps1  nén/dọn một cụm theo clusterId
+   │      rg-scan.ps1 -Mode inventory   kiểm kê metadata cho "Báo cáo của trợ lý"
    └─ ui\*  (vanilla JS, SVG, không phụ thuộc thư viện ngoài)
 ```
 
@@ -218,12 +295,19 @@ resource-guard/
 │   ├── rg-cleanup.ps1         # dọn mục người dùng chọn (theo key)
 │   ├── rg-auto.ps1            # lượt dọn tự động
 │   ├── rg-agent.ps1           # dựng payload, gọi claude, lọc kết quả
+│   ├── rg-assistant.ps1       # kiểm kê metadata, cụm tất định, verdict, báo cáo, hành động trên cụm
+│   ├── rg-assistant-act.ps1   # job nén/dọn một cụm (UI chỉ gửi clusterId)
+│   ├── rg-autonomy.ps1        # action registry, mức tự chủ L0-L3, banner/chống lặp, nâng-hạ mức, dừng khẩn cấp
+│   ├── rg-hook.ps1            # điểm vào cho hook Claude Code (lease, preflight, subagent); luôn thoát 0 khi lỗi nội bộ
 │   ├── rg-elevate.ps1 / rg-elevated-clean.ps1   # dọn bằng quyền admin (UAC)
 │   ├── rg-restore.ps1         # giải nén bản zip về chỗ cũ
+│   ├── spikes/                # spike đã đo (usn-probe, rm-probe, hook-probe), không dùng trong sản phẩm
 │   └── Install-Watcher.ps1    # tự chạy khi đăng nhập
 ├── ui/                     # dashboard (HTML/CSS/JS thuần)
-├── tests/Acceptance.ps1    # bộ test nghiệm thu
+├── tests/Acceptance.ps1    # bộ test nghiệm thu (gọi thêm Acceptance-Auto.ps1: journal, kill có xác minh, lease, trợ lý, tự chủ)
+├── tests/Bench-Watcher.ps1 # đo overhead của vòng lấy mẫu
 ├── tests/Check-Syntax.ps1  # kiểm cú pháp mọi .ps1 và .js
+├── .github/workflows/ci.yml  # CI: Check-Syntax + Acceptance trên windows-latest
 └── docs/                   # tài liệu kỹ thuật
 ```
 
@@ -243,6 +327,13 @@ Muốn đổi ngưỡng hoặc thư mục gốc, sao chép `config.default.json`
 | `cleanup.staleRepo`, `largeItem`, `apps` | Ngưỡng cho repo cũ, mục lớn, ứng dụng |
 | `scan.autoRefreshHours`, `scan.cpuMaxPct` | Tự làm mới kết quả quét ổ khi máy rảnh (giờ; `0` = tắt) và ngưỡng CPU coi là rảnh |
 | `protected.segments` | Các segment đường dẫn không bao giờ bị xoá (`.git`, `.ssh`, `Documents`…) |
+| `inventory.*` | Kiểm kê của trợ lý: `roots`, `hiddenRoots`, `hiddenExt`, giới hạn (`maxFiles`, `maxSeconds`), ngưỡng cụm (`minClusterFiles`, `minClusterMB`) và tuổi (`keepRecentDays` 30, `compressAfterDays` 90, `installerCleanAfterDays` 30, `tempCleanAfterDays` 14) |
+| `lease.*` | Phiên agent: TTL lease/giữ chỗ/subagent, thời gian khởi động (`warmupSec`), tên tiến trình agent |
+| `autonomy.*` | Ngưỡng đề nghị nâng/hạ mức tự chủ (`promoteMinRuns`, `promoteMinDays`, `demoteRestoreRate`, `demoteMinArchives`, `demoteFailures`, `windowDays`) |
+| `retention.*` | Giữ `plans` (60 ngày), log (30 ngày), journal (4096 KB) |
+| `cleanup.heldProbe` | Bỏ qua mục có tệp đang được tiến trình khác giữ (Restart Manager); `false` = tắt |
+
+`config.json` của bạn được **gộp sâu** với `config.default.json`: khoá thiếu lấy giá trị mặc định, nên thêm khoá mới ở bản cập nhật không làm máy cũ hỏng. Config lỗi cú pháp thì dùng mặc định và ghi `config-error` vào log.
 
 ## An toàn
 
@@ -254,6 +345,9 @@ Muốn đổi ngưỡng hoặc thư mục gốc, sao chép `config.default.json`
   - *xoá*: allowlist theo `kind` + `workspaceRoots`, không junction/symlink, không có segment `.git/.claude/.codex/.ssh/…`, đủ tuổi; mục do tài khoản khác (SYSTEM) sở hữu bị chặn ở đường xoá thường;
   - *repo cũ*: kiểm lại trạng thái git ngay trước khi xoá; không xác minh được thì không xoá.
 - Không kill agent/infra/system. VHDX của WSL/Docker chỉ báo cáo. Tiến trình không có trong ledger chỉ được báo cáo, không bao giờ kill.
+- **Kết thúc tiến trình từ app** chỉ cho lớp an toàn (build, test, máy chủ dev, trình quản lý gói, compiler, language server, ứng dụng runtime; hệ thống, bảo mật, dịch vụ, Docker/SQL/WSL, vùng bảo vệ và chính Resource Guard thì không bao giờ). Dùng một hàm duy nhất, `Stop-RgProcessVerified`: kiểm PID + thời điểm khởi động + tên ngay trước khi làm, thử đóng êm, chờ, buộc dừng, rồi **xác minh đã thoát** (cả cây con thuộc nhóm cho phép). Tiến trình agent đang giữ lease cần thêm PIN.
+- **Journal ghi-trước** (`state\journal.jsonl`): mỗi lần xoá, nén, khôi phục, kết thúc tiến trình ghi `intent` rồi `done|failed`; không ghi được `intent` thì **không làm**. Lần khởi động sau, `intent` mồ côi được báo và đóng là `interrupted`; plan xoá dở có thể chạy tiếp (kiểm lại từng mục). Lỗi ghi file/log không bị nuốt: hiện ở `/api/health` và `state\io-health.json`.
+- Mỗi loại mục có cách tái tạo rõ ràng (tái tạo được / nén zip khôi phục được / vĩnh viễn) hiện trong biên lai trước khi bạn duyệt.
 - **Vùng bảo vệ thắng mọi thứ**: engine tự dọn và cả thao tác chọn tay đều bỏ qua mục nằm trong (hoặc chứa) thư mục bảo vệ / tiến trình khớp tên.
 - Mọi thao tác ghi vào `logs\rg-YYYYMMDD.jsonl`; lỗi (ví dụ file bị khoá) ghi rõ nguyên nhân.
 
@@ -276,15 +370,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Acceptance.ps1   #
 
 Kiểm cú pháp nhanh (mọi `.ps1` và `.js`): `powershell.exe -NoProfile -File tests\Check-Syntax.ps1`.
 
-Kết quả hiện tại trên Windows PowerShell 5.1: **374 pass, 0 fail**. Dự án nhắm tới Windows PowerShell 5.1 (có sẵn trên Windows); PowerShell 7+ (`pwsh`) không bắt buộc và chưa được kiểm.
+Bộ test gồm `Acceptance.ps1` (lõi), `Acceptance-Auto.ps1` (tự động hoá) và `Acceptance-Agents.ps1` (kết nối agent: danh mục, hook ba agent, MCP qua stdio thật, nhà cung cấp CLI/HTTP giả, khoá API không lọt vào log); `Acceptance.ps1` gọi cả hai bộ sau. Đo hiệu năng một lượt lấy mẫu: `tests\Bench-Watcher.ps1` (máy dev 8 GB RAM, khoảng 260 tiến trình: lượt thường khoảng **130 ms**, lượt đầu khởi động nguội 4–5 giây; khoảng 0,4 giây CPU mỗi lượt, gần 3% một nhân ở chu kỳ 15 giây; khoảng 140 MB RAM).
+
+Kết quả hiện tại trên Windows PowerShell 5.1: **796 pass, 0 fail**. Dự án nhắm tới Windows PowerShell 5.1 (có sẵn trên Windows); PowerShell 7+ (`pwsh`) không bắt buộc và chưa được kiểm.
 
 Đừng chạy test khi một server Resource Guard khác đang chạy: mutex watcher dùng chung toàn máy nên nhóm `[api]` sẽ lỗi.
 
 ## Giới hạn đã biết
 
 - "Người duyệt" được thực thi bằng việc yêu cầu console tương tác. Đó là rào chắn thực dụng, **không phải ranh giới bảo mật**: agent chạy cùng user vẫn có thể sửa file plan. Ở P2 nên thêm deny rule/hook chặn lệnh `cleanup approve` từ agent.
-- Chưa có hook Claude/Codex (P2). `Test-ResourceBudget.ps1` hiện chỉ trả JSON + exit code; cần map theo giao thức hook của từng CLI và kiểm thử trước khi bật chặn.
-- Giới hạn subagent mới theo state, chưa đếm subagent đang chạy (cần SubagentStart/Stop hook).
+- Hook của Claude Code đã đo trên máy thật (`scripts/spikes/hook-probe.ps1`, kết quả ở `docs/ui-yeu-cau-va-quyet-dinh.md` §12). Hook của Gemini CLI và Cursor viết theo tài liệu công khai, **chưa đo trên máy thật**. Agent không có hook dùng MCP hoặc bọc lệnh; nếu không kết nối gì thì chỉ được nhận qua cây tiến trình. Đoạn cấu hình phải do bạn tự dán. Không có phản hồi từ server thì build/test **chạy tiếp** (ghi cảnh báo), subagent bị chặn khi Nguy cấp và hoãn khi Hạn chế.
+- Đếm subagent dựa vào SubagentStart/Stop kèm TTL; phiên chết đột ngột thì giữ chỗ tự hết hạn sau `lease.subagentTtlMin`.
+- Không dùng Job Object/giới hạn process group để chặn tài nguyên (ngoài phạm vi).
 - Phân loại tiến trình và "heavy task" dựa trên tên + regex command line (xem `config.default.json`), cần hiệu chỉnh theo máy thật.
 - Quét đĩa dùng PowerShell + C# đa luồng (`FindFirstFileExW`), chưa thay được các công cụ chuyên dụng như WizTree. Chưa có quét tăng dần bằng USN journal: spike cho thấy ổ C giữ journal chỉ vài giờ nên chưa đáng làm (chi tiết ở TECHNOTE).
 

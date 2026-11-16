@@ -106,7 +106,7 @@ Ghi chú thiết kế (đề xuất, chưa chốt):
 - Job Object và giới hạn process group (ép giới hạn RAM/CPU lên cả nhóm tiến trình ở tầng Windows): chưa quyết, đề xuất để ngoài phạm vi.
 - Mức tự động cao nhất cho file cá nhân (hiện không bao giờ tự xoá, TECHNOTE §7.2). Đề xuất: "chờ duyệt rồi nén".
 - Nhóm tự động đầu tiên sau chế độ chạy thử. Đề xuất: cache dev đủ tuổi.
-- Chưa xác minh: nguồn tải qua `Zone.Identifier`, thời gian mở file gần nhất (có thể bị tắt trên Windows), cách xác định tiến trình đang giữ database, giao thức hook của Claude Code và Codex.
+- Đã xác minh ở spike C1 (xem §12): `Zone.Identifier`, thời gian mở file gần nhất, Restart Manager (giữ file), hook Claude Code. Còn chưa xác minh: giao thức hook của Codex (máy dev không cài), `SubagentStop`/`PreToolUse` trong thực tế.
 
 ## 10. Đánh giá GAP (2026-11-11, đối chiếu code)
 
@@ -116,7 +116,7 @@ Ghi chú thiết kế (đề xuất, chưa chốt):
 | Tiến trình nào được xử lý | Gần như đã có: nhóm cho phép + phải có trong ledger + giới hạn mỗi lượt | `rg-common.ps1`:1122-1133 |
 | Quản lý trước khi workload chạy | Preflight chỉ kiểm tra tại một thời điểm: chưa giữ chỗ, chưa có hook Claude/Codex, chưa đếm subagent đang chạy | `rg-common.ps1`:427-483; README (mục giới hạn) |
 | Cleanup phục hồi và xác minh | Đã có plan hash, approval, revalidate, zip có xác minh. Còn thiếu: kill chưa chờ và xác minh thoát, kind không nén xoá thẳng, chưa có journal ghi trước | `rg-common.ps1`:1042-1107, :1144-1147, :1170-1188, :1168-1169 |
-| Benchmark | Chưa có. Acceptance (TECHNOTE ghi 374 test) chạy trên fixture, chưa chạy lại gần đây; README ghi 132 test, lệch TECHNOTE | `tests/Acceptance.ps1`; §6 |
+| Benchmark | Đã có từ A5 (`tests/Bench-Watcher.ps1`). Acceptance chạy lại 2026-11-11: 725 pass / 0 fail; README và TECHNOTE đã đồng bộ 725 | `tests/Acceptance.ps1`; §6 |
 | U7 (nhóm "Tệp tạm & cache") | Chưa làm, cần biết tiến trình nào đang giữ file | §2 |
 
 ## 11. Lộ trình đề xuất (chưa chốt)
@@ -126,3 +126,41 @@ Ghi chú thiết kế (đề xuất, chưa chốt):
 3. Lease có fencing, giữ chỗ cho preflight, probe tiến trình đang giữ file (U7).
 4. Trợ lý hiểu máy ở chế độ chạy thử: cụm, hồ sơ từng cụm, báo cáo, giải thích tiến trình. Phần báo cáo chỉ đọc nên có thể làm song song từ bước 2.
 5. Tự động có ngân sách: vòng lặp thi hành trong phạm vi được cấp, đề nghị nâng mức theo số liệu (người dùng cấp bằng PIN), tự hạ mức khi bị khôi phục nhiều, có nút dừng khẩn cấp.
+
+## 12. Kết quả spike C1 (2026-11-11, máy dev Windows 11 build 26200, không admin)
+
+Chạy bằng `scripts/spikes/rm-probe.ps1 -Json` và `scripts/spikes/hook-probe.ps1 -Json` (chỉ đọc, file tạm trong `%TEMP%`, tự xoá). Trả lời mục "Chưa xác minh" ở §9.
+
+| Câu hỏi | Kết quả | Hệ quả cho phase sau |
+|---|---|---|
+| Restart Manager (`RmGetList`) cho biết process nào đang giữ file, không cần admin? | Có. Thấy cả process hiện tại, process con, và file mở `FileShare.None`; trả PID, tên, loại (`console`, `service`…), start time khớp `Win32_Process.CreationDate`. ~11–14 ms/lần hỏi. | C2 dùng được. Start time cho phép kiểm danh tính (PID + start). |
+| RM với **thư mục**? | Không: `RmGetList` trả lỗi 5 (access denied) khi đăng ký thư mục. | C2 phải hỏi **từng file** (mẫu giới hạn, ưu tiên file lớn/mới sửa), không hỏi cả thư mục; mục không probe được thì coi là "không rõ", không xoá tự động. |
+| `Zone.Identifier` (nguồn tải) đọc được bằng PS 5.1? | Có: `Get-Content -Stream Zone.Identifier` đọc `ZoneId`, `HostUrl`; `Copy-Item` giữ luồng. | D1 có thể ghi `zoneId` (chỉ số, không ghi URL vào payload gửi agent). Mục không có luồng này là bình thường. |
+| Thời gian truy cập cuối (atime) có cập nhật? | Máy này: `DisableLastAccess = 2` (hệ thống quản lý, **bật**); đọc file làm atime nhảy. Máy khác có thể tắt (giá trị 1/3). | D1 chỉ dùng atime như gợi ý phụ, luôn kèm mtime; không tin atime khi `fsutil` báo tắt. |
+| Hook của Claude Code chạy được với settings tạm (`claude -p --settings <file>`)? | Có, không động tới `~/.claude/settings.json`. Hook nhận **JSON qua stdin**. Sự kiện quan sát: `SessionStart` (`source`), `UserPromptSubmit`, `Stop`, `SessionEnd` (`reason`). `PreToolUse`, `PostToolUse`, `SubagentStop` có khai báo nhưng chưa kích hoạt vì lượt thử không dùng tool. | C3 dùng `SessionStart/SessionEnd` để đăng ký/huỷ lease, `Stop` để heartbeat. Đếm subagent qua `SubagentStop` cần kiểm thêm trong C3 bằng một lượt có Task. |
+| Trường chung của payload hook | `session_id`, `transcript_path`, `cwd`, `hook_event_name`; thêm theo sự kiện (`source`, `reason`, `prompt`, `permission_mode`, `last_assistant_message`…). | Ledger lấy `session_id` làm khoá lease; **không** lưu `prompt`/`last_assistant_message`/`transcript_path` vào state. |
+| Codex? | Máy này **không cài** `codex`: giao thức chưa xác minh. | C3 chỉ hỗ trợ Claude Code bằng hook; tiến trình Codex vẫn được quan sát qua cây tiến trình (tầng 2 của ledger). |
+
+Ghi chú: CLI `claude` in cảnh báo đăng nhập hết hạn trên stderr nhưng lượt thử vẫn chạy (exit 0). Spike không đổi code sản phẩm.
+
+## 13. Kết quả triển khai `plan-automation` (2026-11-11)
+
+Đã làm A1–E4 (journal, kill có xác minh, ledger hai tầng + hook, kiểm kê → cụm → báo cáo trợ lý, giải thích tiến trình, action registry, mức tự chủ L0–L3, chống lặp, tự hạ mức, dừng khẩn cấp). Cách chi tiết ở TECHNOTE §7 và §8, README mục "Trợ lý tự động hoá".
+
+**Các giả định ở §9 đã được áp dụng trong code và chủ sản phẩm đã xác nhận cả 5 (2026-11-11):**
+1. Kết thúc tiến trình: một cú bấm + hộp xác nhận trước → sau; chỉ cần PIN khi tiến trình đang giữ lease/ledger của agent.
+2. Preflight không có trả lời từ server: build/test chạy tiếp (ghi cảnh báo); subagent bị chặn khi Nguy cấp, hoãn khi Hạn chế.
+3. Nhóm tự động đầu tiên là cache dev đủ tuổi; file cá nhân tối đa là “duyệt rồi nén”, không bao giờ tự xoá; `node_modules`, `bin/obj` luôn cần xác nhận (trần L2).
+4. Job Object: ngoài phạm vi.
+5. Giữ `claude -p --model haiku`; payload chỉ metadata cụm.
+
+**Chỗ lệch khỏi plan hoặc giới hạn đã biết:**
+- Mức mặc định là L1, nhưng nhóm có category cũ (`cache-aged`, `temp-entry`…) kế thừa category (auto=L3, ask=L2, keep=L0) để không đổi hành vi dọn tự động hiện có của người đã dùng.
+- `Documents` và `Desktop` nằm trong `protected.segments` mặc định nên cụm file thực tế chỉ ra từ `Downloads` (và cụm góc khuất ở `AppData`, chỉ báo cáo). Người dùng muốn trợ lý nhìn thư mục khác phải sửa danh sách bảo vệ.
+- D4: giải thích tiến trình hoàn toàn tất định; chưa cho agent diễn giải lại dữ liệu có cấu trúc.
+- Hook chỉ có cho Claude Code (`rg hooks print`, không tự sửa settings); Codex chưa xác minh giao thức nên chỉ quan sát qua cây tiến trình.
+- Chưa bật L3 cho nhóm nào ở máy thật: cần chạy thử ≥ 1 tuần rồi xem số liệu ở thẻ Mức tự chủ.
+- `docs/img` đã chụp lại sau đợt đổi UI (2026-11-11), trên sandbox trống dữ liệu: ô "Việc có thể làm" và "Báo cáo của trợ lý" đang ở trạng thái trống trong ảnh.
+- E2e trên fixture (scratchpad, config override trỏ vào fixture): nén cụm xlsx và khôi phục — đã chạy; PIN nâng L3 (sai PIN, thiếu PIN, đúng PIN) và dừng khẩn cấp (bật on → panic → off) — đã chạy. **Chưa xong:** kết thúc tiến trình giả — `/api/processes` chưa đưa tiến trình node mới vào cache sau ~1 phút (nhóm `other`, `start` rỗng), nên server từ chối kết thúc; hành vi an toàn nhưng chưa rõ chu kỳ làm mới cache.
+- **Lỗi đã sửa trong đợt này:** khôi phục song song làm mất cờ `restoredUtc` (archives.json đọc-sửa-ghi không khoá: 12 job → mất 11). Nay có khoá `Local\ResourceGuardArchives` và đọc nghiêm ngặt; test hồi quy trong `Acceptance-Auto.ps1`.
+- **Chưa quyết định (cần chủ sản phẩm):** ước lượng dung lượng khi nén cố định 50% (`rg-assistant.ps1`), nên cụm `.xlsx` (vốn là zip) báo "tiết kiệm ~39 MB" nhưng thực tế giải phóng 0. Đề xuất: loại đuôi đã nén (xlsx, docx, pptx, zip, jpg, mp4…) khỏi verdict `compress`. Đổi này làm đổi 4 khẳng định trong `Acceptance-Auto.ps1` (dòng 429, 449, 502, 608) và cần duyệt trước.

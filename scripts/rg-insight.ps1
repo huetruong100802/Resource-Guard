@@ -461,6 +461,11 @@ function Get-RgAdvice($Candidates = $null, $Breakdowns = $null, $Agent = $null, 
                     auto = 'ask'; cumBytes = $cum; reachesGoal = $reach; agent = $null
                 }
             }
+            # Hai bước cùng tiêu đề (vd. "Đóng Trình duyệt" cho msedge và msedgewebview2): thêm phần đuôi của khoá workload để người dùng phân biệt được.
+            $dupT = @{}; foreach ($rs in $rsteps) { $dupT[[string]$rs.title] = 1 + [int]$dupT[[string]$rs.title] }
+            foreach ($rs in $rsteps) {
+                if ($dupT[[string]$rs.title] -gt 1) { $tail = ([string]$rs.workload -split '\|')[-1]; if ($tail -and ([string]$rs.title) -notmatch [regex]::Escape($tail)) { $rs.title = ('{0} ({1})' -f $rs.title, $tail) } }
+            }
             $groups += [pscustomobject]@{ rank = [int]$stateRank[$rState]; idx = $gIdx; steps = @($rsteps) }; $gIdx++
             $afterAvail = $avail + $cum / 1GB
             $afterPlan += [ordered]@{ resource = 'ram'; drive = 'RAM'; freeGB = [math]::Round($afterAvail, 1); state = (Get-RgRamState $afterAvail $Cfg); shortBytes = [long][math]::Max(0L, [long]($need - $cum))

@@ -65,7 +65,7 @@
     check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>', alert: '<path d="M12 4l9 16H3L12 4zM12 10v4M12 17.5v.5"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     back: '<path d="M15 6l-6 6 6 6"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/>'
   };
-  RG.icon = function (n, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[n] || '') + '</svg>'; };
+  RG.icon = function (n, cls) { return '<svg class="ic ' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[n] || '') + '</svg>'; };
 
   /* ---------- API ---------- */
   RG.api = function (path, opt) {
@@ -294,6 +294,16 @@
   };
 
   /* ---------- Chính sách ---------- */
+  /* Bản nháp có khác chính sách đã lưu không. So sánh sau khi chuẩn hoá: `drives` rỗng có thể là {}, [] hoặc null tuỳ nơi tạo
+     (server trả mảng rỗng, màn hình đổi thành object) nên so chuỗi thô sẽ báo "đã đổi" dù người dùng chưa sửa gì. */
+  function normPol(p) {
+    var c = RG.clone(p || {});
+    if (!c.drives || Array.isArray(c.drives) || !Object.keys(c.drives).length) c.drives = {};
+    if (!c.autonomy || Array.isArray(c.autonomy)) c.autonomy = {};
+    delete c.updatedUtc;
+    return JSON.stringify(c);
+  }
+  RG.policyDirty = function () { return !!(S.draft && S.policy) && normPol(S.draft) !== normPol(S.policy); };
   RG.loadPolicy = function () {
     return RG.api('/api/policy').then(function (j) {
       S.policy = j.policy; S.pinConfigured = j.pinConfigured; S.kinds = j.kinds;
@@ -375,7 +385,7 @@
   RG.startJob = function (path, body, okMsg) {
     return RG.api(path, { method: 'POST', body: body || {} }).then(function (j) {
       if (okMsg) RG.toast(j.already ? 'Tác vụ này đang chạy.' : okMsg);
-      var n = { '/api/disk/scan': 'breakdown', '/api/candidates/scan': 'candidates', '/api/cleanup/apply': 'cleanup', '/api/cleanup/elevate': 'cleanup', '/api/archive/restore': 'cleanup','/api/auto/run': 'auto', '/api/agent/run': 'agent' }[path];
+      var n = { '/api/disk/scan': 'breakdown', '/api/candidates/scan': 'candidates', '/api/cleanup/apply': 'cleanup', '/api/cleanup/elevate': 'cleanup', '/api/archive/restore': 'cleanup','/api/auto/run': 'auto', '/api/agent/run': 'agent', '/api/assistant/act': 'cleanup' }[path];
       if (n) S.jobs[n] = { status: 'running', pct: 0, message: 'đang khởi động…', startedUtc: new Date().toISOString(), pending: true, t0: Date.now() };
       RG.watchJobs();
       if (RG.pages[RG.cur] && RG.pages[RG.cur].jobs) RG.pages[RG.cur].jobs();
